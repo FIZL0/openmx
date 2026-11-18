@@ -463,24 +463,7 @@ impl Score {
                 self.start_flat(FRONTFLIP, points);
                 *w = 0;
             }
-            if s.wrecked {
-                *w = 0;
-            } else if s.airborne {
-                let (up, forward) = (s.up_y, s.forward_y);
-                if F::ZERO < up && forward < F(0.79) {
-                    match *w {
-                        2 => *w = 3,
-                        0 | 3 => {}
-                        _ => *w = 0,
-                    }
-                } else if up < F::ZERO && forward < F::ZERO && *w == 0 {
-                    *w = 1;
-                } else if up < F::ZERO && F::ZERO < forward && *w == 1 {
-                    *w = 2;
-                }
-            } else if *w != 3 && *w != 0 {
-                *w = 0;
-            }
+            step_front_watch(w, s);
         }
     }
 
@@ -536,6 +519,359 @@ impl Score {
     }
 }
 
+/// **MX vs. ATV's card beside MX Unleashed's (S358)**: what a ride on a trick pack keeps besides the
+/// [`Score`] it scores on, on [`crate::trick_pack::State::score`] — so a ride on the original's tricks
+/// carries none of it, and its wire and hash are what they were.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Atv {
+    /// The stunt table's repeat scales the banks have lowered ([`Score::atv_repeat`]), by the port's
+    /// trick id, oldest first. A stunt not listed is at 1, as every stunt starts.
+    pub scales: Vec<Scale>,
+    /// The bank's clock: set to [`ATV_BANK`] while a stunt runs off one wheel, run down on the ground
+    /// with none running, and the combo banked when it runs out ([`Score::atv_frame`]).
+    pub bank: F,
+    /// The wheelie's and the stoppie's time past their first second on the one wheel: the stunt
+    /// starts when it is still 0, and the combo banks when the bike comes off the wheel with it over 0.
+    pub wheel: [F; 2],
+}
+
+/// One stunt's repeat scale ([`Atv::scales`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scale {
+    pub id: u8,
+    pub scale: F,
+}
+
+/// One stunt's two numbers off a trick pack's table (its `PointValue` and `HoldPointValue`): what its
+/// node opens at, and what it grows at a second while it is held ([`Score::atv_start`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Values {
+    pub point: F,
+    pub hold: F,
+}
+
+/// The rows MX vs. ATV's stunts score off where a pack's table has none of that name: state 4's (R17).
+/// Its tricks are all 1000 and 1000 a second, the backflip 2000 and 10 000, the 360s 2000 and 15 000.
+pub const ATV_TRICK: Values = Values { point: F(1000.0), hold: F(1000.0) };
+pub const ATV_BACKFLIP: Values = Values { point: F(2000.0), hold: F(10000.0) };
+pub const ATV_WHEEL: Values = Values { point: F(1000.0), hold: F(1000.0) };
+pub const ATV_THREE_SIXTY: Values = Values { point: F(2000.0), hold: F(15000.0) };
+/// The least a stunt's node opens at, and grows at.
+pub const ATV_LEAST: F = F(10.0);
+/// MX vs. ATV's node granularity, and its manager's.
+pub const ATV_GRANULARITY: F = F(1.0);
+/// How long on the ground with no stunt running before the combo banks.
+pub const ATV_BANK: F = F(0.2);
+/// The stunt table's repeat numbers (state 4's table head, R17): a banked stunt's scale is
+/// multiplied by [`ATV_REPEAT`], to no lower than [`ATV_REPEAT_FLOOR`]; banking one at full scale
+/// first divides every other scale by [`ATV_RECOVER`], back up to 1 at most.
+/// The recovery is one bit over 0.95 in the table (0x3f733334), and the oracle tells the two apart.
+pub const ATV_RECOVER: F = F(f32::from_bits(0x3f73_3334));
+pub const ATV_REPEAT: F = F(0.8);
+pub const ATV_REPEAT_FLOOR: F = F(f32::from_bits(0x3ed1_b719));
+/// A node's flags past [`flag`]'s, MX vs. ATV's: it is still running, and it is held (grows).
+pub mod atv_flag {
+    pub const LIVE: u32 = 0x10;
+    pub const MARKED: u32 = 0x20;
+}
+
+/// What the rider's tick hands [`Score::atv_frame`] for a pack ride: the rows its own stunts score
+/// off, and whether a trick's clip is running.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AtvRows {
+    pub backflip: Values,
+    pub wheelie: Values,
+    pub stoppie: Values,
+    pub trick_running: bool,
+}
+
+/// **MX vs. ATV's way (S358, R17)**, on a ride with a trick pack on. The card is the same as MX
+/// Unleashed's — the original's two games share it, node for node — but the stunts score
+/// differently: every stunt pushes its own node at its start, worth its `PointValue` and growing at
+/// its `HoldPointValue` a second while it is held (both times the stunt's repeat scale, at least
+/// [`ATV_LEAST`]), and the whole combo banks after [`ATV_BANK`] on the ground, at its sum times its
+/// node count. [`Score::combo`] is the run open, [`Score::scoring`] a node still running; a node is
+/// running ([`atv_flag::LIVE`]) until it ends and grows while it is held ([`atv_flag::MARKED`]). A
+/// wreck loses the combo as [`Score::wrecked`] does: the original's cancel leaves the card exactly as
+/// that does.
+impl Score {
+    /// A stunt's repeat scale.
+    pub fn atv_scale(atv: &Atv, id: u8) -> F {
+        atv.scales.iter().find(|s| s.id == id).map_or(F::ONE, |s| s.scale)
+    }
+
+    /// The stunts a start keeps running: the backflip, the 360s, the wheelie and the stoppie, and the
+    /// port's front flip with them.
+    pub fn atv_kept(id: u8) -> bool {
+        matches!(id, BACKFLIP | WHEELIE | STOPPIE | FRONTFLIP | THREE_SIXTY_LEFT | THREE_SIXTY_RIGHT)
+    }
+
+    /// **A stunt started** (`id`, its row; `held`, whether its node grows from the start — the
+    /// backflip's and the wheel's do, a trick's waits for its hold): any stunt but the kept ones first
+    /// ends the running nodes from the newest back to the first kept one; then the combo opens unless
+    /// one is, and the stunt's node is pushed and marked.
+    pub fn atv_start(&mut self, atv: &Atv, id: u8, row: Values, held: bool) {
+        if !Score::atv_kept(id) {
+            let mut k = 0;
+            while k < self.nodes.len() && self.nodes[k].flags & atv_flag::LIVE != 0 {
+                let running = self.nodes[k].id;
+                if Score::atv_kept(running) {
+                    break;
+                }
+                self.atv_end(running);
+                k += 1;
+            }
+        }
+        if !self.combo && self.may_open() {
+            self.open();
+        }
+        let scale = Score::atv_scale(atv, id);
+        let base = (row.point * scale).max(ATV_LEAST);
+        let rate = (row.hold * scale).max(ATV_LEAST);
+        self.push(base, F::ZERO, rate, F::ONE, ATV_GRANULARITY, id, flag::FLOOR | flag::TIMED | atv_flag::LIVE);
+        self.atv_mark(id, held);
+    }
+
+    /// **A stunt held or let go**: the last running node of `id` not held (or held) is marked (or not).
+    pub fn atv_mark(&mut self, id: u8, on: bool) {
+        let hit = self.nodes.iter().rposition(|n| {
+            n.id == id && n.flags & atv_flag::LIVE != 0 && (n.flags & atv_flag::MARKED == 0) == on
+        });
+        if let Some(k) = hit {
+            let n = &mut self.nodes[k];
+            n.flags = if on { n.flags | atv_flag::MARKED } else { n.flags & !atv_flag::MARKED };
+        }
+    }
+
+    /// **A stunt ended** (`id`): with the combo open, its last running node finished, landed.
+    pub fn atv_end(&mut self, id: u8) {
+        if self.combo {
+            let hit = self.nodes.iter().rposition(|n| n.id == id && n.flags & atv_flag::LIVE != 0);
+            self.atv_finish(hit, F::ONE, true);
+        }
+    }
+
+    /// The node `hit` stopped and let go, then landed (`ok`) its points times `x` and rounded, or
+    /// not landed no longer counting; then whether a node still runs. Nothing without a running node.
+    fn atv_finish(&mut self, hit: Option<usize>, x: F, ok: bool) {
+        if !(self.scoring && self.combo) {
+            return;
+        }
+        if let Some(n) = hit.and_then(|k| self.nodes.get_mut(k)) {
+            n.flags &= !(atv_flag::LIVE | atv_flag::MARKED);
+            if !ok {
+                n.flags &= !flag::VALID;
+            } else {
+                n.points = n.points * x;
+                n.round();
+            }
+        }
+        self.scoring = self.nodes.iter().any(|n| n.flags & atv_flag::LIVE != 0);
+    }
+
+    /// **The combo banked** (the stunt end on every stunt): each running node finished, landed, and
+    /// the combo tallied at its node count.
+    pub fn atv_bank(&mut self, atv: &mut Atv) {
+        if self.combo {
+            self.atv_close(F::ONE, true);
+            let count = self.count();
+            self.atv_tally(atv, count, true);
+        }
+    }
+
+    /// **The combo lost** (the stunt cancel on every stunt): each running node not landed, and the
+    /// combo closed with nothing added. The card ends as [`Score::wrecked`] leaves it.
+    pub fn atv_cancel(&mut self, atv: &mut Atv) {
+        if self.combo {
+            self.atv_close(F::ZERO, false);
+            self.atv_tally(atv, F::ZERO, false);
+        }
+    }
+
+    /// Every running node finished, oldest last.
+    fn atv_close(&mut self, x: F, ok: bool) {
+        for k in 0..self.nodes.len() {
+            if self.nodes[k].flags & atv_flag::LIVE != 0 {
+                self.atv_finish(Some(k), x, ok);
+            }
+        }
+    }
+
+    /// The combo tallied: the nodes' points summed (every node's, newest first), the sum times `x`
+    /// added to the total when `ok`, the total floored to the manager's granularity, and with `ok`
+    /// each banked stunt's repeat scale lowered ([`Score::atv_repeat`]) — once per node, so a stunt
+    /// twice in the combo is lowered twice. With [`Score::lockout`] up the sum waits as
+    /// [`Score::close`]'s does.
+    fn atv_tally(&mut self, atv: &mut Atv, x: F, ok: bool) {
+        self.combo = false;
+        self.scoring = false;
+        self.growing = false;
+        let mut sum = F::ZERO;
+        for n in &mut self.nodes {
+            sum = sum + n.points;
+            n.flags &= !(atv_flag::LIVE | atv_flag::MARKED);
+        }
+        if ok && self.lockout {
+            self.pending = self.pending + sum * x;
+            self.settling = LOCKOUT;
+        } else if ok {
+            self.total = fpu::Acc::adda(F::ZERO, self.total).madd(sum, x);
+        }
+        self.total = F(fpu::from_i32((self.total / ATV_GRANULARITY).to_i32())) * ATV_GRANULARITY;
+        if ok {
+            for k in 0..self.nodes.len() {
+                Score::atv_repeat(atv, self.nodes[k].id);
+            }
+        }
+        self.combo_points = F::ZERO;
+        self.nodes.clear();
+    }
+
+    /// **A banked stunt's repeat scale lowered**: banked at full scale, every scale first goes back
+    /// up by [`ATV_RECOVER`] (to 1 at most); then its own times [`ATV_REPEAT`], no lower than
+    /// [`ATV_REPEAT_FLOOR`].
+    pub fn atv_repeat(atv: &mut Atv, id: u8) {
+        if Score::atv_scale(atv, id) == F::ONE {
+            for s in &mut atv.scales {
+                s.scale = (s.scale / ATV_RECOVER).min(F::ONE);
+            }
+            atv.scales.retain(|s| s.scale != F::ONE);
+        }
+        let scale = (Score::atv_scale(atv, id) * ATV_REPEAT).max(ATV_REPEAT_FLOOR);
+        match atv.scales.iter_mut().find(|s| s.id == id) {
+            Some(s) => s.scale = scale,
+            None => atv.scales.push(Scale { id, scale }),
+        }
+    }
+
+    /// **The manager's tick** for a pack ride: [`Score::grow`]'s, but every running node held grows
+    /// — `(base + held × rate) × mult`, rounded — and not only the newest.
+    pub fn atv_grow(&mut self, dt: F) {
+        if F::ZERO < self.gate_penalty {
+            self.gate_penalty = self.gate_penalty - dt;
+        }
+        if !self.combo || self.shut {
+            return;
+        }
+        self.combo_time = self.combo_time + dt;
+        if self.scoring {
+            for n in self.nodes.iter_mut().filter(|n| n.flags & (atv_flag::LIVE | atv_flag::MARKED) == atv_flag::LIVE | atv_flag::MARKED) {
+                n.held = n.held + dt;
+                n.points = fpu::Acc::adda(F::ZERO, n.base).madd(n.held, n.rate);
+                n.points = n.points * n.mult;
+                n.round();
+            }
+        }
+        let mut sum = F::ZERO;
+        for n in self.nodes.iter().filter(|n| n.flags & flag::VALID != 0) {
+            sum = sum + n.points;
+        }
+        self.combo_points = F(fpu::from_i32((sum / ATV_GRANULARITY).to_i32())) * ATV_GRANULARITY;
+    }
+
+    /// **The rider's tick** for a pack ride, after the trick clocks: the wheelie and stoppie (each
+    /// starts its stunt after a second on the one wheel, and coming off it banks the combo), the
+    /// bank's clock, then the backflip and the front flip — each starts its stunt, held, as the bike
+    /// goes past upright and ends it when it comes round. `front_flip` is the front flip's watch.
+    /// Answers whether the front flip came round.
+    pub fn atv_frame(&mut self, atv: &mut Atv, dt: F, s: &Sense, rows: AtvRows, front_flip: &mut u8) -> bool {
+        // A landing's bank waiting out the lockout (P243), as [`Score::frame_with`].
+        if F::ZERO < self.settling {
+            self.settling = self.settling - dt;
+            if self.settling <= F::ZERO {
+                self.settle();
+            }
+        }
+        let (front, rear) = (s.front, s.rear);
+        if s.wrecked {
+            self.wheelie = F::ZERO;
+            self.stoppie = F::ZERO;
+        } else if !front && rear && !s.slow {
+            self.atv_wheel(atv, dt, 0, WHEELIE, rows.wheelie);
+        } else if front && !rear && !s.slow {
+            self.atv_wheel(atv, dt, 1, STOPPIE, rows.stoppie);
+        } else if (front && rear) || (!s.airborne && s.slow) || (s.airborne && F(0.1) < s.hang_time) {
+            if F::ZERO < atv.wheel[0] || F::ZERO < atv.wheel[1] {
+                self.atv_bank(atv);
+            }
+            self.wheelie = F::ZERO;
+            self.stoppie = F::ZERO;
+            atv.wheel = [F::ZERO; 2];
+        }
+        // The bank's clock: held up while a stunt runs off one wheel, run down on the ground.
+        let running = rows.trick_running
+            || self.nodes.iter().any(|n| n.flags & atv_flag::LIVE != 0 && n.id != WHEELIE && n.id != STOPPIE);
+        if running && atv.wheel[0] <= F::ZERO && atv.wheel[1] <= F::ZERO {
+            atv.bank = ATV_BANK;
+        }
+        if !s.airborne && !running && F::ZERO < atv.bank {
+            atv.bank = atv.bank - dt;
+            if atv.bank <= F::ZERO {
+                self.atv_bank(atv);
+            }
+        }
+        // The backflip: started over the top, ended round; a watch forgotten part way ends it too.
+        let was = self.flip;
+        self.watch_flip(s);
+        if was == 0 && self.flip == 1 {
+            self.atv_start(atv, BACKFLIP, rows.backflip, true);
+        } else if was != 0 && was != 3 && (self.flip == 3 || self.flip == 0) {
+            self.atv_end(BACKFLIP);
+        }
+        if self.flip == 3 {
+            self.flip = 0;
+        }
+        let was = *front_flip;
+        step_front_watch(front_flip, s);
+        if was == 0 && *front_flip == 1 {
+            self.atv_start(atv, FRONTFLIP, rows.backflip, true);
+        } else if was != 0 && was != 3 && (*front_flip == 3 || *front_flip == 0) {
+            self.atv_end(FRONTFLIP);
+        }
+        let round = *front_flip == 3;
+        if round {
+            *front_flip = 0;
+        }
+        round
+    }
+
+    /// One wheel's clock run a frame (`k` 0 the wheelie, 1 the stoppie): past a second its time
+    /// counts, and the stunt starts, held, the frame it is still 0.
+    fn atv_wheel(&mut self, atv: &mut Atv, dt: F, k: usize, id: u8, row: Values) {
+        let clock = if k == 0 { &mut self.wheelie } else { &mut self.stoppie };
+        *clock = *clock + dt;
+        if *clock <= ONE_WHEEL {
+            return;
+        }
+        if atv.wheel[k] <= F::ZERO {
+            self.atv_start(atv, id, row, true);
+        }
+        atv.wheel[k] = atv.wheel[k] + dt;
+    }
+}
+
+/// The front flip watch's step (MD16): the backflip's mirrored, as [`Score::frame_with`] describes.
+fn step_front_watch(w: &mut u8, s: &Sense) {
+    if s.wrecked {
+        *w = 0;
+    } else if s.airborne {
+        let (up, forward) = (s.up_y, s.forward_y);
+        if F::ZERO < up && forward < F(0.79) {
+            match *w {
+                2 => *w = 3,
+                0 | 3 => {}
+                _ => *w = 0,
+            }
+        } else if up < F::ZERO && forward < F::ZERO && *w == 0 {
+            *w = 1;
+        } else if up < F::ZERO && F::ZERO < forward && *w == 1 {
+            *w = 2;
+        }
+    } else if *w != 3 && *w != 0 {
+        *w = 0;
+    }
+}
+
 /// The backflip's id.
 pub const BACKFLIP: u8 = 24;
 /// **The port's own (MD16):** the front flip's and MX vs. ATV's 360s' ids ([`crate::trick::Trick`]).
@@ -558,6 +894,18 @@ impl State for Node {
         w.f("extra", self.extra);
         w.f("held", self.held);
         w.f("granularity", self.granularity);
+    }
+}
+
+impl State for Atv {
+    fn walk(&self, w: &mut Walk<'_>) {
+        for s in &self.scales {
+            w.u8("scale.id", s.id);
+            w.f("scale", s.scale);
+        }
+        w.f("bank", self.bank);
+        w.f("wheel", self.wheel[0]);
+        w.f("wheel", self.wheel[1]);
     }
 }
 

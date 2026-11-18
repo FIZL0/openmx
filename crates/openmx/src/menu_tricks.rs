@@ -348,6 +348,7 @@ mod tests {
             },
             front_flip_points: F(10000.0),
             three_sixty_points: (F(4000.0), F(4500.0)),
+            values: Vec::new(),
         };
         let rows = rows(&set, Some(&moves));
         // The empty slot is left out.

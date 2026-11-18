@@ -7,9 +7,11 @@
 //! bike, card and table (`context/mxvatv-ps2/state04.ee.bin`), nothing hooked but the kernel's syscall
 //! stubs. Without the image every test skips (and says so).
 //!
-//! Nothing in the port is proved here: it still scores MX Unleashed's way (`game_sim::score`). These
-//! tests pin the original's numbers for the port that follows (journal 2026-11-16-r17-*).
+//! The first four pin the original's numbers (journal 2026-11-16-r17-*). The port that scores a trick
+//! pack's ride this way (S358, `game_sim::score::Score::atv_*`) is run beside the original on a
+//! generated sequence of the same calls: `the_port_scores_stunts_as_the_original`.
 
+use game_sim::score::{self, Atv, Score, Values};
 use ps2_float::{F, fpu};
 use ps2_oracle::{Ee, Kit, skip};
 
@@ -21,6 +23,7 @@ const END_STUNT: u32 = 0x004e_4db0;
 const CANCEL_STUNT: u32 = 0x004e_4e50;
 const SCORE_GROW: u32 = 0x0046_b210;
 const WRECK_ENTRY: u32 = 0x004e_2260;
+const MARK: u32 = 0x0046_b110;
 /// The 30 Hz tick the frame runs on (F31: these bits, not 1/30).
 const DT: u32 = 0x3d08_850a;
 
@@ -196,4 +199,117 @@ fn a_wreck_loses_the_backflip() {
     ee.call(CANCEL_STUNT, &[u64::from(BIKE), u64::MAX], &[], 100_000);
     assert_eq!(ee.f32_at(card(&ee) + 0xdc), total0);
     assert_eq!(ee.u32_at(card(&ee) + 8) & 0x60, 0, "combo closed");
+}
+
+/// The port's id for one of state 4's: its tricks 0–23 are the rider's 24 slots, and its five kept
+/// stunts the port's backflip, wheelie, stoppie and 360s.
+fn port_id(id: u32) -> u8 {
+    match id {
+        41 => score::BACKFLIP,
+        42 => score::WHEELIE,
+        43 => score::STOPPIE,
+        44 => score::THREE_SIXTY_LEFT,
+        45 => score::THREE_SIXTY_RIGHT,
+        _ => id as u8,
+    }
+}
+
+/// S358: the port's MX vs. ATV card against the original's, on 12 000 generated calls in runs of
+/// up to 40 — stunt starts (tricks 0–23 and the five kept, held or not), ends, marks, the manager's
+/// tick (state 4's dt or any up to 0.1 s), the bank and the wreck's cancel — compared after each: every
+/// node's words, the combo and running flags, the total, the combo's points, and every stunt's repeat
+/// scale; then one backflip banked to the repeat floor. The bike is put in the air (`+0x324` 0) so a trick's start scores, as it does in a jump.
+#[test]
+fn the_port_scores_stunts_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    ee.set_u32(BIKE + 0x324, 0);
+    let set = ee.u32_at(BIKE + 0x14f0);
+    let entry = |id: u32| set + 0x18 + 12 * id;
+    let row = |ee: &Ee, id: u32| {
+        let def = ee.u32_at(entry(id));
+        Values { point: F(ee.f32_at(def + 0x50)), hold: F(ee.f32_at(def + 0x54)) }
+    };
+    let ids: Vec<u32> = (0..24).chain(41..46).collect();
+    let mut port = Score { total: F(ee.f32_at(card(&ee) + 0xdc)), ..Score::default() };
+    let mut atv = Atv::default();
+    let mut seed = 0x5358_u64;
+    let mut pick = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut seen = [0u32; 7];
+    for step in 0..12_000u32 {
+        let id = ids[pick(ids.len() as u64) as usize];
+        let what = pick(if step % 40 == 39 { 1 } else { 100 });
+        let kind = match what {
+            0 if pick(4) == 0 => 6,
+            0..=1 => 5,
+            2..=24 => 0,
+            25..=39 => 1,
+            40..=49 => 2,
+            _ => 3 + u64::from(pick(2) == 0),
+        };
+        seen[kind as usize] += 1;
+        match kind {
+            0 => {
+                let held = pick(2);
+                ee.call(START_STUNT, &[u64::from(BIKE), u64::from(id), held], &[], 100_000);
+                port.atv_start(&atv, port_id(id), row(&ee, id), held == 1);
+            }
+            1 => {
+                end(&mut ee, i64::from(id));
+                port.atv_end(port_id(id));
+            }
+            2 => {
+                let on = pick(2);
+                ee.call(MARK, &[u64::from(manager(&ee)), u64::from(card(&ee)), on, u64::from(id), 0], &[], 100_000);
+                port.atv_mark(port_id(id), on == 1);
+            }
+            3 | 4 => {
+                let dt = if kind == 3 { f32::from_bits(DT) } else { (pick(1 << 24) as f32 / (1 << 24) as f32) * 0.1 };
+                let m = manager(&ee);
+                ee.call(SCORE_GROW, &[u64::from(m)], &[dt], 100_000);
+                port.atv_grow(F(dt));
+            }
+            5 => {
+                end(&mut ee, -1);
+                port.atv_bank(&mut atv);
+            }
+            _ => {
+                ee.call(CANCEL_STUNT, &[u64::from(BIKE), u64::MAX], &[], 100_000);
+                port.atv_cancel(&mut atv);
+            }
+        }
+        let c = card(&ee);
+        let flags = ee.u32_at(c + 8);
+        let got: Vec<Node> = port.nodes.iter().map(|n| Node {
+            flags: n.flags, id: u32::from(n.id), points: n.points.to_bits(), base: n.base.to_bits(), rate: n.rate.to_bits(),
+            mult: n.mult.to_bits(), extra: n.extra.to_bits(), held: n.held.to_bits(), granularity: n.granularity.to_bits(),
+        }).collect();
+        let want: Vec<Node> = nodes(&ee).into_iter().map(|n| Node { id: u32::from(port_id(n.id)), ..n }).collect();
+        let at = format!("step {step} (call {kind}, stunt {id})");
+        assert_eq!(got, want, "{at}: the nodes");
+        assert_eq!((port.combo, port.scoring), (flags & 0x20 != 0, flags & 0x40 != 0), "{at}: combo open, a node running");
+        assert_eq!(port.total.to_bits(), ee.u32_at(c + 0xdc), "{at}: the total");
+        assert_eq!(port.combo_points.to_bits(), ee.u32_at(c + 0xe0), "{at}: the combo's points");
+        for &k in &ids {
+            assert_eq!(Score::atv_scale(&atv, port_id(k)).to_bits(), ee.u32_at(entry(k) + 4), "{at}: stunt {k}'s repeat scale");
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 50), "every call taken: {seen:?}");
+    // The floor: one backflip banked alone ten times, which the mix above never reaches.
+    for round in 0..10 {
+        ee.call(START_STUNT, &[u64::from(BIKE), 41, 1], &[], 100_000);
+        port.atv_start(&atv, score::BACKFLIP, row(&ee, 41), true);
+        end(&mut ee, -1);
+        port.atv_bank(&mut atv);
+        let at = format!("backflip banked {round}");
+        assert_eq!(port.total.to_bits(), ee.u32_at(card(&ee) + 0xdc), "{at}: the total");
+        for &k in &ids {
+            assert_eq!(Score::atv_scale(&atv, port_id(k)).to_bits(), ee.u32_at(entry(k) + 4), "{at}: stunt {k}'s repeat scale");
+        }
+    }
+    assert_eq!(ee.u32_at(entry(41) + 4), score::ATV_REPEAT_FLOOR.to_bits(), "the backflip at the repeat floor");
 }
