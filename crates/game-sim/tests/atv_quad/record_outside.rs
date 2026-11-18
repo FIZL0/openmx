@@ -1,26 +1,48 @@
-//! MD118 — **the quad record's outside in RAM in Rust**: what the record's part search, sweep and
-//! their place leave in RAM, written by the ports the bike's record glue drives
-//! (`tests/mxvatv_bike_ride.rs`' F46a/F46c/F46d/F51/F54, the same record class in the same program),
-//! copied here as they are: the spatial database move ([`spatial_move_in_ram`]), the sweep's set,
-//! place and search ([`sweep_in_ram`]), the part search with its plant parts stood and its listeners
-//! heard ([`part_search_in_ram`]).
+//! **The record's outside in RAM in Rust**, shared by the bike's tests (`tests/mxvatv_bike_ride.rs`,
+//! F46a/F46c/F46d/F51/F54/F60, where it grew) and the quad's (`atv_quad/sim_frame.rs`, MD118: the same
+//! record class in the same program); one module since MD141. What the record's part search, sweep
+//! and their place leave in RAM, written by the ports: the spatial database move
+//! ([`spatial_move_in_ram`]), the sweep's set, place and search ([`sweep_in_ram`]), the part search
+//! with its plant parts stood and its listeners heard ([`part_search_in_ram`]). MD118's two fixes are
+//! here for both: the mesh pair's tree-walk setup globals ([`TREE_WALK_MODE_AT`]) and a plant mesh's
+//! stand by [`atv_sync::stand`] ([`plant_stand_with`]).
+//!
+//! Self-contained: both test crates mount it by `#[path]` and glob it in; its own word helpers stay
+//! private so the crates' own win.
 
 #![allow(dead_code)]
 
-use super::*;
+use game_sim::air::AcosTable;
 use game_sim::atv_sphere;
+use game_sim::atv_sweep;
 use game_sim::camera::CurveTable;
 use game_sim::collide::MeshRef;
 use game_sim::sweep_probe::{Placed, Shape, SweepProbe, Target, Transform};
+use game_sim::track;
+use ps2_float::{F, Vf};
+use ps2_oracle::Ee;
+use std::collections::BTreeMap;
 
 #[path = "../mxvatv_bike_ride/gather_in_ram.rs"]
-mod gather_in_ram;
+pub(crate) mod gather_in_ram;
 #[path = "../mxvatv_bike_ride/heap_in_ram.rs"]
-mod heap_in_ram;
-use gather_in_ram::*;
+pub(crate) mod heap_in_ram;
+pub(crate) use gather_in_ram::*;
+
+const GP: u64 = 0x003d_baf0;
+const BUDGET: u64 = 400_000_000;
+/// The frame mesh's vtable: a plant mesh part's (MD118).
+const MESH_VTABLE: u32 = 0x003b_6d00;
+
+/// A quad's words as they are (`seed::Words::v`'s read: no normalising).
+fn vf_at(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| f32::from_bits(ee.u32_at(a + k))))
+}
 
 fn set_vf(ee: &mut Ee, a: u32, v: Vf) {
-    put_v(ee, a, v);
+    for (k, w) in v.to_bits().into_iter().enumerate() {
+        ee.set_u32(a + 4 * k as u32, w);
+    }
 }
 
 // --- F46: the record's searches and the sync's database half in Rust ----------------------------------
@@ -28,36 +50,36 @@ fn set_vf(ee: &mut Ee, a: u32, v: Vf) {
 use game_sim::atv_spatial::{self, Cell as DbCell, Database, Extra, Item, Link, LinkAt, List as DbList, Place, Pool, Slot, SlotAt, Sub};
 
 /// The global holding the database's link pool, and the list sub-database's vtable (MD75c1's).
-const DB_POOL_AT: u32 = 0x0040_c460;
-const DB_LIST_VT: u32 = 0x003b_5510;
+pub(crate) const DB_POOL_AT: u32 = 0x0040_c460;
+pub(crate) const DB_LIST_VT: u32 = 0x003b_5510;
 
 /// Where the database [`DbInRam::read`] read is in RAM: its cells', portals' and sub-databases'
 /// addresses (in the model's order), each list's blocks, the entries by item, the link pool's
 /// chunks and stride.
-struct DbInRam {
-    cells: Vec<u32>,
-    portals: Vec<u32>,
-    subs: Vec<u32>,
-    blocks: Vec<Vec<u32>>,
-    items: Vec<u32>,
-    chunks: Vec<u32>,
-    stride: u32,
-    capacity: u32,
+pub(crate) struct DbInRam {
+    pub(crate) cells: Vec<u32>,
+    pub(crate) portals: Vec<u32>,
+    pub(crate) subs: Vec<u32>,
+    pub(crate) blocks: Vec<Vec<u32>>,
+    pub(crate) items: Vec<u32>,
+    pub(crate) chunks: Vec<u32>,
+    pub(crate) stride: u32,
+    pub(crate) capacity: u32,
 }
 
 impl DbInRam {
-    fn index(list: &[u32], a: u32, what: &str) -> usize {
+    pub(crate) fn index(list: &[u32], a: u32, what: &str) -> usize {
         list.iter().position(|&x| x == a).unwrap_or_else(|| panic!("{what} {a:#x} is none of the database's"))
     }
 
-    fn item(&mut self, a: u32) -> Item {
+    pub(crate) fn item(&mut self, a: u32) -> Item {
         self.items.iter().position(|&x| x == a).unwrap_or_else(|| {
             self.items.push(a);
             self.items.len() - 1
         })
     }
 
-    fn slot_at(&self, sub: usize, a: u32, size: u32) -> SlotAt {
+    pub(crate) fn slot_at(&self, sub: usize, a: u32, size: u32) -> SlotAt {
         for (b, &base) in self.blocks[sub].iter().enumerate() {
             if (base..base + 4 * size).contains(&a) {
                 assert_eq!((a - base) % 4, 0, "a slot {a:#x} off its block's words");
@@ -67,11 +89,11 @@ impl DbInRam {
         panic!("slot {a:#x} is in none of sub-database {sub}'s blocks");
     }
 
-    fn slot_addr(&self, sub: usize, s: SlotAt) -> u32 {
+    pub(crate) fn slot_addr(&self, sub: usize, s: SlotAt) -> u32 {
         self.blocks[sub][s.block] + 4 * s.index as u32
     }
 
-    fn link_at(&self, a: u32) -> LinkAt {
+    pub(crate) fn link_at(&self, a: u32) -> LinkAt {
         for (c, &base) in self.chunks.iter().enumerate() {
             let first = base + 4;
             if (first..first + self.capacity * self.stride).contains(&a) {
@@ -82,13 +104,13 @@ impl DbInRam {
         panic!("link {a:#x} is in none of the pool's chunks");
     }
 
-    fn place(&self, ee: &Ee, sub: usize, a: u32) -> Place {
+    pub(crate) fn place(&self, ee: &Ee, sub: usize, a: u32) -> Place {
         assert_eq!(ee.u32_at(self.subs[sub] + 4), DB_LIST_VT, "a place {a:#x} in sub-database {:#x}, not a list", self.subs[sub]);
         Place::Slot(self.slot_at(sub, a, ee.u32_at(self.subs[sub] + 0x28)))
     }
 
     /// The link pool at `p`, as the move takes and gives its links.
-    fn pool(&mut self, ee: &Ee, p: u32) -> Pool {
+    pub(crate) fn pool(&mut self, ee: &Ee, p: u32) -> Pool {
         let mut c = ee.u32_at(p + 0xc);
         while c != 0 {
             self.chunks.push(c);
@@ -118,7 +140,7 @@ impl DbInRam {
     /// entry's record (its `+8`); the entry is item 0. The cells are the record's and those its links
     /// reach; their lists are read slot by slot, any other sub-database (the quadtree the gather
     /// reads) by its kind alone, which a move into it would refuse.
-    fn read(ee: &Ee, entry: u32) -> (DbInRam, Database, atv_spatial::Record) {
+    pub(crate) fn read(ee: &Ee, entry: u32) -> (DbInRam, Database, atv_spatial::Record) {
         let mut m = DbInRam { cells: vec![], portals: vec![], subs: vec![], blocks: vec![], items: vec![entry], chunks: vec![], stride: 0, capacity: 0 };
         let pool = m.pool(ee, ee.u32_at(DB_POOL_AT));
         let rec = ee.u32_at(entry + 8);
@@ -218,7 +240,7 @@ impl DbInRam {
         (m, db, record)
     }
 
-    fn place_word(&self, sub: usize, p: Place) -> u32 {
+    pub(crate) fn place_word(&self, sub: usize, p: Place) -> u32 {
         match p {
             Place::Slot(s) => self.slot_addr(sub, s),
             Place::Key(k) => k,
@@ -228,7 +250,7 @@ impl DbInRam {
     /// The move's outcome (`now`, read as `was`) written back where it changed: the record's words
     /// and each list's slots, count and free chain. What a move here never changes — the cells, a
     /// list's blocks, the link pool, the extras — must not have changed.
-    fn write(&self, ee: &mut Ee, entry: u32, was: (&Database, &atv_spatial::Record), now: (&Database, &atv_spatial::Record)) {
+    pub(crate) fn write(&self, ee: &mut Ee, entry: u32, was: (&Database, &atv_spatial::Record), now: (&Database, &atv_spatial::Record)) {
         assert_eq!(was.0.cells, now.0.cells, "the cells changed");
         assert_eq!(was.0.pool, now.0.pool, "the link pool changed: not written back");
         assert_eq!(was.1.extras, now.1.extras, "the record's extras changed: not written back");
@@ -267,7 +289,7 @@ impl DbInRam {
 
 /// **F46a — a collidable's spatial-database move in Rust**: `entry`'s database read out of RAM,
 /// moved by [`atv_spatial::spatial_move`], and written back.
-pub(super) fn spatial_move_in_ram(ee: &mut Ee, entry: u32, centre: Vf, half: Vf, reach: F) {
+pub(crate) fn spatial_move_in_ram(ee: &mut Ee, entry: u32, centre: Vf, half: Vf, reach: F) {
     let (m, mut db, mut rec) = DbInRam::read(ee, entry);
     let (was_db, was_rec) = (db.clone(), rec.clone());
     atv_spatial::spatial_move(&mut db, &mut rec, 0, centre, half, reach);
@@ -280,13 +302,13 @@ use game_sim::{atv_part, ray_probe};
 
 /// F46c: the sweep probe's clear's globals — the two words it zeroes, and where it notes the
 /// probe's record.
-const SWEEP_ZEROED: [u32; 2] = [0x003d_ce28, 0x003d_ce20];
-const SWEEP_RECORD_AT: u32 = 0x003d_c618;
+pub(crate) const SWEEP_ZEROED: [u32; 2] = [0x003d_ce28, 0x003d_ce20];
+pub(crate) const SWEEP_RECORD_AT: u32 = 0x003d_c618;
 
 /// The nearby search's world round `probe` (a collidable): the probe as item 0, the nearby list at
 /// `list`'s candidates, and the collidables their object lists name, with the filter's fields; and
 /// the candidates by item. Answers the entries by item too.
-fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Collidable>, Vec<ws::Candidate>) {
+pub(crate) fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Collidable>, Vec<ws::Candidate>) {
     let mut m = GatherInRam::default();
     m.item(probe + 0x18);
     let (arr, n) = (ee.u32_at(list), ee.u32_at(list + 4));
@@ -318,26 +340,28 @@ fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Coll
 /// sweep probe `probe` ([`sweep_set_in_ram`]) and searched over the nearby list `list`
 /// ([`atv_search::search`] with [`atv_sweep::Sweep`]: since F51 its pairs too, over
 /// [`SweepWorldInRam`]); everything written back. Answers the hit bit.
-pub(super) fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf, kinds: &mut BTreeMap<String, u32>) -> bool {
+pub(crate) fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf, kinds: &mut BTreeMap<String, u32>) -> bool {
     let segments = sweep_set_in_ram(ee, rec, probe, from, to);
     sweep_search_in_ram(ee, probe, list, segments, kinds)
 }
 
 /// F46c's search in Rust: the sweep probe `probe` on `segments` (just set) searched over the nearby
 /// list `list`, as [`sweep_in_ram`] has it. Answers the hit bit.
-fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_sim::sweep_probe::Segment>, kinds: &mut BTreeMap<String, u32>) -> bool {
+pub(crate) fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_sim::sweep_probe::Segment>, kinds: &mut BTreeMap<String, u32>) -> bool {
     use game_sim::atv_search;
     use game_sim::atv_sweep;
     // The search.
     assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
     // The plant groups' parts, as collidables of their own.
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
             }
@@ -359,7 +383,7 @@ fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_si
         }
     }
     let heard: Vec<ws::Collidable> = objects.clone();
-    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None };
+    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None, lent: None };
     let mut sweep = atv_sweep::Sweep::new(segments, more, &mut outside);
     sweep.probe = port;
     let hit = atv_search::search(&mut objects, 0, &found, &|o: usize| retired.get(o).copied().unwrap_or(false), &mut sweep);
@@ -406,7 +430,7 @@ fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_si
 
 /// The probe's local forms (each segment's origin and direction in the last paired object's
 /// frame, and the centre) into `port`, as RAM has them.
-fn sweep_local_in_ram(ee: &Ee, probe: u32, count: usize, port: &mut SweepProbe) {
+pub(crate) fn sweep_local_in_ram(ee: &Ee, probe: u32, count: usize, port: &mut SweepProbe) {
     use f51_probe as pa;
     assert_eq!(ee.u32_at(probe + pa::SMOOTH), 0, "the probe asks for smoothed normals: not ported");
     let (locals, ldirs) = (ee.u32_at(probe + pa::LOCAL_ORIGINS), ee.u32_at(probe + pa::LOCAL_DIRS));
@@ -419,7 +443,7 @@ fn sweep_local_in_ram(ee: &Ee, probe: u32, count: usize, port: &mut SweepProbe) 
 
 /// What the pairs write beyond the answer, where any ran: the smoothing word noted in its global,
 /// the local forms, and the last swept mesh's descriptor in its global.
-fn sweep_pairs_write(ee: &mut Ee, probe: u32, count: usize, port: &SweepProbe, pairs: u32, descriptor: Option<u32>) {
+pub(crate) fn sweep_pairs_write(ee: &mut Ee, probe: u32, count: usize, port: &SweepProbe, pairs: u32, descriptor: Option<u32>) {
     use f51_probe as pa;
     if pairs > 0 {
         let (locals, ldirs) = (ee.u32_at(probe + pa::LOCAL_ORIGINS), ee.u32_at(probe + pa::LOCAL_DIRS));
@@ -438,7 +462,7 @@ fn sweep_pairs_write(ee: &mut Ee, probe: u32, count: usize, port: &SweepProbe, p
 /// F46c's set and place in Rust: the segment from `from` to `to` (the record `rec`'s own, written at
 /// `+0xc0`) set on its sweep probe `probe` ([`atv_sweep::set`]), and the probe placed (its box, and
 /// its database entry moved, [`spatial_move_in_ram`]). Answers the segments.
-fn sweep_set_in_ram(ee: &mut Ee, rec: u32, probe: u32, from: Vf, to: Vf) -> Vec<game_sim::sweep_probe::Segment> {
+pub(crate) fn sweep_set_in_ram(ee: &mut Ee, rec: u32, probe: u32, from: Vf, to: Vf) -> Vec<game_sim::sweep_probe::Segment> {
     set_vf(ee, rec + 0xc0, from);
     set_vf(ee, rec + 0xd0, to);
     // The set: the record's segment the probe's, no nodes.
@@ -448,7 +472,7 @@ fn sweep_set_in_ram(ee: &mut Ee, rec: u32, probe: u32, from: Vf, to: Vf) -> Vec<
 }
 
 /// F46c's set and place on the sweep probe `probe`, from its segments' `points` with no nodes.
-fn sweep_set_points_in_ram(ee: &mut Ee, probe: u32, points: &[[Vf; 2]]) -> Vec<game_sim::sweep_probe::Segment> {
+pub(crate) fn sweep_set_points_in_ram(ee: &mut Ee, probe: u32, points: &[[Vf; 2]]) -> Vec<game_sim::sweep_probe::Segment> {
     use game_sim::atv_sweep;
     let (segments, b) = atv_sweep::set(points, None);
     let (nodes, quads) = (ee.u32_at(probe + 0x134), ee.u32_at(probe + 0x138));
@@ -476,7 +500,7 @@ fn sweep_set_points_in_ram(ee: &mut Ee, probe: u32, points: &[[Vf; 2]]) -> Vec<g
 /// A ray probe's or a mesh's tree as it sits in RAM, 36 bytes a node (the key, the two child words
 /// at `+8`, the centre at `+0xc`, the half extents at `+0x18`), read from `root` down; and one past
 /// its highest leaf.
-fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
+pub(crate) fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
     let blank = track::Node { volume: F::ZERO, centre: [F::ZERO; 3], half_extent: [F::ZERO; 3], children: [0, 0] };
     let (mut out, mut seen, mut leaves, mut todo) = (Vec::new(), Vec::new(), 0, vec![root]);
     while let Some(w) = todo.pop() {
@@ -499,7 +523,7 @@ fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
     (out, leaves)
 }
 
-fn matrix_at(ee: &Ee, a: u32) -> ray_probe::Matrix {
+pub(crate) fn matrix_at(ee: &Ee, a: u32) -> ray_probe::Matrix {
     [0, 1, 2, 3].map(|k| vf_at(ee, a + 0x10 * k))
 }
 
@@ -507,17 +531,17 @@ fn matrix_at(ee: &Ee, a: u32) -> ray_probe::Matrix {
 /// (`+0x23c`), nodes (`+0x244`) and triangles (`+0x248`, 0x14 bytes each: three vertex shorts, the
 /// packed normal at `+0xc`), and its vertices through the descriptor at `+0x230` (the array, and at
 /// `+8` whether they are packed shorts).
-struct MeshInRam {
-    id: u32,
-    transform: ray_probe::Matrix,
-    root: u16,
-    nodes: Vec<track::Node>,
-    facets: Vec<ray_probe::Facet>,
-    vertices: track::Points,
+pub(crate) struct MeshInRam {
+    pub(crate) id: u32,
+    pub(crate) transform: ray_probe::Matrix,
+    pub(crate) root: u16,
+    pub(crate) nodes: Vec<track::Node>,
+    pub(crate) facets: Vec<ray_probe::Facet>,
+    pub(crate) vertices: track::Points,
 }
 
 impl MeshInRam {
-    fn read(ee: &Ee, c: u32) -> MeshInRam {
+    pub(crate) fn read(ee: &Ee, c: u32) -> MeshInRam {
         assert_eq!(ee.u32_at(c + 0x78), 0, "{c:#x} is not a mesh");
         let root = ee.u16_at(c + 0x23c);
         let (nodes, count) = tree_in_ram(ee, ee.u32_at(c + 0x244), root);
@@ -539,27 +563,27 @@ impl MeshInRam {
         MeshInRam { id: c, transform: matrix_at(ee, c + 0x130), root, nodes, facets, vertices }
     }
 
-    fn mesh(&self) -> ray_probe::Mesh<'_> {
+    pub(crate) fn mesh(&self) -> ray_probe::Mesh<'_> {
         ray_probe::Mesh { id: self.id, transform: self.transform, root: self.root, nodes: &self.nodes, facets: &self.facets, vertices: &self.vertices }
     }
 }
 
 /// A plant group's part `i` stood at the plant (`(group entry, i)`, answers the part or 0).
-const ECO_PART: u32 = 0x0046_d3c0;
+pub(crate) const ECO_PART: u32 = 0x0046_d3c0;
 /// F54: the riding part's two listeners, by their vt `+8` (thunks to the bike, `this - 0x38`, and to
 /// the pair log's owner, `this - 0x28`); the bike's hit slot (vt `+0x138`); the file and line the pair
 /// log's push passes the heap's resize.
-const BIKE_HEARD: u32 = 0x0049_56a0;
-const PAIR_LOG_HEARD: u32 = 0x0025_b950;
-const BIKE_HIT_SLOT: u32 = 0x138;
-const PAIR_LOG_FILE: u32 = 0x003a_1c30;
-const PAIR_LOG_LINE: u32 = 0xd1;
-const HEAP_RESIZE_F54: u32 = 0x001b_7470;
+pub(crate) const BIKE_HEARD: u32 = 0x0049_56a0;
+pub(crate) const PAIR_LOG_HEARD: u32 = 0x0025_b950;
+pub(crate) const BIKE_HIT_SLOT: u32 = 0x138;
+pub(crate) const PAIR_LOG_FILE: u32 = 0x003a_1c30;
+pub(crate) const PAIR_LOG_LINE: u32 = 0xd1;
+pub(crate) const HEAP_RESIZE_F54: u32 = 0x001b_7470;
 
 use game_sim::{atv_hear, atv_plant};
 
 /// The tables a turned plant mesh reads, built once.
-fn plant_tables() -> atv_plant::Tables<'static> {
+pub(crate) fn plant_tables() -> atv_plant::Tables<'static> {
     static T: std::sync::OnceLock<(AcosTable, CurveTable)> = std::sync::OnceLock::new();
     let (acos, curve) = T.get_or_init(|| (AcosTable::build(), CurveTable::build()));
     atv_plant::Tables { acos, curve }
@@ -567,7 +591,7 @@ fn plant_tables() -> atv_plant::Tables<'static> {
 
 /// The plant (group entry `g`) and its species' scale words as RAM has them, the eco's unit, and its
 /// part `i` (0 for none).
-fn plant_in_ram(ee: &Ee, g: u32, i: usize) -> (atv_plant::Plant, atv_plant::Species, F, u32) {
+pub(crate) fn plant_in_ram(ee: &Ee, g: u32, i: usize) -> (atv_plant::Plant, atv_plant::Species, F, u32) {
     let eco = ee.u32_at(ECO_AT);
     let sp = ee.u32_at(ee.u32_at(eco + 0x84) + 4 * u32::from(ee.u8_at(g + 0x12)));
     let flags = ee.u8_at(g + 0x16);
@@ -581,9 +605,10 @@ fn plant_in_ram(ee: &Ee, g: u32, i: usize) -> (atv_plant::Plant, atv_plant::Spec
 /// **F54 — a plant group's part stood at its plant in Rust** ([`atv_plant::stand`]): the plant at
 /// `g`, its part `i`; a sphere's scales, frame and refresh written back (its stand slot asserted to
 /// be the sphere's frame), a mesh's stood frame's position written and its stand slot run at the
-/// port's frame: MD118, a mesh part's slot (the frame mesh's vtable's) is [`atv_sync::stand`], its
-/// words written back (`frame_at` is not read). Answers the part or 0, as the original does.
-fn plant_stand_with(ee: &mut Ee, g: u32, i: usize, frame_at: Option<u32>) -> u32 {
+/// port's frame: with `frame_at` (16 words of scratch) the slot is called there, the part's own code
+/// (F54's oracle stubs it); without, MD118, the slot is the frame mesh's (its vtable asserted) and
+/// Rust's, [`atv_sync::stand`], its words written back. Answers the part or 0, as the original does.
+pub(crate) fn plant_stand_with(ee: &mut Ee, g: u32, i: usize, frame_at: Option<u32>) -> u32 {
     let (plant, species, unit, p) = plant_in_ram(ee, g, i);
     let tables = plant_tables();
     if p == 0 {
@@ -609,11 +634,17 @@ fn plant_stand_with(ee: &mut Ee, g: u32, i: usize, frame_at: Option<u32>) -> u32
             for k in 0..3 {
                 ee.set_u32(p + 0x1e0 + 4 * k, stood[3].0[k as usize].to_bits());
             }
-            let _ = frame_at;
-            assert_eq!(ee.u32_at(p + 0xc), crate::MESH_VTABLE, "a plant mesh's vtable ({p:#x}): its stand slot is not the frame mesh's");
-            let mut gaps = vec![];
-            let mut c = crate::image::collidable(ee, p, &mut gaps);
-            assert!(gaps.is_empty(), "{gaps:?}");
+            if let Some(at) = frame_at {
+                for (k, row) in frame.iter().enumerate() {
+                    set_vf(ee, at + 0x10 * k as u32, *row);
+                }
+                let f = ee.u32_at(vt + 0xcc);
+                ee.set(28, GP);
+                ee.call(f, &[u64::from(p), u64::from(at)], &[], BUDGET);
+                return p;
+            }
+            assert_eq!(vt, MESH_VTABLE, "a plant mesh's vtable ({p:#x}): its stand slot is not the frame mesh's");
+            let mut c = mesh_collidable_in_ram(ee, p);
             game_sim::atv_sync::stand(&mut c, &frame);
             let game_sim::atv_sync::Kind::Mesh { stood, before, .. } = c.kind else { unreachable!() };
             for (o, rows) in [(0x130, c.frame), (0x1b0, stood), (0x1f0, before)] {
@@ -629,14 +660,26 @@ fn plant_stand_with(ee: &mut Ee, g: u32, i: usize, frame_at: Option<u32>) -> u32
     p
 }
 
-/// [`plant_stand_with`] in a search: no plant mesh is stood on C15 (its stand slot is not Rust's).
-fn plant_stand_in_ram(ee: &mut Ee, g: u32, i: usize) -> u32 {
+/// A mesh collidable as [`atv_sync::stand`] reads it: its frame `+0x130`, local frame `+0x170`, stood
+/// and before frames `+0x1b0`/`+0x1f0`, its tree's root box (the nodes at `+0x244`), centre `+0x50`,
+/// reach `+0x70`, and whether it is in the database (`+0x20`); the words bit for bit (MD75c2's read).
+pub(crate) fn mesh_collidable_in_ram(ee: &Ee, a: u32) -> game_sim::atv_sync::Collidable {
+    use game_sim::atv_sync::{Collidable, Kind};
+    let xyz = |a: u32| Vf::new(word_f(ee, a).0, word_f(ee, a + 4).0, word_f(ee, a + 8).0, 0.0);
+    let rows = |a: u32| std::array::from_fn(|k| raw_quad(ee, a + 0x10 * k as u32));
+    let mesh = ee.u32_at(a + 0x244);
+    let kind = Kind::Mesh { local: rows(a + 0x170), centre: xyz(mesh + 0xc), half: xyz(mesh + 0x18), stood: rows(a + 0x1b0), before: rows(a + 0x1f0) };
+    Collidable { kind, frame: rows(a + 0x130), centre: raw_quad(ee, a + 0x50), reach: word_f(ee, a + 0x70), spatial: ee.u32_at(a + 0x20) != 0 }
+}
+
+/// [`plant_stand_with`] in a search: a plant mesh's stand slot the frame mesh's, Rust's (MD118).
+pub(crate) fn plant_stand_in_ram(ee: &mut Ee, g: u32, i: usize) -> u32 {
     plant_stand_with(ee, g, i, None)
 }
 
 /// **F54 — the bike's own listener in Rust** ([`atv_hear::bike_hears`]): the bike at `bike`, the struck
 /// collidable at `struck`.
-fn bike_heard_in_ram(ee: &Ee, bike: u32, struck: u32) -> atv_hear::Heard {
+pub(crate) fn bike_heard_in_ram(ee: &Ee, bike: u32, struck: u32) -> atv_hear::Heard {
     let (flags, mask) = (ee.u8_at(bike + 0x44), ee.u32_at(ee.u32_at(bike + 0xe8) + 0xa4));
     if atv_hear::bike_hears(flags, mask, ee.u32_at(struck + 0x94)) { atv_hear::Heard::Bike } else { atv_hear::Heard::Nothing }
 }
@@ -644,13 +687,20 @@ fn bike_heard_in_ram(ee: &Ee, bike: u32, struck: u32) -> atv_hear::Heard {
 /// **F54 — the pair log's listener in Rust** ([`atv_hear::push`]): the owner at `o` logs `{probe,
 /// struck, 0, kind}` on its log (`+0x3c8`), the log's words written back; a grow is the heap's resize
 /// (MD140: Rust's, checked against the original's; `grown` told the bytes).
-fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &mut dyn FnMut(u32)) {
+pub(crate) fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &mut dyn FnMut(u32)) {
     let l = o + 0x3c8;
     let kind = atv_hear::kind(ee.u32_at(struck + 0x94), [ee.u32_at(o + 0x2c), ee.u32_at(o + 0x30)]);
     let i = |ee: &Ee, k: u32| ee.u32_at(l + k) as i32;
     let mut log = atv_hear::Log { count: i(ee, 0), entries: ee.u32_at(l + 8), step: i(ee, 0xc), capacity: i(ee, 0x10), most: i(ee, 0x14) };
     let slot = atv_hear::push(&mut log, &mut |at, bytes| {
         grown(bytes);
+        // K64: a test that stubs the allocator (F54's listeners hand it a made-up log) gets the stub on
+        // both sides; Rust's resize is checked only against the original's own.
+        if ee.hooks.contains_key(&HEAP_RESIZE_F54) {
+            ee.set(28, GP);
+            ee.call(HEAP_RESIZE_F54, &[u64::from(at), u64::from(bytes), u64::from(PAIR_LOG_FILE), u64::from(PAIR_LOG_LINE)], &[], BUDGET);
+            return ee.v0() as u32;
+        }
         heap_in_ram::resize_checked(ee, HEAP_RESIZE_F54, GP, BUDGET, at, bytes, PAIR_LOG_FILE, PAIR_LOG_LINE)
     });
     ee.set_u32(l + 8, log.entries);
@@ -667,22 +717,22 @@ fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &m
 /// mesh, kind 0; a hierarchy, kind 1, not read: C15 never pairs one; anything else nothing struck),
 /// and a plant group's parts, each stood at the plant by the port ([`plant_stand_in_ram`], F54).
 /// Counts the pairs by kind, the stands and the listeners heard.
-struct PartWorldInRam<'e> {
-    ee: &'e mut Ee,
-    items: Vec<u32>,
-    mesh: Option<MeshInRam>,
-    kinds: BTreeMap<String, u32>,
+pub(crate) struct PartWorldInRam<'e> {
+    pub(crate) ee: &'e mut Ee,
+    pub(crate) items: Vec<u32>,
+    pub(crate) mesh: Option<MeshInRam>,
+    pub(crate) kinds: BTreeMap<String, u32>,
     /// The listeners and the callbacks the collidables name ([`ws::Collidable::listeners`], `on_hit`,
     /// `on_struck` index these), each called in the original (handed on).
-    listeners: Vec<u32>,
-    callbacks: Vec<u32>,
+    pub(crate) listeners: Vec<u32>,
+    pub(crate) callbacks: Vec<u32>,
 }
 
 impl PartWorldInRam<'_> {
     /// Calls the original's `f` with `args` (collidables by item, as their bases), counted as `what`,
     /// the probe's and the other's flags written first (the hit bit is up when they run). A listener
     /// must leave both listener lists as they were: the search's are read once.
-    fn hand_on(&mut self, objects: &[ws::Collidable], what: &str, f: u32, this: u32, a: usize, b: usize) {
+    pub(crate) fn hand_on(&mut self, objects: &[ws::Collidable], what: &str, f: u32, this: u32, a: usize, b: usize) {
         *self.kinds.entry(format!("> record search {what}")).or_default() += 1;
         let [ca, cb] = [a, b].map(|k| self.items[k] - 0x18);
         for (k, c) in [(a, ca), (b, cb)] {
@@ -697,7 +747,7 @@ impl PartWorldInRam<'_> {
 
     /// The listeners (`+0x104` the count, `+0x10c` the array) and the callbacks (`+0x11c` on a hit,
     /// `+0x120` on being struck) of the collidable at `c`, into `o`.
-    fn hear(&mut self, o: &mut ws::Collidable, c: u32) {
+    pub(crate) fn hear(&mut self, o: &mut ws::Collidable, c: u32) {
         let (n, arr) = (self.ee.u32_at(c + 0x104), self.ee.u32_at(c + 0x10c));
         for j in 0..n {
             o.listeners.push(self.listeners.len());
@@ -713,7 +763,7 @@ impl PartWorldInRam<'_> {
     }
 
     /// The species' parts of the plant group at entry `g` (0 where it has none).
-    fn species_parts(ee: &Ee, g: u32) -> Vec<u32> {
+    pub(crate) fn species_parts(ee: &Ee, g: u32) -> Vec<u32> {
         let sp = ee.u32_at(ee.u32_at(ee.u32_at(ECO_AT) + 0x84) + 4 * u32::from(ee.u8_at(g + 0x12)));
         (0..ee.u32_at(sp + 0x194)).map(|i| ee.u32_at(ee.u32_at(sp + 0x19c) + 4 * i)).collect()
     }
@@ -746,7 +796,7 @@ impl atv_part::Outside for PartWorldInRam<'_> {
             }
             1 => panic!("the part search paired a hierarchy ({c:#x}): its parts are not read"),
             5 => unreachable!("a sphere is the part's own test"),
-            6 => panic!("the part search paired a kind 6 ({c:#x}): its test is not Rust's"),
+            6 => unreachable!("a box is the part's own test"),
             _ => ray_probe::Shape::Never,
         }
     }
@@ -755,6 +805,14 @@ impl atv_part::Outside for PartWorldInRam<'_> {
         (self.ee.u32_at(c + 0x78) == 5).then(|| {
             *self.kinds.entry("record search pair, kind 5".into()).or_default() += 1;
             atv_part::Sphere { centre: vf_at(self.ee, c + 0x50), radius: word_f(self.ee, c + 0x180), radius2: word_f(self.ee, c + 0x184) }
+        })
+    }
+    /// F49: a box (kind 6) as F53's oracle reads it; the fade search meets them on nat05.
+    fn oriented_box(&mut self, other: usize) -> Option<atv_part::OrientedBox> {
+        let c = self.items[other] - 0x18;
+        (self.ee.u32_at(c + 0x78) == 6).then(|| {
+            *self.kinds.entry("record search pair, kind 6".into()).or_default() += 1;
+            f53_box_in_ram(self.ee, c)
         })
     }
 }
@@ -824,7 +882,7 @@ impl ws::Narrow for PartWorldInRam<'_> {
 /// The part's record (`+0x7c`) in RAM: what the clear leaves (the nearest normal and point, the
 /// pair's first point, the struck part, the flags) and the list's shape (capacity `+0x88`, the rays
 /// `+0x90` or none, one contact a ray `+0xbc`).
-fn part_record_in_ram(ee: &Ee, r: u32) -> ray_probe::Record {
+pub(crate) fn part_record_in_ram(ee: &Ee, r: u32) -> ray_probe::Record {
     ray_probe::Record {
         normal: vf_at(ee, r + 0x20),
         point: vf_at(ee, r + 0x30),
@@ -841,11 +899,11 @@ fn part_record_in_ram(ee: &Ee, r: u32) -> ray_probe::Record {
 
 /// MD118: the globals the part's pair's tree walk setup writes on a mesh: the walk's mode, and the
 /// two tree arrays (pointers into its frame). The descriptor goes in [`SWEEP_DESCRIPTOR_AT`].
-pub(super) const TREE_WALK_MODE_AT: u32 = 0x003d_ce30;
+pub(crate) const TREE_WALK_MODE_AT: u32 = 0x003d_ce30;
 
 /// MD142: a mutant of the next mesh pair's tree walk setup ([`WALK_SPOIL`]).
 #[derive(Clone, Copy, Debug)]
-pub(super) enum WalkSpoil {
+pub(crate) enum WalkSpoil {
     /// None of the four globals written.
     Skip,
     /// One of them wrong: the mode or the descriptor 4 over, a tree pointer 0 (off the stack).
@@ -854,29 +912,31 @@ pub(super) enum WalkSpoil {
 
 thread_local! {
     /// MD142: spoils the next mesh pair's tree walk setup on this thread, once.
-    pub(super) static WALK_SPOIL: std::cell::Cell<Option<WalkSpoil>> = const { std::cell::Cell::new(None) };
+    pub(crate) static WALK_SPOIL: std::cell::Cell<Option<WalkSpoil>> = const { std::cell::Cell::new(None) };
 }
-const TREE_WALK_TREES_AT: [u32; 2] = [0x003d_ce40, 0x003d_ce48];
+pub(crate) const TREE_WALK_TREES_AT: [u32; 2] = [0x003d_ce40, 0x003d_ce48];
 
 /// The smooth-flag global the part's pair sets from the probe's `+0x184`.
-const PART_SMOOTH_AT: u32 = 0x003d_c610;
+pub(crate) const PART_SMOOTH_AT: u32 = 0x003d_c610;
 
 /// **F46d — the record's part search in Rust**: the ray probe `part` (the riding or wreck rays) searched
 /// over the nearby list `list` ([`atv_search::search`] with [`atv_part::PartRays`]: the clear and the
 /// pair [`ray_probe`]'s, the meshes read from RAM), and everything written back: the flags, the
 /// globals, the record. Answers the record's contacts; counts the pairs by kind into `kinds`.
-pub(super) fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<String, u32>) -> Vec<ray_probe::Contact> {
+pub(crate) fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<String, u32>) -> Vec<ray_probe::Contact> {
     use game_sim::atv_search;
     assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter: its reset and test are not Rust's");
     assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the search would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, part, list);
     // The plant groups' parts, as collidables of their own (the search tests them unfiltered).
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
             }
@@ -922,7 +982,7 @@ pub(super) fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut 
 
 /// The part search's outcome past the flags, written back: the clear's globals, the pairs' smooth
 /// flag and per-contact words, and the part's record at `r`.
-fn write_part_record(ee: &mut Ee, part: u32, r: u32, record: &ray_probe::Record, pairs: u32) {
+pub(crate) fn write_part_record(ee: &mut Ee, part: u32, r: u32, record: &ray_probe::Record, pairs: u32) {
     // The clear's globals, and the pairs' smooth flag and per-contact words.
     for a in SWEEP_ZEROED {
         ee.set_u32(a, 0);
@@ -965,7 +1025,7 @@ fn write_part_record(ee: &mut Ee, part: u32, r: u32, record: &ray_probe::Record,
 // --- F51: the sweep's pairs ------------------------------------------------------------------
 
 /// A collidable's fields as the pair reads them.
-mod f51_at {
+pub(crate) mod f51_at {
     pub const NEARBY: u32 = 0x45;
     pub const CENTRE: u32 = 0x50;
     pub const RADIUS: u32 = 0x70;
@@ -983,7 +1043,7 @@ mod f51_at {
 }
 
 /// The sweep probe's own fields (MX Unleashed's moved `+0x10`).
-mod f51_probe {
+pub(crate) mod f51_probe {
     pub const RECORD: u32 = 0x7c;
     pub const COUNT: u32 = 0x130;
     pub const NODES: u32 = 0x134;
@@ -1000,7 +1060,7 @@ mod f51_probe {
 }
 
 /// The record's fields as the sweep probe uses them.
-mod f51_rec {
+pub(crate) mod f51_rec {
     pub const NORMAL: u32 = 0x20;
     pub const POINT: u32 = 0x30;
     pub const PUSH: u32 = 0x40;
@@ -1018,14 +1078,14 @@ mod f51_rec {
 
 /// A mesh collidable's mesh as the sweep reads it: everything reachable from node 0, the triangles'
 /// three vertex shorts, and the vertices wide or packed.
-struct SweptMesh {
-    nodes: Vec<track::Node>,
-    triangles: Vec<track::Triangle>,
-    vertices: track::Points,
+pub(crate) struct SweptMesh {
+    pub(crate) nodes: Vec<track::Node>,
+    pub(crate) triangles: Vec<track::Triangle>,
+    pub(crate) vertices: track::Points,
 }
 
 impl SweptMesh {
-    fn read(ee: &Ee, c: u32) -> SweptMesh {
+    pub(crate) fn read(ee: &Ee, c: u32) -> SweptMesh {
         use f51_at as at;
         let (nodes_at, tris_at) = (ee.u32_at(c + at::NODES), ee.u32_at(c + at::TRIANGLES));
         let node = |i: u32| {
@@ -1065,35 +1125,38 @@ impl SweptMesh {
         SweptMesh { nodes, triangles, vertices }
     }
 
-    fn mesh(&self) -> MeshRef<'_> {
+    pub(crate) fn mesh(&self) -> MeshRef<'_> {
         MeshRef { nodes: &self.nodes, triangles: &self.triangles, vertices: &self.vertices }
     }
 }
 
-fn f51_transform(ee: &Ee, c: u32) -> Transform {
+pub(crate) fn f51_transform(ee: &Ee, c: u32) -> Transform {
     [0, 1, 2, 3].map(|k| vf_at(ee, c + f51_at::TRANSFORM + 0x10 * k))
 }
 
-fn sweep_probe_clear(probe: &mut SweepProbe) {
+pub(crate) fn sweep_probe_clear(probe: &mut SweepProbe) {
     game_sim::sweep_probe::clear(probe);
 }
 
 /// The global search's sweep descriptor global: the last mesh the pair swept (its `+0x230`).
-const SWEEP_DESCRIPTOR_AT: u32 = 0x003d_ce38;
+pub(crate) const SWEEP_DESCRIPTOR_AT: u32 = 0x003d_ce38;
 /// The pair's smooth-normals global (the probe's `+0x174`).
-const SWEEP_SMOOTH_AT: u32 = 0x003d_c610;
+pub(crate) const SWEEP_SMOOTH_AT: u32 = 0x003d_c610;
 
 /// The sweep's world in RAM: what each item is to the pair, read from RAM at each pair (a mesh, a
 /// hierarchy and its parts, or nothing struck), and everything else as F46d's part search has it
 /// ([`PartWorldInRam`]: a group's parts stood by the original, the listeners and callbacks handed
 /// on). Keeps what the pairs leave in the two globals only the pair writes.
-struct SweepWorldInRam<'w, 'e> {
-    world: &'w mut PartWorldInRam<'e>,
+pub(crate) struct SweepWorldInRam<'w, 'e> {
+    pub(crate) world: &'w mut PartWorldInRam<'e>,
     /// The probe's sphere as the clear stands it, for telling which pairs sweep.
-    centre: Vf,
-    radius: F,
-    pairs: u32,
-    descriptor: Option<u32>,
+    pub(crate) centre: Vf,
+    pub(crate) radius: F,
+    pub(crate) pairs: u32,
+    pub(crate) descriptor: Option<u32>,
+    /// The global search's database, lent and taken back round each test (F60); `None` for the
+    /// nearby sweep, which walks its list.
+    pub(crate) lent: Option<LentInRam>,
 }
 
 impl atv_sweep::Outside for SweepWorldInRam<'_, '_> {
@@ -1139,6 +1202,30 @@ impl atv_sweep::Outside for SweepWorldInRam<'_, '_> {
         }
         pair(Some(&Target { nearby, centre, radius, shape }))
     }
+
+    fn lend(&mut self, objects: &[ws::Collidable], broad: &bp::Broad) {
+        if let Some(l) = &mut self.lent {
+            l.now = Some((objects.to_vec(), broad.clone()));
+            l.written = false;
+        }
+    }
+
+    /// After a test that handed on: the walk read back out of RAM, and RAM's walk is the port's
+    /// again.
+    fn take_back(&mut self, objects: &mut [ws::Collidable], broad: &mut bp::Broad) {
+        let Some(l) = &mut self.lent else { return };
+        let (_, nb) = l.now.take().expect("a lent test");
+        if !l.written {
+            return;
+        }
+        if nb.stamp != self.world.ee.u16_at(STAMP_AT) {
+            l.reentered += 1;
+        }
+        l.m.read_walk(self.world.ee, broad);
+        l.was = (objects.to_vec(), broad.clone());
+        l.begun = broad.clone();
+        l.taken = true;
+    }
 }
 
 impl ws::Narrow for SweepWorldInRam<'_, '_> {
@@ -1158,22 +1245,26 @@ impl ws::Narrow for SweepWorldInRam<'_, '_> {
         self.world.part(objects, group, i)
     }
     fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
+        self.write_lent();
         self.world.heard_hit(objects, l, probe, other)
     }
     fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
+        self.write_lent();
         self.world.heard_struck(objects, l, struck, probe)
     }
     fn on_hit(&mut self, objects: &mut [ws::Collidable], c: usize, probe: usize, other: usize) {
+        self.write_lent();
         self.world.on_hit(objects, c, probe, other)
     }
     fn on_struck(&mut self, objects: &mut [ws::Collidable], c: usize, struck: usize, probe: usize) {
+        self.write_lent();
         self.world.on_struck(objects, c, struck, probe)
     }
 }
 
 /// The sweep probe's segments in RAM: its count, its two node pointers (a node's world transform at
 /// its `+0x70`) and its two points each.
-fn sweep_segments_in_ram(ee: &Ee, probe: u32) -> Vec<game_sim::sweep_probe::Segment> {
+pub(crate) fn sweep_segments_in_ram(ee: &Ee, probe: u32) -> Vec<game_sim::sweep_probe::Segment> {
     use f51_probe as pa;
     let (nodes, ends) = (ee.u32_at(probe + pa::NODES), ee.u32_at(probe + pa::ENDS));
     (0..ee.u32_at(probe + pa::COUNT))
@@ -1191,7 +1282,7 @@ fn sweep_segments_in_ram(ee: &Ee, probe: u32) -> Vec<game_sim::sweep_probe::Segm
 
 /// The sweep probe's answer in RAM (`+0x7c`), its first `count` segments' entries, and the record's
 /// [`atv_sweep::More`]; collidables by `items` (one not listed is pushed).
-fn sweep_answer_in_ram(ee: &Ee, rec: u32, count: usize, items: &mut Vec<u32>) -> (game_sim::sweep_probe::Answer, atv_sweep::More) {
+pub(crate) fn sweep_answer_in_ram(ee: &Ee, rec: u32, count: usize, items: &mut Vec<u32>) -> (game_sim::sweep_probe::Answer, atv_sweep::More) {
     use f51_rec as ra;
     let mut item = |c: u32| -> Option<usize> {
         (c != 0).then(|| match items.iter().position(|&e| e == c + 0x18) {
@@ -1227,7 +1318,7 @@ fn sweep_answer_in_ram(ee: &Ee, rec: u32, count: usize, items: &mut Vec<u32>) ->
 }
 
 /// [`sweep_answer_in_ram`]'s answer written back.
-fn write_sweep_answer(ee: &mut Ee, rec: u32, count: usize, items: &[u32], a: &game_sim::sweep_probe::Answer, more: &atv_sweep::More) {
+pub(crate) fn write_sweep_answer(ee: &mut Ee, rec: u32, count: usize, items: &[u32], a: &game_sim::sweep_probe::Answer, more: &atv_sweep::More) {
     use f51_rec as ra;
     let base = |k: Option<usize>| k.map_or(0, |k| items[k] - 0x18);
     set_vf(ee, rec, a.head[0]);
@@ -1256,10 +1347,10 @@ fn write_sweep_answer(ee: &mut Ee, rec: u32, count: usize, items: &[u32], a: &ga
 // --- S279/F54: a plant sphere's words -------------------------------------------------------
 
 /// S279: the frame a sphere's stand ends in (its vt `+0xcc`).
-const SPHERE_FRAME: u32 = 0x001c_3340;
+pub(crate) const SPHERE_FRAME: u32 = 0x001c_3340;
 /// The sphere's words: its point, frame, radius and square, node, record; as a collidable, its
 /// centre and reach.
-mod s279_at {
+pub(crate) mod s279_at {
     pub const LOCAL: u32 = 0x130;
     pub const FRAME: u32 = 0x140;
     pub const RADIUS: u32 = 0x180;
@@ -1271,11 +1362,11 @@ mod s279_at {
 }
 
 /// A quadword's four words as they are (no normalising).
-fn raw_quad(ee: &Ee, a: u32) -> Vf {
+pub(crate) fn raw_quad(ee: &Ee, a: u32) -> Vf {
     Vf([0, 4, 8, 12].map(|k| f32::from_bits(ee.u32_at(a + k))))
 }
 
-fn sphere_in_ram(ee: &Ee, s: u32) -> atv_sphere::Sphere {
+pub(crate) fn sphere_in_ram(ee: &Ee, s: u32) -> atv_sphere::Sphere {
     use s279_at as at;
     atv_sphere::Sphere {
         local: raw_quad(ee, s + at::LOCAL),
@@ -1287,7 +1378,7 @@ fn sphere_in_ram(ee: &Ee, s: u32) -> atv_sphere::Sphere {
     }
 }
 
-fn write_sphere(ee: &mut Ee, s: u32, p: &atv_sphere::Sphere) {
+pub(crate) fn write_sphere(ee: &mut Ee, s: u32, p: &atv_sphere::Sphere) {
     use s279_at as at;
     set_vf(ee, s + at::LOCAL, p.local);
     for (k, r) in p.frame.iter().enumerate() {
@@ -1297,4 +1388,69 @@ fn write_sphere(ee: &mut Ee, s: u32, p: &atv_sphere::Sphere) {
     ee.set_u32(s + at::RADIUS2, p.radius2.0.to_bits());
     set_vf(ee, s + at::CENTRE, p.centre);
     ee.set_u32(s + at::REACH, p.reach.0.to_bits());
+}
+
+/// The database [`sweep_all_in_ram`] read, as [`atv_sweep::Outside::lend`] lends it: where it is in
+/// RAM, the walk state RAM holds (`was`, and `begun`, what [`GatherInRam::write_query`] tells a
+/// fresh list by), and the walk as lent for the test running (`now`). A hand-on writes `now` to RAM
+/// first, so a listener that queries the database meets the walk where the original's would; after
+/// the test the walk is read back ([`GatherInRam::read_walk`]) and RAM holds it again.
+pub(crate) struct LentInRam {
+    pub(crate) m: GatherInRam,
+    pub(crate) was: (Vec<ws::Collidable>, bp::Broad),
+    pub(crate) begun: bp::Broad,
+    pub(crate) now: Option<(Vec<ws::Collidable>, bp::Broad)>,
+    /// A hand-on in this test wrote `now` to RAM.
+    pub(crate) written: bool,
+    /// A test's walk was taken back out of RAM: `was` and `begun` are what RAM holds since.
+    pub(crate) taken: bool,
+    /// Tests whose hand-ons queried the database (the stamp moved).
+    pub(crate) reentered: u32,
+}
+
+impl LentInRam {
+    /// `now` written to RAM where it is not `was` ([`sweep_walk_written`]); `was` stays until the
+    /// test is over.
+    pub(crate) fn write(&mut self, ee: &mut Ee) {
+        if self.written {
+            return;
+        }
+        let (no, nb) = self.now.as_ref().expect("a hand-on outside a lent test");
+        sweep_walk_written(ee, &self.m, (&self.was.0, &self.was.1), (no, nb), &self.begun);
+        self.written = true;
+    }
+}
+
+/// [`GatherInRam::write_query`] for the global search's walk: what the walk may change beyond flags
+/// and stamps — the probe's reach and place, the parts' groups — taken into `was` first (the groups
+/// written), then the walk written back.
+pub(crate) fn sweep_walk_written(ee: &mut Ee, m: &GatherInRam, was: (&[ws::Collidable], &bp::Broad), now: (&[ws::Collidable], &bp::Broad), begun: &bp::Broad) {
+    let (objects, broad) = now;
+    let mut wo = was.0.to_vec();
+    let mut wb = was.1.clone();
+    wo[0].radius = objects[0].radius;
+    let p = &broad.places[0];
+    (wb.places[0].centre, wb.places[0].budget, wb.places[0].last) = (p.centre, p.budget, p.last);
+    for (k, o) in objects.iter().enumerate() {
+        wo[k].group = o.group;
+        if let Some(g) = o.group {
+            ee.set_u32(m.items[k] - 0x18 + 0x88, m.items[g]);
+        }
+    }
+    m.write_query(ee, (&wo, &wb), (objects, broad), begun);
+}
+
+impl SweepWorldInRam<'_, '_> {
+    /// The lent walk in RAM before a listener or callback is handed on ([`LentInRam::write`]).
+    pub(crate) fn write_lent(&mut self) {
+        if let Some(l) = &mut self.lent {
+            l.write(self.world.ee);
+        }
+    }
+}
+
+/// A kind 6 collidable as the part's pair reads it: its centre `+0x170`, half extents `+0x180`, frame
+/// `+0x130`.
+pub(crate) fn f53_box_in_ram(ee: &Ee, c: u32) -> atv_part::OrientedBox {
+    atv_part::OrientedBox { centre: vf_at(ee, c + 0x170), half: vf_at(ee, c + 0x180), frame: matrix_at(ee, c + 0x130) }
 }
