@@ -1302,6 +1302,82 @@ fn the_ride_bikes_samples_are_the_originals() {
     }
 }
 
+/// **The Sim's note numbers are the original note's** (S363): what a race's Sim notes are loaded
+/// with off the ride's bike archive ([`audio::note_sounds`]) — each list's sample count, looping
+/// flags and lengths, the `[Params]` and the far distance — against first_recording's note. The
+/// params are bit for bit; the lengths are the decoded clips' frames over their rate, within 2 ms.
+#[test]
+fn the_sims_note_sounds_are_the_original_notes() {
+    let Some(o) = original() else { return };
+    let Some(d) = disc() else { return };
+    let ours = audio::note_sounds(d, "Bike\\125sx.res").unwrap();
+    let n = o.note;
+    for (k, l) in note_at::LISTS.into_iter().enumerate() {
+        let array = o.ee.u32_at(n + l + 8);
+        let theirs: Vec<(f32, bool)> = (0..o.ee.i32_at(n + l).max(0) as u32)
+            .map(|i| o.ee.u32_at(array + 4 * i))
+            .map(|p| (o.ee.f32_at(p + note_at::LENGTH), o.ee.i32_at(p + note_at::LOOPING) != 0))
+            .collect();
+        assert_eq!(ours.lists[k].len(), theirs.len(), "list {k}'s samples");
+        for (i, (a, b)) in ours.lists[k].iter().zip(&theirs).enumerate() {
+            assert_eq!(a.1, b.1, "list {k} sample {i} loops as the original's");
+            assert!((a.0 - b.0).abs() < 0.002, "list {k} sample {i}: {} s here, {} s in the original", a.0, b.0);
+        }
+    }
+    let bits = |x: f32| x.to_bits();
+    assert_eq!(bits(ours.low_torque_speed), o.ee.u32_at(n + note_at::LOW_TORQUE), "LowTorqueSpeed");
+    assert_eq!(bits(ours.airborne_to_decel), o.ee.u32_at(n + note_at::AIR_TO_DECEL), "AirborneToDecel");
+    assert_eq!(bits(ours.rev_midpoint), o.ee.u32_at(n + note_at::MIDPOINT), "RevMidpoint");
+    assert_eq!(bits(ours.overlap), o.ee.u32_at(n + note_at::OVERLAP), "OverlapTime");
+    assert_eq!(ours.pitch_variance, o.ee.i32_at(n + note_at::VARIANCE), "PitchVariance");
+    assert_eq!(bits(ours.far), o.ee.u32_at(n + 0x8c), "the far distance");
+}
+
+/// **The seat's engine plays the Sim's note** (S363): handed the Sim's voices frame by frame, the
+/// mixer sounds exactly those samples — a new one started, a gone one stopped, one whose clock went
+/// back started over as a new voice — and the limiter's hold (the rev paused) adds `[Panic]`'s loop.
+#[test]
+fn the_seats_engine_plays_the_sims_voices() {
+    use game_sim::engine_note::{RiderNote, Voice};
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let bike = Arc::new(audio::Reading { lib: &mut lib }.bike("Bike\\125sx.res"));
+    let low = audio::Sample { list: Note::LowAccel, index: 0 };
+    let clip = |s: audio::Sample| bike.clip(s).expect("on the disc").0.clone();
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut sound = audio::Sound::new(mixer.clone());
+    sound.seats.push(audio::SeatSound::new(bike.clone(), 1));
+    let mut note = RiderNote::new(Arc::new(bike.note_sounds()), F::ZERO);
+    let v = |s: audio::Sample, at: f32, fresh: bool, paused: bool| Voice { s, at: F(at), fresh, paused, detune: 20 };
+    let frames: [(Vec<Voice>, Vec<audio::Sample>); 7] = [
+        (vec![], vec![]),
+        (vec![v(audio::Sample::IDLE, 0.0, true, false)], vec![audio::Sample::IDLE]),
+        (vec![v(audio::Sample::IDLE, 0.033, false, false), v(low, 0.0, true, false)], vec![audio::Sample::IDLE, low]),
+        (vec![v(low, 0.033, false, false)], vec![low]),
+        (vec![v(low, 0.0, true, false)], vec![low]),
+        (vec![v(audio::Sample::REV, 0.1, false, true)], vec![audio::Sample::REV, audio::Sample::PANIC]),
+        (vec![v(audio::Sample::REV, 0.1, false, false)], vec![audio::Sample::REV]),
+    ];
+    let hands = Hands { grounded: true, gas: 1.0, clutch: 0.0, speed: 10.0, at: [0.0; 3], vel: [0.0; 3] };
+    let mut was: Vec<_> = Vec::new();
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    for (f, (voices, want)) in frames.into_iter().enumerate() {
+        note.voices.voices = voices;
+        sound.frame(&[audio::SeatFrame { hands, note: Some(note.clone()), ..Default::default() }], 1.0 / 30.0);
+        // A stopped voice fades out over the next block.
+        mixer.lock().unwrap().render(&mut out);
+        let playing: Vec<Arc<Clip>> = mixer.lock().unwrap().clips().into_iter().map(|c| c.0).collect();
+        let want: Vec<Arc<Clip>> = want.into_iter().map(clip).collect();
+        assert_eq!(playing.len(), want.len(), "frame {f}: the voices sounding");
+        assert!(want.iter().all(|w| playing.iter().any(|p| Arc::ptr_eq(p, w))), "frame {f}: not the Sim's samples");
+        let ids: Vec<_> = sound.seats[0].engine.voices().collect();
+        if f == 4 {
+            assert!(!ids.iter().any(|i| was.contains(i)), "frame 4: the low accel started over, as a new voice");
+        }
+        was = ids;
+    }
+}
+
 /// The front end's sounds off the disc (P65): `ui.aud`'s five clicks, and the music's two mono
 /// halves as one stereo loop at their 32 kHz.
 #[test]
@@ -1883,7 +1959,7 @@ fn a_plain_landing_plays_no_clank() {
     let hard = audio::length(PLANE_LANDING.1);
     assert!(hard > 5.0, "{} at {}", hard, PLANE_LANDING.0);
     for f in [landing(true, hard, false), landing(true, 40.0, false), landing(false, 40.0, true), landing(true, 4.9, true)] {
-        s.frame(&[f], 1.0 / 30.0);
+        s.frame(&[f.clone()], 1.0 / 30.0);
         assert_eq!(s.seats[0].clank.voice(), None, "{:?}", f.crash);
     }
     assert_eq!(s.mixer.lock().unwrap().voices(), 0);
@@ -2266,7 +2342,7 @@ fn the_bike_clank_is_gated_on_the_impulse() {
     // Shut: under MinImpulse at the entry (the wreck body's 40 on that tick is not read), off the
     // ground, not wrecked, under MinImpulse down.
     for f in [entry(18.7), down(false, 40.0, true), down(true, 40.0, false), down(true, 18.7, true)] {
-        s.frame(&[f], 1.0 / 30.0);
+        s.frame(&[f.clone()], 1.0 / 30.0);
         assert_eq!(s.seats[0].bike_clank.voice(), None, "{:?}", f.bike);
     }
     s.frame(&[entry(30.0)], 1.0 / 30.0);

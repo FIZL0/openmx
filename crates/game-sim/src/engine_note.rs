@@ -547,6 +547,9 @@ pub struct Voice {
     pub fresh: bool,
     /// Held by the limiter.
     pub paused: bool,
+    /// The pitch variance drawn when it started, in the sound chip's pitch units (0 for the idle,
+    /// which draws none): what the shell's mixer plays it off its own pitch by (S363).
+    pub detune: i32,
 }
 
 /// **A note's voices**: each sample it started, as a clock that runs with the frames and ends at the
@@ -593,12 +596,16 @@ impl Bed for Stage<'_> {
         // A sample is one voice: starting it again starts it over.
         self.stop(s);
         if self.heard {
-            self.voices.voices.push(Voice { s, at: F::ZERO, fresh: true, paused: false });
+            self.voices.voices.push(Voice { s, at: F::ZERO, fresh: true, paused: false, detune: 0 });
         }
         self.heard
     }
 
-    fn detune(&mut self, _: Sample, _: i32) {}
+    fn detune(&mut self, s: Sample, by: i32) {
+        if let Some(v) = self.voices.voices.iter_mut().rev().find(|v| v.s == s) {
+            v.detune = by;
+        }
+    }
 
     fn hold(&mut self, on: bool) {
         for v in self.voices.voices.iter_mut().filter(|v| v.s == Sample::REV) {
@@ -626,6 +633,13 @@ impl RiderNote {
     /// draw, [`Rng::unit`]).
     pub fn new(sounds: Arc<NoteSounds>, delay: F) -> RiderNote {
         RiderNote { brain: Brain::new(), delay, on: false, at: None, voices: Voices::default(), sounds }
+    }
+
+    /// **A note as the bike builder makes it** (S363): the loader's, its start delay one unit draw on
+    /// `rng`, the game's generator, at the point the builder makes it.
+    pub fn build(sounds: Arc<NoteSounds>, rng: &mut Rng) -> RiderNote {
+        let delay = rng.unit();
+        RiderNote::new(sounds, delay)
     }
 
     /// The rider's update's countdown: the note switches on when the delay runs out.
@@ -707,5 +721,198 @@ impl crate::Sim {
                 note.frame(&hands[i].0, hands[i].1, &listeners, dt, rng);
             }
         }
+    }
+}
+
+/// **The order the vehicle loader builds the players' bikes in** (S363): sorted by each bike's model
+/// file name (`models`, one per player in player order), case folded as the game's `strcasecmp`
+/// folds it, by the game's C library's `qsort` — so two bikes on the same model keep player order
+/// under seven players and may not from seven up. Answers the players, first built first.
+pub fn build_order(models: &[&str]) -> Vec<usize> {
+    fn fold(b: u8) -> i32 {
+        // The library's ctype upper bit: plain ASCII A-Z; bytes past 0x7f read as signed chars.
+        let c = b as i8 as i32;
+        if b.is_ascii_uppercase() { c + 0x20 } else { c }
+    }
+    let cmp = |a: usize, b: usize| -> i32 {
+        let (a, b) = (models[a].as_bytes(), models[b].as_bytes());
+        for j in 0.. {
+            let x = a.get(j).copied().unwrap_or(0);
+            let y = b.get(j).copied().unwrap_or(0);
+            let d = fold(x) - fold(y);
+            if d != 0 || x == 0 {
+                return d;
+            }
+        }
+        unreachable!()
+    };
+    let mut v: Vec<usize> = (0..models.len()).collect();
+    qsort(&mut v, &cmp);
+    v
+}
+
+/// The BSD `qsort` the game's C library carries (median of three, nine past 40, the equal keys
+/// swept to the ends, insertion sort under seven or when a pass swaps nothing), on `v`'s entries.
+fn qsort(v: &mut [usize], cmp: &dyn Fn(usize, usize) -> i32) {
+    let insertion = |v: &mut [usize]| {
+        for m in 1..v.len() {
+            let mut l = m;
+            while l > 0 && cmp(v[l - 1], v[l]) > 0 {
+                v.swap(l, l - 1);
+                l -= 1;
+            }
+        }
+    };
+    let med3 = |v: &[usize], a: usize, b: usize, c: usize| -> usize {
+        if cmp(v[a], v[b]) < 0 {
+            if cmp(v[b], v[c]) < 0 { b } else if cmp(v[a], v[c]) < 0 { c } else { a }
+        } else if cmp(v[b], v[c]) > 0 {
+            b
+        } else if cmp(v[a], v[c]) < 0 {
+            a
+        } else {
+            c
+        }
+    };
+    let mut v = v;
+    loop {
+        let n = v.len();
+        if n < 7 {
+            insertion(v);
+            return;
+        }
+        let mut m = n / 2;
+        if n > 7 {
+            let (mut l, mut h) = (0, n - 1);
+            if n > 40 {
+                let d = n / 8;
+                l = med3(v, l, l + d, l + 2 * d);
+                m = med3(v, m - d, m, m + d);
+                h = med3(v, h - 2 * d, h - d, h);
+            }
+            m = med3(v, l, m, h);
+        }
+        v.swap(0, m);
+        let mut swapped = false;
+        let (mut a, mut b) = (1usize, 1usize);
+        let (mut c, mut d) = (n as isize - 1, n as isize - 1);
+        loop {
+            while b as isize <= c {
+                let r = cmp(v[b], v[0]);
+                if r > 0 {
+                    break;
+                }
+                if r == 0 {
+                    swapped = true;
+                    v.swap(a, b);
+                    a += 1;
+                }
+                b += 1;
+            }
+            while b as isize <= c {
+                let r = cmp(v[c as usize], v[0]);
+                if r < 0 {
+                    break;
+                }
+                if r == 0 {
+                    swapped = true;
+                    v.swap(c as usize, d as usize);
+                    d -= 1;
+                }
+                c -= 1;
+            }
+            if b as isize > c {
+                break;
+            }
+            v.swap(b, c as usize);
+            swapped = true;
+            b += 1;
+            c -= 1;
+        }
+        if !swapped {
+            insertion(v);
+            return;
+        }
+        let (c, d) = (c as usize + 1, d as usize + 1); // one past, as the pointers' byte spans count
+        let r = a.min(b - a);
+        for k in 0..r {
+            v.swap(k, b - r + k);
+        }
+        let r = (d - c).min(n - d);
+        for k in 0..r {
+            v.swap(b + k, n - r + k);
+        }
+        let left = b - a;
+        let right = d - c;
+        if left > 1 {
+            qsort(&mut v[..left], cmp);
+        }
+        if right <= 1 {
+            return;
+        }
+        let all = std::mem::take(&mut v);
+        v = &mut all[n - right..];
+    }
+}
+
+impl crate::Sim {
+    /// **A race's engine notes at the load, with its AI riders** (S363): the vehicle loader builds
+    /// the load's bikes in [`build_order`] — by model name — and each bike's builder makes its note
+    /// and draws its start delay ([`RiderNote::build`]) before an AI rider's brain is spawned on it
+    /// (ten draws, and the reader's two, [`crate::ai::Lane::spawn`]). `models` is every player of the
+    /// load's bike model, humans first: this Sim's humans (`roster.humans`, players 0 up), then the
+    /// humans whose bikes are other seats' Sims — their delays drawn and dropped, this Sim does not
+    /// hold their notes — then the AI riders, this Sim's players after its humans. Every bike's note
+    /// is on `sounds`. Otherwise as [`crate::Sim::spawn_ai`]: the lane goes on with the generator,
+    /// and so does the race's, where there is one.
+    #[allow(clippy::too_many_arguments)] // spawn_ai's, and the notes'
+    pub fn spawn_ai_noted(
+        &mut self, roster: &crate::ai::Roster, file: Option<&crate::phy::Ini>, difficulty: u8, event_kind: i32,
+        entry: &crate::ai::Entry, mut rng: Rng, sounds: &Arc<NoteSounds>, models: &[&str],
+    ) {
+        let humans = roster.humans.max(0) as usize;
+        let load_humans = models.len().checked_sub(roster.ai.len()).filter(|&h| h >= humans).expect("a model for every player of the load");
+        let last = humans + roster.ai.len();
+        assert!(last <= self.players(), "AI player {} has no bike: the Sim has {} players", last - 1, self.players());
+        let seek = self.seek.take().map_or_else(crate::ai::seek::World::default, |w| *w);
+        let tables = Arc::new(crate::ragdoll::Tables::build());
+        let mut riders: Vec<Option<RiderNote>> = vec![None; last];
+        let mut pilots = Vec::with_capacity(roster.ai.len());
+        for i in build_order(models) {
+            let note = RiderNote::build(Arc::clone(sounds), &mut rng);
+            if i < humans {
+                riders[i] = Some(note);
+            } else if i >= load_humans {
+                let k = i - load_humans;
+                riders[humans + k] = Some(note);
+                // One rider's spawn at a time, so the next bike's delay draws between the brains.
+                let one = crate::ai::Lane::spawn(crate::ai::seek::World::default(), Arc::clone(&tables), rng, &[(humans + k, roster.ai[k])], file, difficulty, event_kind, entry);
+                rng = one.rng;
+                pilots.extend(one.pilots);
+            }
+        }
+        pilots.sort_by_key(|p| p.0);
+        self.ai = (!roster.ai.is_empty()).then(|| Box::new(crate::ai::Lane { seek, tables, rng, pilots, net: None, cards: Vec::new(), edge: None }));
+        if let Some(race) = self.race.as_deref_mut() {
+            race.rng = rng;
+        }
+        self.notes = Some(Box::new(Notes { riders: riders.into_iter().map(|n| n.expect("every player built")).collect() }));
+    }
+
+    /// **A race's engine notes at the load, with no AI riders** (S363): every bike's note built on
+    /// the race's generator in [`build_order`] over `models`, one per player of the load, this Sim's
+    /// players first: theirs kept, the rest (other seats' humans) drawn and dropped. No race, no notes.
+    pub fn load_notes(&mut self, sounds: &Arc<NoteSounds>, models: &[&str]) {
+        let n = self.players();
+        assert!(models.len() >= n, "a model for every player of the load");
+        let Some(race) = self.race.as_deref_mut() else { return };
+        let mut riders: Vec<Option<RiderNote>> = vec![None; n];
+        for i in build_order(models) {
+            let note = RiderNote::build(Arc::clone(sounds), &mut race.rng);
+            if i < n {
+                riders[i] = Some(note);
+            }
+        }
+        self.notes = Some(Box::new(Notes { riders: riders.into_iter().map(|n| n.expect("every player built")).collect() }));
     }
 }

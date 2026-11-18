@@ -8260,6 +8260,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("ai seek: {} targets, {} zones, {} riders, {slots} slots", w.targets.len(), w.groups.len(), w.sets.len());
         }
     }
+    // S363: a race's engine notes, in the first seat's Sim, off the bike's .aud whether the sound is
+    // on or not: the load draws each bike's start delay on the race's generator, between the AI brains,
+    // in the order the bikes' model names sort to. Every racer rides the first bike here.
+    let note_sounds = race_start.as_ref().map(|_| {
+        Arc::new(Disc::open_configured().and_then(|d| audio::note_sounds(d, &bike_member)).unwrap_or_else(|e| {
+            println!("engine notes: {e} — every sample lasts nothing");
+            game_sim::engine_note::NoteSounds::default()
+        }))
+    });
+    let racers = race_start.as_ref().map_or(1, |s| s.riders.max(riders as i32).max(1) as usize);
+    let note_models = vec![bike_member.as_str(); racers];
+    if let (Some(sounds), Some(_)) = (note_sounds.as_ref(), race_start.as_ref().filter(|s| s.ai.is_empty())) {
+        seats[0].sim.load_notes(sounds, &note_models);
+    }
     // P313a: the race's AI riders get their brains, off the bike's character file, once the
     // seeker world is in.
     if let Some(start) = race_start.as_ref().filter(|s| !s.ai.is_empty()) {
@@ -8268,7 +8282,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("race: no AI character file — {e}");
         }
         let file = file.ok().map(|b| game_sim::phy::Ini::parse_bytes(&b));
-        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED);
+        let notes = note_sounds.as_ref().map(|n| (n, note_models.as_slice()));
+        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED, notes);
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
         // S331b: and the track's AI net their race drivers follow, beside the race file.
@@ -13215,6 +13230,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         body: audio::RiderBody::of(&seat.sim.rider),
         // The sim's wreck emitters (P202): the voice and the clank play the clips it picked.
         emitters: Some(audio::WreckEmitters::of(&seat.sim.rider)),
+        // S363: a race's engine note as the Sim picks it; a wreck's hands stay the shell's own.
+        note: seat.sim.notes.as_deref().and_then(|n| n.riders.first()).filter(|_| seat.sim.rider.state.wreck.is_none()).cloned(),
         // The rear wheel on a prop (P145): its material, where it touches, and the body's velocity.
         drive_on: audio::DriveOnFrame {
             material: r.rear_material,

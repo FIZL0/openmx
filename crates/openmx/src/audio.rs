@@ -1609,7 +1609,8 @@ impl BikeSounds {
     pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> BikeSounds {
         let s = ini::parse(text);
         let params = section(&s, "Params");
-        let p = |k: &str, d: f32| params.and_then(|p| p.number(k)).unwrap_or(d);
+        // S363: as the game's reader reads a float, truncated to the f32 below (the Sim decides by these).
+        let p = |k: &str, d: f32| params.and_then(|p| p.get(k)).map_or(d, |t| game_sim::phy::number(t).0);
         BikeSounds {
             idle: List::read(section(&s, "Idle"), lib),
             low: List::read(section(&s, "LowAccel"), lib),
@@ -1620,7 +1621,7 @@ impl BikeSounds {
             clutch: List::read(section(&s, "Clutch"), lib),
             panic: List::read(section(&s, "Panic"), lib),
             wreck: MachineWreck::read(text, "", lib),
-            low_torque_speed: p("LowTorqueSpeed", 25.0) * 1.46666,
+            low_torque_speed: (F(p("LowTorqueSpeed", 25.0)) * F(1.46666)).0,
             airborne_to_decel: p("AirborneTimeToDecel", 0.3),
             rev_midpoint: p("RevMidpoint", 0.311),
             overlap: p("OverlapTime", 0.008),
@@ -1657,6 +1658,26 @@ impl BikeSounds {
 
     pub fn seconds(&self, s: Sample) -> f32 {
         self.clip(s).map_or(0.0, |c| c.0.seconds())
+    }
+}
+
+impl BikeSounds {
+    /// **What the Sim's engine notes decide by** (S363): each list's samples' lengths and looping
+    /// flags, the `[Params]` and the hearing distance, as numbers ([`game_sim::engine_note::NoteSounds`]).
+    pub fn note_sounds(&self) -> game_sim::engine_note::NoteSounds {
+        const LISTS: [Note; 8] = [Note::Idle, Note::LowAccel, Note::HighAccel, Note::Power, Note::Sputter, Note::Decel, Note::Clutch, Note::Rev];
+        let lists = LISTS.map(|list| {
+            (0..self.count(list)).map(|index| Sample { list, index }).map(|s| (self.seconds(s), self.looping(s))).collect()
+        });
+        game_sim::engine_note::NoteSounds {
+            lists,
+            low_torque_speed: self.low_torque_speed,
+            airborne_to_decel: self.airborne_to_decel,
+            rev_midpoint: self.rev_midpoint,
+            overlap: self.overlap,
+            pitch_variance: self.pitch_variance,
+            far: self.far,
+        }
     }
 }
 
@@ -1810,26 +1831,34 @@ pub struct Engine {
     limiter: Option<VoiceId>,
     /// The nearest ear last frame, for its speed.
     ear: Option<[f32; 3]>,
+    /// The Sim's voices last frame, while it follows the Sim's note (S363): each sample and how far in.
+    followed: Vec<(Sample, f32)>,
 }
 
 impl Engine {
     pub fn new(seed: u64) -> Engine {
-        Engine { brain: Brain::new(), dice: Dice::new(seed), voices: Vec::new(), limiter: None, ear: None }
+        Engine { brain: Brain::new(), dice: Dice::new(seed), voices: Vec::new(), limiter: None, ear: None, followed: Vec::new() }
     }
 
     pub fn note(&self) -> Note {
         self.brain.note
     }
 
-    /// One frame: the machine, then every voice moved to the bike and shifted for its speed.
-    pub fn update(&mut self, h: &Hands, dt: f32, mixer: &mut Mixer, sounds: &BikeSounds) {
+    /// The Doppler shift at the nearest ear, whose speed is measured from last frame.
+    fn ear_pitch(&mut self, h: &Hands, dt: f32, mixer: &Mixer, sounds: &BikeSounds) -> f32 {
         let ear = mixer.nearest(h.at);
         let ear_vel = match (ear, self.ear) {
             (Some(e), Some(was)) if dt > 0.0 => [(e[0] - was[0]) / dt, (e[1] - was[1]) / dt, (e[2] - was[2]) / dt],
             _ => [0.0; 3],
         };
         self.ear = ear;
-        let pitch = ear.map_or(1.0, |e| doppler(sounds.doppler, h.at, h.vel, e, ear_vel));
+        ear.map_or(1.0, |e| doppler(sounds.doppler, h.at, h.vel, e, ear_vel))
+    }
+
+    /// One frame: the machine, then every voice moved to the bike and shifted for its speed.
+    pub fn update(&mut self, h: &Hands, dt: f32, mixer: &mut Mixer, sounds: &BikeSounds) {
+        self.followed.clear();
+        let pitch = self.ear_pitch(h, dt, mixer, sounds);
         let mut bench = Bench {
             mixer,
             sounds,
@@ -1852,6 +1881,47 @@ impl Engine {
         self.voices.retain(|v| mixer.playing(v.voice));
     }
 
+    /// **One frame of the Sim's note** (S363): `note` is the bike's engine note as the Sim ran it — its
+    /// picks and pitch draws on the game's generator — and the mixer plays its voices: each sample the
+    /// Sim started since last frame (new, or its clock gone back) starts with the variance the Sim drew,
+    /// one the Sim no longer sounds stops, the limiter's hold pauses the rev and plays `[Panic]`'s loop.
+    /// The machine takes the Sim's state, so [`Engine::update`] goes on from it on this file's dice.
+    pub fn follow(&mut self, note: &game_sim::engine_note::RiderNote, h: &Hands, dt: f32, mixer: &mut Mixer, sounds: &BikeSounds) {
+        let pitch = self.ear_pitch(h, dt, mixer, sounds);
+        let sim = &note.voices.voices;
+        for v in self.voices.iter().filter(|v| !sim.iter().any(|w| w.s == v.s)) {
+            mixer.stop(v.voice);
+        }
+        self.voices.retain(|v| sim.iter().any(|w| w.s == v.s));
+        let mut bench = Bench { mixer, sounds, voices: &mut self.voices, limiter: &mut self.limiter, at: h.at, pitch };
+        for w in sim {
+            let seen = self.followed.iter().find(|f| f.0 == w.s).map(|f| f.1);
+            let started = match seen {
+                Some(at) => w.at.0 < at,
+                None => !bench.voices.iter().any(|v| v.s == w.s),
+            };
+            if started && bench.play(w.s) {
+                bench.detune(w.s, w.detune);
+            }
+            for v in bench.voices.iter().filter(|v| v.s == w.s) {
+                bench.mixer.pause(v.voice, w.paused);
+            }
+        }
+        let held = sim.iter().any(|w| w.s == Sample::REV && w.paused);
+        if held != bench.limiter.is_some() {
+            bench.hold(held);
+        }
+        self.followed = sim.iter().map(|w| (w.s, w.at.0)).collect();
+        self.brain = note.brain.clone();
+        for v in &self.voices {
+            mixer.set(v.voice, ENGINE_GAIN, v.detune * pitch, Some(h.at));
+        }
+        if let Some(v) = self.limiter {
+            mixer.set(v, ENGINE_GAIN, pitch, Some(h.at));
+        }
+        self.voices.retain(|v| mixer.playing(v.voice));
+    }
+
     /// Quiet the engine (the rider left the bike for the plane); it comes back at the idle.
     pub fn silence(&mut self, mixer: &mut Mixer) {
         for v in self.voices.drain(..) {
@@ -1861,6 +1931,7 @@ impl Engine {
             mixer.stop(v);
         }
         self.brain = Brain::new();
+        self.followed.clear();
     }
 
     /// Every voice the engine has going: its samples and the limiter's loop.
@@ -3436,7 +3507,7 @@ impl HitTable {
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SeatFrame {
     pub hands: Hands,
     /// The rider came off, for this reason.
@@ -3470,6 +3541,10 @@ pub struct SeatFrame {
     /// This seat's own pause is open (P172): everything of its own holds where it is, silent, and
     /// goes on from there when it closes, while the other seats play on.
     pub paused: bool,
+    /// S363: the bike's engine note as the Sim runs it, in a race whose Sim holds the notes: the
+    /// engine plays its picks ([`Engine::follow`]). `None` — no notes, or the wreck's own hands —
+    /// leaves the engine to pick on the shell's own dice.
+    pub note: Option<game_sim::engine_note::RiderNote>,
 }
 
 /// One rider's sounds: the bike they ride, and what plays for them.
@@ -3787,7 +3862,10 @@ impl Sound {
             }
             s.edge.tick(m, &self.shootoff, &f.edge);
             s.plane.silence(m);
-            s.engine.update(h, dt, m, &s.bike);
+            match &f.note {
+                Some(note) => s.engine.follow(note, h, dt, m, &s.bike),
+                None => s.engine.update(h, dt, m, &s.bike),
+            }
             s.drive_on.tick(m, &self.drive_on, &f.drive_on);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
             let busy = s.voice.busy(m, f.body.at, dt);
@@ -4633,6 +4711,13 @@ impl Sound {
 pub fn wreck_kit(disc: Disc, bike: &str, rider: Option<&str>) -> Result<game_sim::wreck_sound::Kit, String> {
     let mut lib = Library::open(disc)?;
     Ok(Reading { lib: &mut lib }.wreck_kit(bike, rider))
+}
+
+/// [`BikeSounds::note_sounds`] off the disc for the bike archive `bike`: what a race's engine notes
+/// in the Sim are loaded with, whether the sound is on or not (S363).
+pub fn note_sounds(disc: Disc, bike: &str) -> Result<game_sim::engine_note::NoteSounds, String> {
+    let mut lib = Library::open(disc)?;
+    Ok(Reading { lib: &mut lib }.bike(bike).note_sounds())
 }
 
 /// One map of a world of disc tracks (P71), as its sound emitters are read: its archive
