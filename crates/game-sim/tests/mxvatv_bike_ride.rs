@@ -10638,54 +10638,50 @@ fn the_node_transforms_are_the_originals() {
     let node = ee.u32_at(BIKE + 0xe4);
     let mut pick = picker(0x5eed);
     let (mut off, mut marked) = (Vec::new(), 0);
-    let base = ee.ram.clone();
+    // The image put back through the journal, the two runs compared by it ([`split_run`]): three
+    // copies of all of RAM a case were most of this test's time (K73).
+    ee.mark();
+    let stack = (ee.stack - 0x4_0000) as usize..(ee.stack + 0x400) as usize;
     for k in 0..10_000 {
         let mut scene = random_node(&mut ee, node, &mut pick);
         let mut f = || f32::from_bits(((pick() % 4001) as f32 / 100.0 - 20.0).to_bits());
         let v = Vf::new(f(), f(), f(), f());
         let (out, p) = (ee.scratch(1), ee.scratch(0));
         set_vf(&mut ee, p, v);
-        let snapshot = ee.ram.clone();
-        let (want, got, name) = match k % 4 {
-            0 => {
-                ee.set(28, GP);
-                ee.call(NODE_ROTATE, &[u64::from(out), u64::from(node), u64::from(p)], &[], BUDGET);
-                (vf_at(&ee, out), scene.turn(0, v), "rotate")
-            }
-            1 => {
-                ee.set(28, GP);
-                ee.call(NODE_TIP, &[u64::from(out), u64::from(node), u64::from(p)], &[], BUDGET);
-                (vf_at(&ee, out), scene.tip(0, v), "point")
-            }
-            2 => {
-                ee.set(28, GP);
-                ee.call(NODE_POSITION, &[u64::from(node), 0, u64::from(out)], &[], BUDGET);
-                (vf_at(&ee, out), scene.position(0), "position")
-            }
+        let (call, args, got, name) = match k % 4 {
+            0 => (NODE_ROTATE, [u64::from(out), u64::from(node), u64::from(p)], scene.turn(0, v), "rotate"),
+            1 => (NODE_TIP, [u64::from(out), u64::from(node), u64::from(p)], scene.tip(0, v), "point"),
+            2 => (NODE_POSITION, [u64::from(node), 0, u64::from(out)], scene.position(0), "position"),
             _ => {
-                ee.set(28, GP);
-                ee.call(NODE_SET, &[u64::from(node), 0, u64::from(p)], &[], BUDGET);
                 scene.set_position(0, v).unwrap();
-                (Vf::ZERO, Vf::ZERO, "set")
+                (NODE_SET, [u64::from(node), 0, u64::from(p)], Vf::ZERO, "set")
             }
         };
+        let mut want = Vf::ZERO;
+        // RAM: the original's after its call, the port's the scene's words put back.
+        let differ = split_run(&mut ee, stack.clone(), |ee| {
+            ee.set(28, GP);
+            ee.call(call, &args, &[], BUDGET);
+            if name != "set" {
+                want = vf_at(ee, out);
+            }
+        }, |ee| {
+            let m = |a| ee.u32_at(a);
+            let (mut b, at) = steps::read(&m, BIKE).unwrap();
+            let last = steps::words(&b, &at, &m);
+            b.parts.scene = scene;
+            rows_heights(&mut b);
+            let now = steps::words(&b, &at, &m);
+            set_changed(ee, &now, &last);
+        });
         if want.to_bits() != got.to_bits() {
             off.push(format!("{k} {name}: original {:x?}, port {:x?}", want.to_bits(), got.to_bits()));
         }
-        // RAM: the original's after its call, the port's the scene's words put back.
-        let after = std::mem::replace(&mut ee.ram, snapshot);
-        let m = |a| ee.u32_at(a);
-        let (mut b, at) = steps::read(&m, BIKE).unwrap();
-        let last = steps::words(&b, &at, &m);
-        b.parts.scene = scene;
-        rows_heights(&mut b);
-        let now = steps::words(&b, &at, &m);
-        set_changed(&mut ee, &now, &last);
         if name == "set" {
             marked += usize::from(ee.u8_at(ee.u32_at(node + 0xf4) + 0x100) & 1 == 0);
         }
-        off.extend(bytes_differ(&after, &ee.ram, ee.stack).into_iter().map(|r| format!("{k} {name}: RAM differs at {r}")));
-        ee.ram.clone_from(&base);
+        off.extend(differ.into_iter().map(|r| format!("{k} {name}: RAM differs at {r}")));
+        ee.undo();
     }
     assert!(marked > 500, "the set marked the node's children out of date {marked} times");
     assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
@@ -16146,12 +16142,14 @@ fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_si
     assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
     // The plant groups' parts, as collidables of their own.
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
             }
@@ -16656,12 +16654,14 @@ fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<St
     assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the search would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, part, list);
     // The plant groups' parts, as collidables of their own (the search tests them unfiltered).
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
             }
@@ -16717,12 +16717,14 @@ fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>)
     use game_sim::atv_search;
     assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter: its reset and test are not Rust's");
     let (mut m, mut objects, mut broad) = GatherInRam::read(ee, part);
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = m.items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, m.items[k]) {
-            if p != 0 && !m.items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 m.items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
                 broad.places.push(bp::Placement::default());
@@ -21965,12 +21967,14 @@ fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<Str
     broad.places[0].last = [0, 4, 8, 12].map(|i| word_f(ee, probe + 0x60 + i));
     let mut items = m.items.clone();
     // The plant groups' parts, as collidables of their own.
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
                 broad.places.push(bp::Placement::default());
@@ -22913,12 +22917,14 @@ fn sphere_search_in_ram(ee: &mut Ee, sphere: u32, pool: u32, kinds: &mut BTreeMa
     use game_sim::atv_search;
     assert_eq!(ee.u32_at(pool + 0x40), 0, "the pool has a grid: the search would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, sphere, pool);
+    // A set beside the list: `contains` on it was most of the search tests' time (K73).
+    let mut have: std::collections::HashSet<u32> = items.iter().copied().collect();
     for k in 0..objects.len() {
         if objects[k].class != ws::Class::Group {
             continue;
         }
         for p in PartWorldInRam::species_parts(ee, items[k]) {
-            if p != 0 && !items.contains(&(p + 0x18)) {
+            if p != 0 && have.insert(p + 0x18) {
                 items.push(p + 0x18);
                 objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
             }

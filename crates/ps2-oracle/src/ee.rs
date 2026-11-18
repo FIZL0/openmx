@@ -48,11 +48,11 @@ pub struct Ee {
     /// The scratchpad at `0x70000000`.
     pub spr: Vec<u8>,
     /// Every byte address written since the current call began — how a test checks out-parameters and
-    /// how `./kit oracle` reports what a function touched.
-    pub written: BTreeSet<u32>,
+    /// how `./kit oracle` reports what a function touched. Reads as a `BTreeSet` ([`Bytes`]).
+    pub written: Bytes,
     /// Every byte address read while this is `Some` — what a function depends on, for finding which
     /// parts of a RAM dump a replay has to lay in. Off (`None`) unless a test turns it on.
-    pub reads: std::cell::RefCell<Option<BTreeSet<u32>>>,
+    pub reads: std::cell::RefCell<Option<Bytes>>,
     /// Every byte written while this is `Some`, in order, as (pc of the store, address, byte) — the
     /// machine's every instant inside a call, for telling which point of a frame a mid-frame capture
     /// row was read at. Off (`None`) unless a test turns it on; nothing clears it but the test.
@@ -81,6 +81,176 @@ pub struct Ee {
 struct Journal {
     seen: Vec<u64>,
     pages: BTreeMap<u32, Box<[u8]>>,
+}
+
+/// A set of byte addresses, as [`Ee::written`] and [`Ee::reads`] keep them: it reads as the
+/// `BTreeSet<u32>` it derefs to, but a byte noted goes to one bit of its page first, and only into the
+/// set when something looks. Inserting every byte of every load and store into the set was most of the
+/// time of the replay tests that watch a whole frame (K73); a byte read a thousand times costs a bit
+/// set a thousand times and one insert.
+#[derive(Default)]
+pub struct Bytes {
+    /// What was in the set before the pending bits, while nobody has looked since.
+    base: std::cell::Cell<BTreeSet<u32>>,
+    pending: std::cell::RefCell<Pages>,
+    /// The whole set, once something looked; the bits and `base` are empty while this is set.
+    whole: std::cell::OnceCell<BTreeSet<u32>>,
+}
+
+/// Bytes noted as one bit each per 4 KiB page.
+#[derive(Default)]
+struct Pages {
+    /// Page number (address >> 12) to its slot in `bits`.
+    index: std::collections::HashMap<u32, usize>,
+    pages: Vec<u32>,
+    bits: Vec<[u64; PAGE / 64]>,
+    count: usize,
+    /// The page last noted, and its slot: most accesses are near the one before.
+    last: Option<(u32, usize)>,
+}
+
+impl Bytes {
+    /// `a..a + n`, as `extend(a..a.wrapping_add(n))` would add them.
+    pub fn note(&mut self, a: u32, n: usize) {
+        if let Some(whole) = self.whole.take() {
+            *self.base.get_mut() = whole;
+        }
+        let end = a.wrapping_add(n as u32);
+        if end > a {
+            self.pending.get_mut().note(a, end);
+        }
+    }
+
+    /// Empty, without making the set first (as the `BTreeSet`'s own `clear` through the deref would).
+    pub fn clear(&mut self) {
+        self.base.get_mut().clear();
+        self.pending.get_mut().clear();
+        self.whole.take();
+    }
+
+    fn whole(&self) -> &BTreeSet<u32> {
+        self.whole.get_or_init(|| {
+            let mut set = self.base.take();
+            self.pending.borrow_mut().drain_into(&mut set);
+            set
+        })
+    }
+}
+
+impl Pages {
+    fn note(&mut self, a: u32, end: u32) {
+        for b in a..end {
+            let page = b >> 12;
+            let slot = match self.last {
+                Some((p, s)) if p == page => s,
+                _ => {
+                    let s = *self.index.entry(page).or_insert_with(|| {
+                        self.pages.push(page);
+                        self.bits.push([0; PAGE / 64]);
+                        self.pages.len() - 1
+                    });
+                    self.last = Some((page, s));
+                    s
+                }
+            };
+            let o = (b & 0xfff) as usize;
+            let word = &mut self.bits[slot][o / 64];
+            self.count += (*word >> (o % 64) & 1 == 0) as usize;
+            *word |= 1 << (o % 64);
+        }
+    }
+
+    /// Everything noted, added to `set` (in bulk when there are many) and forgotten here.
+    fn drain_into(&mut self, set: &mut BTreeSet<u32>) {
+        if self.pages.is_empty() {
+            return;
+        }
+        let mut order: Vec<usize> = (0..self.pages.len()).collect();
+        order.sort_unstable_by_key(|&s| self.pages[s]);
+        let (pages, bits) = (&self.pages, &self.bits);
+        let sorted = order.into_iter().flat_map(|s| {
+            let base = pages[s] << 12;
+            bits[s].iter().enumerate().flat_map(move |(w, &word)| {
+                (0..64).filter(move |b| word >> b & 1 != 0).map(move |b| base | (w * 64 + b) as u32)
+            })
+        });
+        // Each insert searches the set; a merge rebuilds it. A few into many: insert.
+        if self.count < set.len() / 16 {
+            set.extend(sorted);
+        } else {
+            let mut add: BTreeSet<u32> = sorted.collect();
+            set.append(&mut add);
+        }
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        self.index.clear();
+        self.pages.clear();
+        self.bits.clear();
+        self.count = 0;
+        self.last = None;
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = BTreeSet<u32>;
+    fn deref(&self) -> &BTreeSet<u32> {
+        self.whole()
+    }
+}
+
+impl std::ops::DerefMut for Bytes {
+    fn deref_mut(&mut self) -> &mut BTreeSet<u32> {
+        self.whole();
+        self.whole.get_mut().expect("just made")
+    }
+}
+
+impl Clone for Bytes {
+    fn clone(&self) -> Bytes {
+        BTreeSet::clone(self).into()
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        BTreeSet::fmt(self, f)
+    }
+}
+
+impl PartialEq for Bytes {
+    fn eq(&self, other: &Bytes) -> bool {
+        **self == **other
+    }
+}
+
+impl From<BTreeSet<u32>> for Bytes {
+    fn from(set: BTreeSet<u32>) -> Bytes {
+        Bytes { whole: set.into(), ..Default::default() }
+    }
+}
+
+impl From<Bytes> for BTreeSet<u32> {
+    fn from(mut b: Bytes) -> BTreeSet<u32> {
+        std::mem::take(&mut *b)
+    }
+}
+
+impl IntoIterator for Bytes {
+    type Item = u32;
+    type IntoIter = std::collections::btree_set::IntoIter<u32>;
+    fn into_iter(self) -> Self::IntoIter {
+        BTreeSet::from(self).into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Bytes {
+    type Item = &'a u32;
+    type IntoIter = std::collections::btree_set::Iter<'a, u32>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 /// How many words [`Ee::call`]'s hook filter tells apart.
@@ -115,7 +285,7 @@ impl Ee {
             npc: 0,
             ram,
             spr: vec![0; SPR],
-            written: BTreeSet::new(),
+            written: Bytes::default(),
             reads: std::cell::RefCell::new(None),
             log: std::cell::RefCell::new(None),
             steps: 0,
@@ -245,7 +415,7 @@ impl Ee {
     pub fn read(&self, a: u32, n: usize) -> u128 {
         let (spr, o) = self.loc(a);
         if let Some(reads) = self.reads.borrow_mut().as_mut() {
-            reads.extend(a..a.wrapping_add(n as u32));
+            reads.note(a, n);
         }
         let m = if spr { &self.spr } else { &self.ram };
         let mut b = [0u8; 16];
@@ -270,7 +440,7 @@ impl Ee {
             log.extend((0..n).map(|k| (pc, a.wrapping_add(k as u32), (v >> (8 * k)) as u8)));
         }
         if !self.quiet {
-            self.written.extend(a..a.wrapping_add(n as u32));
+            self.written.note(a, n);
         }
     }
     /// `f` with its writes left out of [`Ee::written`] (the journal still sees them): for a harness

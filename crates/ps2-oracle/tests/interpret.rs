@@ -8,6 +8,7 @@
 
 use ps2_float::fpu;
 use ps2_oracle::Ee;
+use std::collections::BTreeSet;
 
 /// Where the test programs are assembled. Any address inside RAM does; this one is clear of the stack.
 const CODE: u32 = 0x0010_0000;
@@ -365,4 +366,65 @@ fn the_byte_subtract_wraps_each_byte_on_its_own() {
         .map(|k| ee.u32_at(a + 4 * k).wrapping_sub(ee.u32_at(b + 4 * k)))
         .collect();
     assert_eq!(words, want);
+}
+
+#[test]
+fn reads_and_writes_are_whole_when_a_hook_looks_and_when_the_call_ends() {
+    // K73: what a call touches is noted as bits and only made a set when Rust looks: in a hook, after
+    // the call, between writes of its own. Every byte is there each time, a store across a page edge too.
+    let callee = CODE + 0x100;
+    let mut ee = prog(&[
+        i(9, 29, 29, -16),           // addiu sp, sp, -16
+        i(0x3f, 29, 31, 0),          // sd    ra, 0(sp)
+        i(0x2b, 4, 5, 0),            // sw    a1, 0(a0)
+        i(0x23, 4, 2, 0),            // lw    v0, 0(a0)
+        3 << 26 | callee >> 2,       // jal   callee
+        NOP,
+        i(0x28, 4, 5, 8),            // sb    a1, 8(a0)
+        i(0x37, 29, 31, 0),          // ld    ra, 0(sp)
+        JR_RA,
+        i(9, 29, 29, 16),            // addiu sp, sp, 16  (delay slot)
+    ]);
+    let (p, q, sp) = (0x5000 - 2, ee.scratch(1), ee.stack - 16);
+    let set = |rs: &[std::ops::Range<u32>]| rs.iter().cloned().flatten().collect::<BTreeSet<u32>>();
+    let fetched = |n: u32| CODE..CODE + 4 * n;
+    let (at_hook, read_by_hook) = (set(&[sp..sp + 8, p..p + 4]), set(&[fetched(6), p..p + 4]));
+    ee.hooks.insert(callee, Box::new(move |e| {
+        assert_eq!(*e.written, at_hook, "the hook sees every byte written so far");
+        assert_eq!(e.reads.borrow().as_deref(), Some(&read_by_hook), "and every byte read");
+        e.set_u32(q, 1);
+        assert!(e.written.contains(&q) && e.written.contains(&p), "a look after a write sees it");
+    }));
+    *ee.reads.borrow_mut() = Some(Default::default());
+    ee.call(CODE, &[p as u64, 0x1234_abcd], &[], 100);
+    assert_eq!(*ee.written, set(&[sp..sp + 8, p..p + 4, q..q + 4, p + 8..p + 9]));
+    assert_eq!(ee.reads.take().map(BTreeSet::from), Some(set(&[fetched(10), p..p + 4, sp..sp + 8])));
+}
+
+#[test]
+fn the_byte_record_reads_as_the_set_it_was_given() {
+    // Notes in and out of order, over many pages, looked at between: always the plain set's answer.
+    let (mut bytes, mut want) = (ps2_oracle::Bytes::default(), BTreeSet::new());
+    let mut x = 0x2545_f491u32;
+    for k in 0..20_000u32 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        let (a, n) = (x % 0x4_0000 | if k % 3 == 0 { 0x7000_0000 } else { 0 }, (x >> 24) as usize % 17);
+        bytes.note(a, n);
+        want.extend(a..a.wrapping_add(n as u32));
+        if k % 997 == 0 {
+            assert_eq!(*bytes, want, "after note {k}");
+            bytes.insert(k);
+            want.insert(k);
+        }
+    }
+    bytes.note(u32::MAX - 1, 4);
+    want.extend((u32::MAX - 1)..(u32::MAX - 1).wrapping_add(4));
+    assert_eq!(bytes.clone().into_iter().collect::<BTreeSet<u32>>(), want);
+    bytes.note(0x1234, 8);
+    bytes.clear();
+    assert!(bytes.is_empty(), "a clear with notes pending");
+    bytes.note(0x1234, 1);
+    assert_eq!(*bytes, BTreeSet::from([0x1234]), "and a note after it");
 }
