@@ -3118,7 +3118,7 @@ impl Pen<'_> {
         const SHOWN: usize = 9;
         let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
         let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
-        let hints = [(Btn::Circle, "Back"), (Btn::Triangle, "Unlock Shop"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
+        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
         // F10a: the rows closer where the touch pad is up and the title needs their room to rise;
         // the down arrow an em under them, clear of it too.
         let floor = self.above_the_raised_title(Screen::Race.title(), &hints, LIST_BOTTOM + 1.0);

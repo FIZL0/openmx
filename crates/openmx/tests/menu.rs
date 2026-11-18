@@ -66,7 +66,7 @@ use game_sim::modifiers::{Knob, Mods};
 use std::collections::{HashSet, VecDeque};
 
 /// The buttons a hand can press on a menu.
-const BUTTONS: [Control; 8] = [
+const BUTTONS: [Control; 9] = [
     Control::Up,
     Control::Down,
     Control::Left,
@@ -74,6 +74,7 @@ const BUTTONS: [Control; 8] = [
     Control::Cross,
     Control::Circle,
     Control::Square,
+    Control::Triangle,
     Control::Start,
 ];
 
