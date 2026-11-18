@@ -105,7 +105,8 @@
 //!     off-track ticks and 19 off-track limits, bit for bit.
 //! 27. **The machine race's handler** (S292a): the score manager's mode-1 handler on 20,000 lists of
 //!     one to five cards over chains of one to four gates and zone lists, every listener call, word,
-//!     flag, countdown, free record and the generator against `LapRules::machine_tick`.
+//!     flag, countdown, free record and the generator against `LapRules::machine_tick`; with the jump
+//!     watch on cards that ask for it and, on half the cases, a track and the path aim (S292c).
 //! 28. **The gate ranking**: its ranking alone on 20,000 lists with ties, against `LapRules::gate_rank`.
 //! 29. **The Hall of Fame test** (S13d): the front end's "does this time earn a place" on 20,000
 //!     tables, tracks, classes and times (whole seconds and a ulp either side, zero, negatives,
@@ -6489,7 +6490,7 @@ fn m_card(k: usize) -> u32 {
 fn machine_hooks(ee: &mut Ee, ends: &[u32]) -> Rc<RefCell<Vec<MHeard>>> {
     let heard: Rc<RefCell<Vec<MHeard>>> = Rc::default();
     for who in [OWNER, CHAIN, TO_LISTENER] {
-        for slot in (0..0x80).step_by(4) {
+        for slot in (0..0xa0).step_by(4) {
             let at = M_HOOKS + who * 0x100 + slot;
             ee.set_u32(M_VT + who * 0x100 + slot, at);
             let heard = heard.clone();
@@ -6500,6 +6501,10 @@ fn machine_hooks(ee: &mut Ee, ends: &[u32]) -> Rc<RefCell<Vec<MHeard>>> {
                     let l = who == TO_LISTENER;
                     let mut v = [0u32; 8];
                     let args = match slot {
+                        0x90 if !l => [r(5), r(6), r(7)],
+                        0x88 if l => [r(5), r(6), r(7)],
+                        0x74 | 0x78 | 0x7c if !l => [r(5), r(6), 0],
+                        0x7c | 0x80 | 0x84 if l => [r(5), r(6), 0],
                         0x08 if !l => [r(5), 0, 0],
                         0x20 if !l => {
                             for i in 0..4u32 {
@@ -6623,6 +6628,17 @@ fn machine_told(n: MachineNotice, at: u32, k: u32, owner: bool, chain: bool) -> 
             out
         }
         MachineNotice::TimeUp => fan(0x64, [at, 0, 0], Some((0x74, [at, 0, 0])), false),
+        MachineNotice::Jump(j) => {
+            let (o, l, first, a) = match j {
+                RaceNotice::TookOff => (0x90, 0x88, false, [M_MGR, at, 0]),
+                RaceNotice::Landed => (0x90, 0x88, false, [M_MGR, at, 1]),
+                RaceNotice::LongestJump => (0x74, 0x7c, true, [M_MGR, at, 0]),
+                RaceNotice::HighestJump => (0x78, 0x80, true, [M_MGR, at, 0]),
+                RaceNotice::LongestAir => (0x7c, 0x84, true, [M_MGR, at, 0]),
+                other => panic!("not a jump notice: {other:?}"),
+            };
+            fan(o, a, Some((l, a)), first)
+        }
     }
 }
 
@@ -6650,11 +6666,25 @@ fn machine_finish_told(n: FinishNotice, at: &[u32], owner: &[bool], chain: &[boo
     v
 }
 
-/// A machine-race card: a lap card with every flag the handler reads at its own odds (never the
-/// unported helper's `0x8_0000`), a gate to wait at, a step about it, and the handler's own words.
-fn machine_card(p: &mut Pick, k: usize, gates: &[Gate], rules: &LapRules) -> RaceCard {
+/// A machine-race card: a lap card with every flag the handler reads at its own odds (the jump
+/// watch's among them), a gate to wait at, a step about it, a spot on `track`, its jump words and the
+/// handler's own words.
+fn machine_card(p: &mut Pick, k: usize, gates: &[Gate], rules: &LapRules, track: &TrackPaths) -> RaceCard {
     let mut lap = lap_card(p, 0);
-    lap.flags = finish_flags(p, lap.flags) & !0x8_0000;
+    lap.flags = finish_flags(p, lap.flags);
+    for (bit, odds) in [
+        (race_card_flags::WATCHES_JUMPS, 2),
+        (race_card_flags::GROUNDED, 2),
+        (race_card_flags::WAS_GROUNDED, 2),
+        (race_card_flags::JUMP_TO_JUDGE, 2),
+    ] {
+        if p.below(odds) == 0 {
+            lap.flags |= bit;
+        } else {
+            lap.flags &= !bit;
+        }
+    }
+    lap.spot = t_spot_on(p, track);
     if p.below(3) == 0 {
         lap.flags |= card_flags::TAKING_PART;
         lap.flags &= !(card_flags::OUT | card_flags::TIMED_OUT);
@@ -6693,18 +6723,21 @@ fn machine_card(p: &mut Pick, k: usize, gates: &[Gate], rules: &LapRules) -> Rac
     }
     let odometer = time_word(p, 9000.0);
     let (lx, lz, tx, tz) = (p.range(-1.0, 1.0), p.range(-1.0, 1.0), p.range(-1.0, 1.0), p.range(-1.0, 1.0));
+    let aim = t_spot_on(p, track);
     RaceCard {
         lap,
         odometer,
         look: p.quad([lx, 0.0, lz]),
         to_track: p.quad([tx, 0.0, tz]),
+        aim,
+        jumps: jumps_of(p),
         ..RaceCard::default()
     }
 }
 
 fn machine_rules(p: &mut Pick) -> LapRules {
     let mut rules = finish_rules(p);
-    for (bit, odds) in [(race_flags::ZONES, 2), (race_flags::KEEP_LAPS, 2)] {
+    for (bit, odds) in [(race_flags::ZONES, 2), (race_flags::KEEP_LAPS, 2), (race::PATH_STEER, 2), (race_flags::JUMP_JUDGED, 2)] {
         if p.below(odds) == 0 {
             rules.flags |= bit;
         } else {
@@ -6725,7 +6758,9 @@ fn machine_rules(p: &mut Pick) -> LapRules {
 /// four gates and zone lists, against [`LapRules::machine_tick`]: every listener call in order with its
 /// card, zone, other card and the two vectors it is pointed at, the handler's answer, the list's order,
 /// every word of every card and ghost card, the manager's flags, the countdown, the free records and
-/// the generator. The manager holds no track, so the path steering (unported) is never taken.
+/// the generator. Cards watch their jumps at even odds; on half the cases the manager holds a
+/// generated track (nodes skipped by the path aim's walk now and then), and then the paths' words and
+/// pools are held too.
 #[test]
 fn the_machine_race_matches_the_score_managers_mode_1_handler() {
     let Some(mut ee) = game_or_skip() else { return };
@@ -6737,15 +6772,24 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
     let mut p = Pick(0x3a7c_15e2_90bd_4f61);
     let mut said = std::collections::BTreeMap::<String, usize>::new();
     let (mut stopped, mut near, mut far, mut made_up) = (0, 0, 0, 0);
+    let (mut steered, mut walked, mut stepped_back, mut no_node, mut pulled) = (0, 0, 0, 0, 0);
     for case in 0..20_000 {
         let mut rules = machine_rules(&mut p);
         let n = 1 + p.below(5) as usize;
         let gates: Vec<Gate> = (0..1 + p.below(4) as usize).map(|_| finish_line(&mut p)).collect();
+        let mut track = t_paths(&mut p);
+        for path in &mut track.paths {
+            for node in &mut path.nodes {
+                node.word_04 = u32::from(p.below(3) == 0);
+            }
+        }
+        let has_track = p.below(2) == 0;
+        let jump_settle = helper_clock(&mut p, &[F(0.5)]);
         let (mut zones, _) = zones_about(&mut p);
         if p.below(8) == 0 {
             zones.clear();
         }
-        let mut cards: Vec<RaceCard> = (0..n).map(|k| machine_card(&mut p, k, &gates, &rules)).collect();
+        let mut cards: Vec<RaceCard> = (0..n).map(|k| machine_card(&mut p, k, &gates, &rules, &track)).collect();
         // Zones the riders' steps cross, now and then.
         if !zones.is_empty() && p.below(2) == 0 {
             let k = p.below(n as u64) as usize;
@@ -6780,7 +6824,10 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
         ee.set_u32(M_MGR + 0x4c, rules.record_limit as u32);
         ee.set_u32(M_MGR + 0x5c, rules.flags);
         ee.set_u32(M_MGR + 0x60, rules.kind as u32);
-        ee.set_u32(M_MGR + 0x68, 0);
+        put_paths(&mut ee, &mut p, &track);
+        ee.set_u32(T_TRACK + 0x4c, t_rec(0));
+        ee.set_u32(M_MGR + 0x68, if has_track { T_TRACK } else { 0 });
+        put_f(&mut ee, M_MGR + 0xf4, jump_settle);
         ee.set_u32(M_MGR + 0x70, M_GATES);
         ee.set_u32(M_MGR + 0x78, if zones.is_empty() { 0 } else { M_ZONES });
         ee.set_u32(M_MGR + 0x94, rules.laps as u32);
@@ -6798,6 +6845,9 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
         }
         for k in 0..n {
             put_machine_card(&mut ee, k, &cards[k], n, owner[k], chain[k], ghosts[k].as_ref());
+            put_jumps(&mut ee, m_card(k), &cards[k].jumps, &cards[k].warnings);
+            put_t_spot(&mut ee, m_card(k) + 0x88, cards[k].lap.spot);
+            put_t_spot(&mut ee, m_card(k) + 0xa0, cards[k].aim);
         }
         let state = p.next();
         ee.write(rand_state, 8, u128::from(state));
@@ -6808,8 +6858,8 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
 
         let was = rules;
         let mut rng = Rng::from_state(state);
-        let tick = rules.machine_tick(dt, &mut cards, &mut ghosts, &gates, &zones, &mut rng);
-        let what = format!("case {case}: {was:?}, {n} cards, {} gates", gates.len());
+        let tick = rules.machine_tick(dt, &mut cards, &mut ghosts, &gates, &zones, jump_settle, has_track.then_some(&mut track), &mut rng);
+        let what = format!("case {case}: {was:?}, {n} cards, {} gates, track {has_track}", gates.len());
 
         let mut want: Vec<MHeard> = Vec::new();
         for &(k, m) in &tick.said {
@@ -6818,6 +6868,9 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
             *said.entry(name.split([' ', '(', '{']).next().unwrap().to_string()).or_default() += 1;
             if let MachineNotice::Line(l) = m {
                 *said.entry(format!("{l:?}")).or_default() += 1;
+            }
+            if let MachineNotice::Jump(j) = m {
+                *said.entry(format!("{j:?}")).or_default() += 1;
             }
         }
         let before: Vec<u32> = (0..n).map(m_card).collect();
@@ -6841,7 +6894,14 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
         }
         assert_eq!(list, after, "{what}: the list's order");
         for (c, &a) in cards.iter().zip(&after) {
-            assert_eq!(race_card_words(&machine_card_at(&ee, a)), race_card_words(c), "{what}: card {}", c.lap.record_word);
+            let mut got = machine_card_at(&ee, a);
+            got.lap.spot = t_spot_at(&ee, a + 0x88);
+            got.aim = t_spot_at(&ee, a + 0xa0);
+            got.jumps = jumps_at(&|o| ee.u32_at(a + o));
+            assert_eq!(race_card_words(&got), race_card_words(c), "{what}: card {}", c.lap.record_word);
+        }
+        if has_track {
+            check_paths(&ee, &track, &what);
         }
         for (k, g) in ghosts.iter().enumerate() {
             if let Some(g) = g {
@@ -6862,8 +6922,25 @@ fn the_machine_race_matches_the_score_managers_mode_1_handler() {
             }
         }
         made_up += usize::from(was.flags & race_flags::OVER != 0 && tick.went_on);
+        if has_track && was.flags & race::PATH_STEER != 0 {
+            for c in &cards {
+                steered += 1;
+                let (Some((_, n0)), s) = (c.lap.spot.at(), c.aim) else { continue };
+                match s.at() {
+                    None => no_node += 1,
+                    Some((_, n1)) if n1 > n0 => walked += 1,
+                    Some((_, n1)) if n1 < n0 => stepped_back += 1,
+                    _ => {}
+                }
+                pulled += usize::from(c.lap.to_line_kept.0 < 10.0);
+            }
+        }
     }
-    for key in ["Look", "Line", "Zone", "Aimed", "Aim", "TimeUp", "Over", "PlaceLost", "PlaceGained", "Lead", "Gate", "Lap", "BestLap", "Finished", "RunOver", "GhostReady"] {
+    assert!(
+        steered > 5000 && walked > 500 && stepped_back > 500 && no_node > 30 && pulled > 300,
+        "steered {steered} walked {walked} stepped back {stepped_back} no node {no_node} pulled {pulled}"
+    );
+    for key in ["Look", "Line", "Zone", "Jump", "TookOff", "Landed", "LongestJump", "HighestJump", "LongestAir", "Aimed", "Aim", "TimeUp", "Over", "PlaceLost", "PlaceGained", "Lead", "Gate", "Lap", "BestLap", "Finished", "RunOver", "GhostReady"] {
         let c = said.get(key).copied().unwrap_or(0);
         // A ghost run's end needs a ghost race on its last lap with a lap closed: rarer.
         let floor = if matches!(key, "RunOver" | "GhostReady") { 40 } else { 100 };
