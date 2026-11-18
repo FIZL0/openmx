@@ -154,7 +154,9 @@ pub struct Sim {
     /// hands it the controls ([`Sim::step_all`]). `None` — every ride with no AI rider — steps and
     /// hashes as before. Not on the wire yet: a resync keeps this machine's lane. In a race the
     /// brains draw on [`race::Race::rng`], the one generator, after the race manager's tick (S333).
-    /// The lane's own is for a ride with no race.
+    /// The lane's own is for a ride with no race. So do the riders' own draws in their frames, the
+    /// riding ragdoll's with them, the bodies', notes' and dust's, and a plane's (S387,
+    /// [`Sim::lend_rng`]).
     pub ai: Option<Box<ai::Lane>>,
     /// A free ride's seeker world (S316): the map's jumps, targets and start zones the AI riders
     /// seek from, with a set per rider, built once at the map's load ([`Sim::load_seek`]). `None` —
@@ -386,6 +388,10 @@ impl Sim {
             let mut met = rider_contact::met_plane(&riders, 0, riders.len(), Vec::new(), flying, &*world);
             drop(riders);
             let plane = self.plane.as_mut().expect("a plane ride");
+            // In a race the plane draws on the race's generator, the original's one `rand()` (S387).
+            if let Some(race) = self.race.as_deref_mut() {
+                std::mem::swap(&mut plane.rng, &mut race.rng);
+            }
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
             // What the bikes' struck listeners kept is for their wreck tests, which only run when
@@ -421,6 +427,9 @@ impl Sim {
             let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
             let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];
             self.traffic.props.step_with(dt, &prop_movers, &mut strikers);
+            if let (Some(plane), Some(race)) = (self.plane.as_mut(), self.race.as_deref_mut()) {
+                std::mem::swap(&mut plane.rng, &mut race.rng);
+            }
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
@@ -433,7 +442,9 @@ impl Sim {
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
+            let kept = self.lend_rng(0);
             let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
+            self.rng_back(0, kept);
             self.props_back(0);
             said
         } else {
@@ -441,7 +452,9 @@ impl Sim {
             let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
             bump.props = props;
             self.lend_props(0);
+            let kept = self.lend_rng(0);
             let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump));
+            self.rng_back(0, kept);
             self.props_back(0);
             self.traffic.props.pushed(&bump.props);
             said
@@ -495,7 +508,7 @@ impl Sim {
     /// bodies are actors of their own, walked after the riders in the game's player order — C33's
     /// four bodies run human, then the AI riders by their interfaces' player numbers — so a human
     /// (no pilot) goes first, in Sim order, and an AI rider by its seat's player number. Each draws
-    /// on the game's one generator: the AI lane's, or the race's when there is no lane; with neither
+    /// on the game's one generator: the race's, or the AI lane's when there is no race (S387); with neither
     /// it is a free ride's presentation, and each body draws on its own pool.
     fn bodies_look(&mut self, dt: F, rode: &[Controls]) {
         let seat = |i: usize| self.ai.as_deref().and_then(|l| l.pilots.iter().find(|(p, _)| *p == i)).map(|(_, p)| p.seat.player);
@@ -505,11 +518,40 @@ impl Sim {
         for (_, _, i) in order {
             let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
             let rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
-                (Some(lane), _) => Some(&mut lane.rng),
-                (None, Some(race)) => Some(&mut race.rng),
+                // In a race, the race's: the lane's own is for a ride with no race (S387).
+                (_, Some(race)) => Some(&mut race.rng),
+                (Some(lane), None) => Some(&mut lane.rng),
                 (None, None) => None,
             };
             rider.body_look(dt, &rode[i], rng);
+        }
+    }
+
+    /// **The race's generator lent to player `i`'s frame** (S387): in a race the rider's own draws —
+    /// the wreck's throws, clanks and voices off [`Rider::idles`], and the riding ragdoll's at the
+    /// frame's end ([`ragdoll_riding::Riding`]) — come off the original's one `rand()` in the order
+    /// the frame makes them, between the AI brains' and the race manager's. Answers what the rider's
+    /// pool held, for [`Sim::rng_back`]; `None`, with no race, lends nothing and the rider draws on
+    /// its own as before.
+    fn lend_rng(&mut self, i: usize) -> Option<(rng::Rng, bool)> {
+        let shared = self.race.as_deref()?.rng;
+        let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+        let kept = (rider.idles.rng, rider.idles.seeded);
+        rider.idles.rng = shared;
+        rider.idles.seeded = true;
+        rider.lent_rng = true;
+        Some(kept)
+    }
+
+    /// The race's generator back from player `i`'s frame, where its draws left it, and the rider's
+    /// own pool as [`Sim::lend_rng`] found it.
+    fn rng_back(&mut self, i: usize, kept: Option<(rng::Rng, bool)>) {
+        let Some((own, seeded)) = kept else { return };
+        let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+        let drawn = rider.idles.rng;
+        (rider.idles.rng, rider.idles.seeded, rider.lent_rng) = (own, seeded, false);
+        if let Some(race) = self.race.as_deref_mut() {
+            race.rng = drawn;
         }
     }
 
@@ -721,6 +763,7 @@ impl Sim {
             // An AI rider's levers are the bike's controls (S323); its brain thinks after the frame.
             let c = &self.levers_of(i).unwrap_or(*c);
             rode[i] = *c;
+            let kept = self.lend_rng(i);
             let tables = &self.tables;
             let frame = if i == 0 {
                 self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
@@ -728,6 +771,7 @@ impl Sim {
                 let p = &mut self.others[i - 1];
                 p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
+            self.rng_back(i, kept);
             self.props_back(i);
             self.think(i, dt, world);
             // Its particle emitters, after its brain (S328c).

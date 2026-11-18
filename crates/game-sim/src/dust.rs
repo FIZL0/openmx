@@ -258,8 +258,8 @@ pub fn place_on(bike: &Mat4, world: Vf) -> Option<Vf> {
 }
 
 impl crate::Sim {
-    /// **Player `i`'s dust frame** (S328c, the module header), on the game's generator — the AI lane's,
-    /// or the race's when there is no lane. A Sim with no dust, or no generator, draws nothing here.
+    /// **Player `i`'s dust frame** (S328c, the module header), on the game's generator — the race's,
+    /// or the AI lane's when there is no race (S387). A Sim with no dust, or no generator, draws nothing here.
     pub(crate) fn dust_frame(&mut self, i: usize, dt: F) {
         let Some(dust) = self.dust.as_deref() else { return };
         if dust.riders.len() <= i {
@@ -284,8 +284,9 @@ impl crate::Sim {
         let Some(dust) = self.dust.as_deref_mut() else { return };
         let draws = dust.riders[i].frame(feed, &bike, dt);
         let rng: &mut Rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
-            (Some(lane), _) => &mut lane.rng,
-            (None, Some(race)) => &mut race.rng,
+            // In a race, the race's: the lane's own is for a ride with no race (S387).
+            (_, Some(race)) => &mut race.rng,
+            (Some(lane), None) => &mut lane.rng,
             (None, None) => return,
         };
         for _ in 0..draws {

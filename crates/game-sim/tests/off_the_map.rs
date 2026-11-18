@@ -721,3 +721,44 @@ fn the_put_back_after_a_cannonball_lands_where_the_bike_came_down() {
     assert!(at.z() - edge.z() > 100.0, "put back at {at:?}, beside the edge it left ({edge:?})");
     println!("thrown from z {}, came down {touched} ticks, put back at {at:?}", edge.z());
 }
+
+/// **In a race the throw draws on the race's generator** (S387): the original has one `rand()`, so a
+/// race's rider thrown off the edge draws its cannonball on the generator the race's own draws are
+/// on. The same rider in two Sims, past the margin with a wreck body, ridden 200 ticks: one with a
+/// race (gate open, the countdown over, nothing in its tick that draws), one with none and the
+/// rider's pool put on the race's start word. Every tick the race's generator stands where the lone
+/// rider's pool does, the rides are the same, and the race's rider's own pool never moves.
+#[test]
+fn a_races_rider_is_thrown_on_the_races_generator() {
+    use game_sim::race::{Gate, Race};
+    use game_sim::ride::Controls;
+    use game_sim::rider::Rider;
+    use game_sim::trick::Set;
+
+    let mut raced = game_sim::Sim::new(7);
+    let mut r = Rider::new(&raced.phy, game_sim::stock::MOUNTS, Vf::new(3456.0, 1.0, 100.0, 1.0), Vf::new(0.0, 0.0, -1.0, 0.0), Set::default());
+    let part = game_sim::phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = game_sim::phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(Vf::new(2.5, 4.0, 7.0, 1.0)));
+    raced.rider = r;
+    let mut alone = raced.clone();
+    let start = Rng::from_state(0x1234_5678_9abc);
+    let mut race = Race::new(Gate::new(), &[], F(3.0), start);
+    race.countdown.running = false;
+    raced.race = Some(Box::new(race));
+    alone.rider.idles.rng = start;
+    alone.rider.idles.seeded = true;
+    let own = raced.rider.idles;
+
+    let mut world = Edged(game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) });
+    let dt = F(1.0 / 30.0);
+    for t in 0..200 {
+        let a = raced.step(dt, &Controls::default(), &mut world);
+        let b = alone.step(dt, &Controls::default(), &mut world);
+        assert_eq!(a.wreck, b.wreck, "tick {t}: the wreck");
+        assert_eq!(raced.race.as_ref().unwrap().rng, alone.rider.idles.rng, "tick {t}: the race's generator is not where the rider's draws left it");
+        assert_eq!(raced.rider.idles, own, "tick {t}: the race's rider drew on its own pool");
+        assert_eq!(raced.rider.ride.chassis.cofg_world, alone.rider.ride.chassis.cofg_world, "tick {t}: the rides parted");
+    }
+    assert_ne!(alone.rider.idles.rng, start, "the throw drew nothing");
+}
