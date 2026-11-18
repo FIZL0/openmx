@@ -121,6 +121,7 @@ mod draws; // S328: C33's draws that are not the AI's
 mod seek_activity; // S331a: which loads build a seeker world, and its slots
 mod on_track; // S331c: the path nets under an AI rider
 mod race_sx01; // S377: the Sim's race riders against C31's live sx01 race
+mod keeper; // S364: the habits' keeper word, the score keeper's mode
 
 use avoidance::*;
 use path_nets::*;
