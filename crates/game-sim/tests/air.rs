@@ -745,7 +745,8 @@ fn the_wreck_test_is_the_originals() {
         *tally.entry(wrecked.first().copied()).or_insert(0u32) += 1;
         // P138's switch: on, the test is this one to the bit; off, it never answers the airborne
         // clause's NoseDive, and differs from on only where on answered that clause — or, since
-        // S154, a no-hander rolled over off the ground, which off leaves to the touch.
+        // S154, a no-hander rolled over off the ground, which off leaves to the touch. Off also throws a
+        // touch with the up axis below level (P347), as a nose dive or off the back.
         let before = t.air;
         let (mut on_air, mut off_air) = (before, before);
         let on = air::wreck_test_in(&t.p, &mut on_air, &t.ch, &t.st, &t.lo, true);
@@ -755,8 +756,10 @@ fn the_wreck_test_is_the_originals() {
             return Err(format!("Air Wrecks on answered {on:?}, the test {got:?}"));
         }
         let aloft_no_hander = off.is_none() && got == Some(Wreck::NoHander) && !before.on_ground && !t.st.touching;
-        if off == Some(Wreck::NoseDive)
-            || (off != got && !aloft_no_hander && !(before.airborne && matches!(got, Some(Wreck::NoseDive | Wreck::Tail))))
+        let upturned = (before.on_ground || t.st.touching) && t.st.up.y() < 0.0;
+        let upturned_touch = upturned && matches!(off, Some(Wreck::NoseDive | Wreck::Tail));
+        if (off == Some(Wreck::NoseDive) && !upturned_touch)
+            || (off != got && !aloft_no_hander && !upturned_touch && !(before.airborne && matches!(got, Some(Wreck::NoseDive | Wreck::Tail))))
         {
             return Err(format!("Air Wrecks off answered {off:?} where the test answered {got:?}"));
         }

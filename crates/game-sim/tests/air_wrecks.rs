@@ -3,11 +3,11 @@
 //!
 //! The stand-in bike carries `tests/ride.rs`' `[Wrecks]` limits (it has none of its own, and with
 //! every limit at zero the airborne clause answers on any jump), and is put upside down 40 ft over a
-//! flat floor, moving forward and up: a long jump held upside down. Its landing on the roof is not
-//! asserted: on the flat floor no landing clause judges a roof (the ground pitch limits read the
-//! nose's pitch, which a roll over leaves level, and the vertical g load is the chassis' own up,
-//! which a roof landing loads the other way), so that landing is ridden too, and the journal says
-//! so. A landing nosed over past the ground's pitch limit is what proves the landing still judged. That the switch on is the
+//! flat floor, moving forward and up: a long jump held upside down. None of the original's landing
+//! clauses judges its landing on the roof (the ground pitch limits read the nose's pitch, which a roll
+//! over leaves level, and the vertical g load is the chassis' own up, which a roof landing loads the
+//! other way); the port's own rule for the switch off (P347) throws a touch with the up axis below
+//! level. A landing nosed over past the ground's pitch limit is what proves the landing still judged. That the switch on is the
 //! original's own test, bit for bit, is `tests/air.rs`' `the_wreck_test_is_the_originals`, which asks
 //! both settings of it beside the original's answer over its generated states.
 
@@ -109,7 +109,8 @@ fn upside_down_in_the_air_wrecks_with_the_switch_on() {
 }
 
 /// Off: the same jump is ridden out — airborne for the whole of it, upside down from its first tick
-/// to its last, never thrown off.
+/// to its last, never thrown off — and its landing on the roof throws the rider off on the touch
+/// (P347).
 #[test]
 fn off_rides_the_upside_down_jump_out() {
     let mut sim = session(false);
@@ -121,6 +122,9 @@ fn off_rides_the_upside_down_jump_out() {
     assert!(seen[..in_air].iter().all(|(_, w)| w.is_none()), "thrown off in the air with the switch off: {seen:?}");
     assert!(ups[..in_air].iter().all(|&y| y < -0.5), "the bike turned back over in the air: up {:?}", &ups[..in_air]);
     assert!(in_air < seen.len(), "the bike never came down");
+    let &(airborne, wreck) = seen.last().unwrap();
+    assert!(!airborne && [NOSE_DIVE, TAIL].map(Some).contains(&wreck), "the roof landing: {wreck:?}, airborne {airborne}");
+    assert_eq!(seen.len(), in_air + 1, "the roof landing was ridden {} ticks", seen.len() - in_air - 1);
 }
 
 /// Off, the landing is judged as ever: nosed over past the ground's pitch limit (60 degrees) but
@@ -226,15 +230,25 @@ fn nose_drop(air: bool, deg: f32) -> Vec<(bool, Option<Wreck>)> {
 /// air's limits, past the ground's 60) wrecks off the front on its touchdown. Off, the 65 degree drop
 /// is the same wreck on the same tick; the one past straight down touches down on its front wheel with
 /// its euler pitch folded back inside the ground's limit (115 degrees down reads 65 less, 55 at the
-/// touch), and is ridden out — the landing the Air Wrecks help now names. The original's verdicts at
-/// both angles, from its own save states, are `tests/replay.rs`' `high_nose_first_drops_wreck_as_the_original_does`.
+/// touch), which no clause of the original's judges. P347 decided the switch off throws it anyway, as
+/// a nose dive on the touch: its up axis is below level there. The original never reaches that
+/// landing, so this rule is the port's own. The original's verdicts at both angles, from its own save
+/// states, are `tests/replay.rs`' `high_nose_first_drops_wreck_as_the_original_does`.
 #[test]
-fn off_rides_out_a_nose_landing_past_straight_down() {
+fn off_throws_a_nose_landing_past_straight_down() {
     const FRONT: Wreck = Wreck(air::Wreck::Front as u8);
     let (on, off) = (nose_drop(true, 115.0), nose_drop(false, 115.0));
     assert_eq!(on.as_slice(), &[(true, Some(NOSE_DIVE))], "on: past straight down is a nose dive in the air at once");
-    assert!(off.iter().all(|(_, w)| w.is_none()), "off: the front-wheel landing past straight down wrecked: {off:?}");
-    assert!(off.iter().any(|(a, _)| !a), "off: the bike never came down");
+    let in_air = off.iter().take_while(|(a, _)| *a).count();
+    assert!(off[..in_air].iter().all(|(_, w)| w.is_none()), "off: thrown in the air: {off:?}");
+    assert_eq!(off.get(in_air), Some(&(false, Some(NOSE_DIVE))), "off: the touch past straight down: {off:?}");
+    assert_eq!(off.len(), in_air + 1, "off: ridden on after the touch: {off:?}");
+
+    // Just short of straight down the up axis is still above level: the ground's pitch limit throws it
+    // off the front, as it always did.
+    let (on, off) = (nose_drop(true, 85.0), nose_drop(false, 85.0));
+    assert_eq!(on, off, "the switch changed a drop that never passed the air's limits");
+    assert_eq!(on.last(), Some(&(false, Some(FRONT))), "85 degrees nose down lands off the front: {on:?}");
 
     let (on, off) = (nose_drop(true, 65.0), nose_drop(false, 65.0));
     assert_eq!(on, off, "the switch changed a drop that never passed the air's limits");
