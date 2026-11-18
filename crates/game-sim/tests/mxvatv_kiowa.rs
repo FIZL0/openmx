@@ -1435,3 +1435,146 @@ fn the_mxvatv_blade_throw_is_the_originals() {
     println!("the blade throw: {CASES} cases, bit-exact");
 }
 
+
+/// Desert Oasis's terrain map (`Env\mc02\MC02.ps2.trn` out of `mc02.res`, MD37a's copy off the
+/// disc), which the kiowa image's helicopter's ground (`+0x3b4`) is built over (# MD115).
+fn desert_oasis_trn() -> Option<Vec<u8>> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let res = kit.ctx("mxvatv-ps2/md37a").join("mc02.res");
+    if !res.exists() {
+        skip(&format!("{} is not there: Desert Oasis's mc02.res off MX vs. ATV's disc (Env/MC02)", res.display()));
+        return None;
+    }
+    let file = std::fs::read(&res).unwrap();
+    let archive = game_sim::archive::Res::parse(&file).unwrap();
+    let entry = archive.find("Env\\mc02\\MC02.ps2.trn").expect("mc02.res holds MC02.ps2.trn");
+    Some(archive.read(&file, entry).unwrap())
+}
+
+/// The port's terrain over `map` with the words of the image's terrain object at `t`
+/// (tests/atv_ground.rs' `from_image`).
+fn terrain_of<'a>(ee: &Ee, t: u32, map: &'a game_sim::track::Terrain<'a>) -> game_sim::atv_ground::Terrain<'a> {
+    game_sim::atv_ground::Terrain {
+        map: Some(map),
+        min: vf(vector(ee, t + 0x30)),
+        max: vf(vector(ee, t + 0x40)),
+        margin: F(ee.f32_at(t + 0x50)),
+        per_sample: F(ee.f32_at(t + 0x788)),
+        height_scale: F(ee.f32_at(t + 0x90)),
+        coarse: ee.u32_at(t + 0x8b8) != 0,
+        split_one_way: ee.u32_at(t + 0x770) == 1,
+    }
+}
+
+/// SLUS-21104's put-back (`0x004d36a0`) with the helicopter's ground left in (`+0x3b4`, Desert Oasis's
+/// terrain): the placement queries the ground under the spawn (run as itself), lifts the
+/// place 0.3 along the normal and takes the normal for the up, before the ground reset stands the body
+/// there. Against the port's [`Wreckage::put_back_on`] over the same terrain (MD214). Spawns mostly over
+/// the map, some past its box (held in by the query) or on its margins; calls out hooked as in
+/// [`the_mxvatv_put_back_places_as_the_original`].
+#[test]
+fn the_mxvatv_put_back_snaps_to_the_ground_as_the_original() {
+    use game_sim::biplane::Body;
+    use game_sim::kiowa::{Crash, Measure, Ride, Wreckage};
+    let Some(mut ee) = heli() else { return };
+    let Some(trn) = desert_oasis_trn() else { return };
+    let map = game_sim::track::Terrain::parse(&trn).unwrap();
+    let ground = ee.u32_at(HELI + place_at::GROUND);
+    assert_ne!(ground, 0, "the helicopter has a ground");
+    let terrain = terrain_of(&ee, ground, &map);
+    let vtable = ee.u32_at(HELI + 4);
+    let body = ee.u32_at(HELI + at::BODY);
+    let owner = ee.u32_at(HELI + place_at::OWNER);
+    kernel_hooked(&mut ee);
+    let asked = Rc::new(RefCell::new(Vec::<String>::new()));
+    let hook = |ee: &mut Ee, at: u32, name: &'static str| {
+        let a = asked.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            a.borrow_mut().push(name.to_string());
+            ee.set(2, 0);
+        }));
+    };
+    let at = ee.u32_at(vtable + 0x3a0);
+    hook(&mut ee, at, "camera");
+    let at = ee.u32_at(vtable + 0x378);
+    hook(&mut ee, at, "present");
+    hook(&mut ee, 0x004f_a760, "sound");
+    let a = asked.clone();
+    ee.hooks.insert(f("atv_post_event"), Box::new(move |ee| {
+        a.borrow_mut().push(format!("event {} {}", ee.r(6), ee.r(7)));
+        ee.set(2, 0);
+    }));
+    let owner_word = ee.u32_at(owner + 0x50);
+    let (lo, hi) = (terrain.min, terrain.max);
+
+    let mut pick = Pick(0x2c94_e1a7_06bd_53f8);
+    let (mut tilted, mut owned_cases) = (0, 0);
+    for case in 0..CASES {
+        let coord = |pick: &mut Pick, lo: f32, hi: f32| match pick.next() % 10 {
+            0 => pick.range(lo - 300.0, lo + 2.0),
+            1 => pick.range(hi - 2.0, hi + 300.0),
+            _ => pick.range(lo, hi),
+        };
+        let spawn = [
+            [coord(&mut pick, lo.x(), hi.x()), pick.range(-500.0, 2000.0), coord(&mut pick, lo.z(), hi.z()), edgy(&mut pick, 1.0, 2.0)],
+            direction(&mut pick),
+            direction(&mut pick),
+        ];
+        let cofg = match pick.next() % 4 {
+            0 => [0.0, 5.5, 0.0, 1.0],
+            1 => [0.0; 4],
+            _ => [edgy(&mut pick, 0.0, 9.0), edgy(&mut pick, 5.5, 9.0), edgy(&mut pick, 0.0, 9.0), 1.0],
+        };
+        let owned = pick.one_in(2);
+        owned_cases += usize::from(owned);
+        for (k, q) in spawn.iter().enumerate() {
+            set_quad(&mut ee, HELI + place_at::SPAWN + 0x10 * k as u32, *q);
+            let other = edgy_quad(&mut pick, 100.0);
+            set_quad(&mut ee, HELI + place_at::PLACE + 0x10 * k as u32, other);
+        }
+        set_quad(&mut ee, body + body_at::COFG, cofg);
+        for o in [body_at::LAST_POSITION, body_at::POSITION, body_at::VELOCITY, body_at::RATES] {
+            let q = edgy_quad(&mut pick, 100.0);
+            set_quad(&mut ee, body + o, q);
+        }
+        ee.set_u32(owner + 0x50, owner_word & !1 | u32::from(owned));
+        ee.set_f32(HELI + at::FRACTION, 0.0);
+        asked.borrow_mut().clear();
+        ee.call(0x004d_36a0, &[u64::from(HELI)], &[], BUDGET);
+
+        let mut ride = Ride {
+            body: Body { cofg: vf(cofg), ..Body::default() },
+            measure: Measure::default(),
+            crash: Crash::default(),
+            flown: true,
+            gravity_scale: F::ONE,
+            throw_scale: F(0.5),
+            gravity: Vf::default(),
+            area: None,
+            touchdown_sound: false,
+            rotor_angle: F::ZERO,
+            rotor_hidden: false,
+        };
+        // the place is the spawn's before the put-back copies it over, so a missed snap shows
+        let spawn_vf = spawn.map(vf);
+        let mut w = Wreckage { place: spawn_vf, spawn: spawn_vf, mass: F::ONE, mxvatv: true, ..Wreckage::default() };
+        let fraction = w.put_back_on(&mut ride, owned, Some(&terrain));
+
+        let want: Vec<String> = ["camera", "sound", "event 8 21", "present"].into_iter().map(String::from).collect();
+        assert_eq!(*asked.borrow(), want, "case {case}: the calls out");
+        same("the altitude fraction", case, fraction, ee.f32_at(HELI + at::FRACTION));
+        for (k, what) in ["the place", "the place's nose", "the place's up"].into_iter().enumerate() {
+            same_lanes(what, case, w.place[k], vector(&ee, HELI + place_at::PLACE + 0x10 * k as u32), 4);
+        }
+        tilted += usize::from(w.place[2].y() < 0.999);
+        let b = &ride.body;
+        same_lanes("the last centre", case, b.last_position, vector(&ee, body + body_at::LAST_POSITION), 4);
+        same_lanes("the centre", case, b.position, vector(&ee, body + body_at::POSITION), 4);
+        same_lanes("the velocity", case, b.velocity, vector(&ee, body + body_at::VELOCITY), 4);
+        same_lanes("the last orientation", case, b.last_quat, vector(&ee, body + body_at::LAST_QUAT), 4);
+        same_lanes("the orientation", case, b.quat, vector(&ee, body + body_at::QUAT), 4);
+        same_lanes("the rates", case, b.rates, vector(&ee, body + body_at::RATES), 4);
+    }
+    assert!(tilted > CASES / 4, "only {tilted} of {CASES} spawns stood on a slope");
+    println!("the snapped put-back: {CASES} cases ({owned_cases} owned, {tilted} on a slope), bit-exact");
+}

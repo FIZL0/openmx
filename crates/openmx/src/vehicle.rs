@@ -3030,7 +3030,9 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
         // A player's helicopter has no owner (S148's has none, +0xb94 0), so the put-back goes to
         // the spawn: where it was taken.
         let throw = kiowa_throw(ride, self.tree, self.curve);
-        if let Some(f) = self.wreckage.act(asked, ride, &throw, false, rng) {
+        // MX vs. ATV's put-back snaps to the helicopter's ground, SLUS-21104's terrain (MD214).
+        let terrain = self.ground.world.mxvatv_terrain();
+        if let Some(f) = self.wreckage.act_on(asked, ride, &throw, false, rng, terrain.as_ref()) {
             self.put_back = Some(f);
         }
     }
@@ -3237,6 +3239,13 @@ impl KiowaRide {
         let mut wreckage = game_sim::kiowa::Wreckage::new(p, KIOWA_INERTIA, part.mass);
         wreckage.place = [position, facing, up];
         wreckage.spawn = wreckage.place;
+        // MX vs. ATV's puts it back as SLUS-21104 does (MD214): its place and spawn the model's
+        // origin, which its put-back snaps to the terrain and stands the body by.
+        if self.mxvatv.is_some() {
+            wreckage.mxvatv = true;
+            wreckage.place = [Vf::new(origin.x(), origin.y(), origin.z(), 1.0), facing, up];
+            wreckage.spawn = wreckage.place;
+        }
         // Its blades (P265), the world's edge the terrain's, as the MX constructor gives them.
         if let Some(mut blades) = self.blades.clone() {
             blades.set.edge = world.area().map(|a| game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [a.width, a.depth] });
@@ -4111,6 +4120,25 @@ mod tests {
         assert!(atv.mxvatv.is_some() && atv.built(at, forward, &mut floor).mxvatv.is_some());
         let mxu = KiowaRide::new(heli.as_bytes(), 0, None);
         assert!(mxu.mxvatv.is_none() && mxu.built(at, forward, &mut floor).mxvatv.is_none());
+    }
+
+    #[test]
+    fn an_mxvatv_helicopter_puts_back_as_slus_21104_by_its_model_origin() {
+        // MD214: MX vs. ATV's helicopter is built with SLUS-21104's put-back, its spawn the model's
+        // origin (the body's centre is that plus its turned centre of gravity); MX Unleashed's keeps
+        // its own, its spawn the centre.
+        use game_sim::world::Flat;
+        let heli = "[Mass Properties]\nMass = 10\nCofG = 0, 5.5, 0\n";
+        let mut floor = Flat::default();
+        let at = Vf::new(3.0, 1.0, -2.0, 1.0);
+        let forward = Vf::new(0.0, 0.0, 1.0, 0.0);
+        let atv = KiowaRide::new_mxvatv(heli.as_bytes(), false, 0, None).built(at, forward, &mut floor);
+        assert!(atv.wreckage.mxvatv);
+        assert_eq!(atv.wreckage.spawn[0], at);
+        assert_eq!(atv.wreckage.place, atv.wreckage.spawn);
+        let mxu = KiowaRide::new(heli.as_bytes(), 0, None).built(at, forward, &mut floor);
+        assert!(!mxu.wreckage.mxvatv);
+        assert_eq!(mxu.wreckage.spawn[0], mxu.ride.body.position);
     }
 
     #[test]
