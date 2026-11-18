@@ -895,16 +895,24 @@ impl crate::Sim {
 
     /// **The race's AI path net** (S332): the track's AI race file (`<track>AI.tdf`) as the race
     /// activity's load leaves it ([`crate::ai::path::load_paths`]: stood on `terrain`, the flagged
-    /// nodes lifted onto `props`), searching as far ahead and behind as a race's track does
-    /// ([`crate::race::RACE_REACH`], as sx01's live race holds its AI net), put in the AI lane for its
-    /// brains to drive by. False — and no net — with no lane ([`crate::Sim::spawn_ai`] first) or a
-    /// file whose paths do not walk.
+    /// nodes lifted onto `props`), its lap measured from the file's line as the load measures it
+    /// ([`crate::race::TrackPaths::load`]; S377: C31's image holds sx01's AI net's lap length; a file
+    /// with no line to measure from keeps 0), searching as far ahead and behind as a race's track
+    /// does ([`crate::race::RACE_REACH`], as sx01's live race holds its AI net), put in the AI lane
+    /// for its brains to drive by. False — and no net — with no lane ([`crate::Sim::spawn_ai`] first)
+    /// or a file whose paths do not walk.
     pub fn load_ai_net(
         &mut self, file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>,
         props: Option<crate::back_search::Scene<'_>>,
     ) -> bool {
         let Some(lane) = self.ai.as_deref_mut() else { return false };
-        lane.net = crate::ai::path::load_paths(file, terrain, props).map(|mut t| {
+        let mut file = file.clone();
+        let raise = file.snap_to_ground(terrain);
+        if let Some(scene) = props {
+            file.raise_on_props(&raise, scene);
+        }
+        let net = crate::race::TrackPaths::load(&file).map(|(t, _)| t).or_else(|| crate::race::TrackPaths::new(&file));
+        lane.net = net.map(|mut t| {
             (t.ahead, t.behind) = crate::race::RACE_REACH;
             std::sync::Arc::new(t)
         });
