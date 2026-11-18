@@ -1684,6 +1684,15 @@ fn main_panel(menu: &Menu, at: usize) -> (&'static str, String, Vec<String>) {
     }
 }
 
+/// P369: a shop item as the shop lists it: a race track by its name in the race pick, else the
+/// store's own name for it.
+fn shop_item_name(item: &results::ShopItem, kind: usize) -> String {
+    match race::race_track_name(&item.track) {
+        Some(n) if kind == 0 => n,
+        _ => item.key.clone(),
+    }
+}
+
 /// A pause row's heading and words beside the list, by what the row says.
 fn pause_panel(row: &str) -> (String, &'static str) {
     let about = match row {
@@ -1841,6 +1850,7 @@ impl Pen<'_> {
             Screen::Store => self.store(menu),
             Screen::Split => self.split(menu),
             Screen::Race => self.race(menu),
+            Screen::Shop => self.shop(menu),
             Screen::RaceSetup => self.race_setup(menu),
             Screen::Results => self.results(menu),
             Screen::Keyboard => self.keyboard(menu),
@@ -3108,7 +3118,7 @@ impl Pen<'_> {
         const SHOWN: usize = 9;
         let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
         let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
-        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
+        let hints = [(Btn::Circle, "Back"), (Btn::Triangle, "Unlock Shop"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
         // F10a: the rows closer where the touch pad is up and the title needs their room to rise;
         // the down arrow an em under them, clear of it too.
         let floor = self.above_the_raised_title(Screen::Race.title(), &hints, LIST_BOTTOM + 1.0);
@@ -3128,6 +3138,67 @@ impl Pen<'_> {
         self.chips(&[format!("*{}* of {}", at + 1, tracks.len()), id], x, y + 1.0, w);
         self.title(Screen::Race.title());
         self.hints(&hints);
+    }
+
+    /// P369's unlock shop: the lit category's items, nine at a time round the cursor, each with its
+    /// price (an owned one dimmed and marked), the category's name over them with Left and Right to
+    /// the next, and player 0's points as the original's shop shows them, a plain number. A buy
+    /// that wants more points than there are puts up the original's "Not Enough Points".
+    fn shop(&mut self, menu: &Menu) {
+        self.strip(10.0, 18.0);
+        self.logo(true);
+        let shop = &menu.race.shop;
+        let record = menu.race.records.seats.first().copied().unwrap_or_default();
+        let (x, w) = (34.0, 40.0);
+        let points = format!("*{}* points", record.points);
+        let Some(cat) = shop.categories.get(menu.race.shop_tab) else {
+            let y = self.heading("Unlock Shop", "Nothing for sale", "The disc's store list (appstart.res's ui\\store.dat) could not be read.", x, 10.0, w, 2.6);
+            self.chips(&[points], x, y + 1.0, w);
+            self.title(Screen::Shop.title());
+            self.hints(&[(Btn::Circle, "Back")]);
+            return;
+        };
+        let at = menu.cursor(Screen::Shop).min(cat.items.len().saturating_sub(1));
+        const SHOWN: usize = 9;
+        let first = at.saturating_sub(SHOWN / 2).min(cat.items.len().saturating_sub(SHOWN));
+        let rows: Vec<(String, bool)> = cat
+            .items
+            .iter()
+            .skip(first)
+            .take(SHOWN)
+            .map(|it| {
+                let owned = record.owns(it.category, it.index);
+                (if owned { format!("{} (Owned)", shop_item_name(it, cat.kind)) } else { format!("{}: {}", shop_item_name(it, cat.kind), it.price) }, owned)
+            })
+            .collect();
+        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Category"), (Btn::Cross, "Buy")];
+        let floor = self.above_the_raised_title(Screen::Shop.title(), &hints, LIST_BOTTOM + 1.0);
+        self.list_to(&rows, at - first, 19.0, 10.4, 18.0, floor - 1.0);
+        if first > 0 {
+            self.arrow(19.0, 9.6, [0.0, -1.0], 0.7, BONE);
+        }
+        if first + SHOWN < cat.items.len() {
+            self.arrow(19.0, floor - 0.4, [0.0, 1.0], 0.7, BONE);
+        }
+        let item = cat.items.get(at);
+        let name = item.map_or(String::new(), |it| shop_item_name(it, cat.kind));
+        let about = match (item, menu.race.shop_said) {
+            (_, Some((results::Bought::Bought, k))) if k == at => "Bought: it is yours, and its price is off your points.",
+            (Some(it), _) if record.owns(it.category, it.index) => "Already yours.",
+            _ => "Points come from the tricks you bank in races. Cross buys the lit item when you have its price.",
+        };
+        let y = self.heading(&cat.name, &name, about, x, 10.0, w, 2.6);
+        let mut chips = vec![points];
+        if let Some(it) = item {
+            chips.push(format!("Cost *{}*", it.price));
+        }
+        chips.push(format!("*{}* of {}", menu.race.shop_tab + 1, shop.categories.len()));
+        self.chips(&chips, x, y + 1.0, w);
+        self.title(Screen::Shop.title());
+        self.hints(&hints);
+        if menu.race.shop_said.is_some_and(|(b, _)| b == results::Bought::NotEnoughPoints) {
+            self.popup("Not Enough Points", &["OK"], 0);
+        }
     }
 
     /// P327's race setup: the laps and the riders, each stepped with Left and Right, and Start Race.

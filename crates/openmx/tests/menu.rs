@@ -10716,3 +10716,46 @@ fn the_race_pages_are_shot_from_the_menu() {
         assert!(red(rgb) > 300, "{name}: no cursor row ({} red pixels)", red(rgb));
     }
 }
+
+/// P369: the race pick's Triangle opens the unlock shop on its first category; Right steps to the
+/// next; Cross buys the lit item with player 0's points, an owned one again only answers Owned, and
+/// one over the points puts up Not Enough Points, which Cross puts away without buying; Circle goes
+/// back to the pick.
+#[test]
+fn the_unlock_shop_spends_player_zeros_points() {
+    use menu::results::{Bought, Shop};
+    let (mut m, mut r) = fresh();
+    m.race.shop = Shop::parse(
+        "[Store]\nNumberOfCategories=2\nCategory1=A\nCategory2=B\n[A]\nType=Machine\nNumberOfItems=1\nItem1=X\n[X]\nPrice=900\n\
+         [B]\nType=Track\nNumberOfItems=2\nItem1=sx01\nItem2=sx02\n[sx01]\nTrackName=sx01\nPrice=50\n[sx02]\nTrackName=sx02\nPrice=60\n",
+    );
+    m.race.records.seat(0).points = 100;
+    main_to(&mut m, &mut r, "Race");
+    tap(&mut m, &mut r, Control::Triangle);
+    assert_eq!(m.screen(), Some(Screen::Shop));
+    assert_eq!(m.race.shop_tab, 0);
+    // X costs 900: not enough, and Cross only puts the dialog away.
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.race.shop_said, Some((Bought::NotEnoughPoints, 0)));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.race.shop_said, m.race.records.seats[0].points), (None, 100));
+    assert!(!m.take_records_changed());
+    // sx01 for 50, then again: owned.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.race.shop_tab, 1);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.race.shop_said, m.race.records.seats[0].points), (Some((Bought::Bought, 0)), 50));
+    assert!(m.race.records.seats[0].owns(1, 0));
+    assert!(m.take_records_changed());
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.race.shop_said, m.race.records.seats[0].points), (Some((Bought::Owned, 0)), 50));
+    // sx02 for 60 of the 50 left.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.race.shop_said, Some((Bought::NotEnoughPoints, 1)));
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Shop));
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Race));
+}

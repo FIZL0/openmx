@@ -2708,10 +2708,13 @@ pub enum Screen {
     /// P341's Garage over the ride: the pausing player's machines as a grid of tiles, picking one
     /// switching to it.
     PauseGarage,
+    /// P369: the unlock shop, off the race-track pick's Triangle: the store's items a category at a
+    /// time, bought with the points the race results bank.
+    Shop,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 26] = [
+    pub const ALL: [Screen; 27] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2738,6 +2741,7 @@ impl Screen {
         Screen::RaceSetup,
         Screen::Results,
         Screen::PauseGarage,
+        Screen::Shop,
     ];
 
     fn index(self) -> usize {
@@ -2773,6 +2777,7 @@ impl Screen {
             Screen::RaceSetup => "race-setup",
             Screen::Results => "results",
             Screen::PauseGarage => "pause-garage",
+            Screen::Shop => "shop",
         }
     }
 
@@ -2808,6 +2813,7 @@ impl Screen {
             Screen::RaceSetup => "Race Setup",
             Screen::Results => "Results",
             Screen::PauseGarage => "Garage",
+            Screen::Shop => "Unlock Shop",
         }
     }
 }
@@ -4835,6 +4841,7 @@ impl Menu {
                 }
                 self.walk_join(0, Press { start: true, ..Press::default() });
             }
+            Screen::Shop => self.stack = vec![Screen::Main, Screen::Race, Screen::Shop],
             s => self.stack = vec![Screen::Main, s],
         }
     }
@@ -4877,7 +4884,7 @@ impl Menu {
             Screen::Store => self.store.shown().len().max(1),
             Screen::Tricks => self.trick_rows.len().max(1),
             Screen::Split => layouts(self.riders).len(),
-            Screen::Race | Screen::RaceSetup | Screen::Results => self.race_rows(screen),
+            Screen::Race | Screen::RaceSetup | Screen::Results | Screen::Shop => self.race_rows(screen),
             Screen::PauseGarage => self.pause_garage_rows().len().max(1),
         }
     }
@@ -5219,7 +5226,7 @@ impl Menu {
                     self.pop();
                 }
             }
-            Screen::Race | Screen::RaceSetup | Screen::Results => return self.race_press(screen, at, p),
+            Screen::Race | Screen::RaceSetup | Screen::Results | Screen::Shop => return self.race_press(screen, at, p),
             Screen::Pause => {
                 // P341: Triangle, which is Back too, swaps to the last machine ridden.
                 if p.triangle {

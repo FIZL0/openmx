@@ -12196,6 +12196,24 @@ results_score_commit        boot 0x002041a0 (app) for k < event +0x114 with (app
 #   DRIVEN), 2 u16 +0x120 (PRELOADS), 3 +0x12c (CLUTCHES), 4 +0x138 (WRECKS), 5 f32 +0x18 (HOURS_RACING),
 #   6 nothing, 7 u16 +0x150 and +0x144, 8 +0x15c and +0x144 (laps), 9 races, 10 wins. The stats page
 #   0x003b7030 reads them back with profile_stat_get 0x0037b4d0 (u16 as cvt.s.w, unsigned).
+# P369 — the unlock shop (crates/openmx/src/menu_results.rs Shop / RiderRecord::buy; tests/race_results.rs).
+unlock_buy                  boot 0x0037d1b0 (category, index, points) item = category +0xc + 4*index; null
+#                                           -> 0; item +0x14 (locked) 0 or points < item +0x10 (price,
+#                                           slt) -> 0; else +0x14 = 0, item +8 (linked record) +8 = 0, item.
+profile_unlock              boot 0x0036df40 (profile, item, pay) profile +0xc4 table +0x54 + 200*item +0x1c
+#                                           (category) + 4*item +0x18 (index) = 1; +0x14 = 0, link +8 =
+#                                           0; pay -> profile +0xc0 -= item +0x10.
+# The shop's purchase (0x002f0da0, pad 0x36 = Cross): shop +0x1d4 == 0 and the lit item's +0x14 != 0,
+#   else sound 5 alone (an owned item: no dialog); unlock_buy(category, lit, player 0's +0xc0) == 0 ->
+#   dialog "Not Enough Points" / "You do not have enough points to purchase this item." (0x43b8b0/d0),
+#   shop +0x938 = 1, sound 5; else profile_unlock(player 0, item, 1), "%d" of +0xc0 into the points
+#   text, the item's picture, sound 3. Pad 0x32/0x33 step the category (wrapping), 0x34/0x35 the item
+#   (no wrap: sound 5 at the ends). The list: 0x0037d320 reads ui\store.dat's [Store]
+#   NumberOfCategories / Category%d (no limit); 0x0037ce30 a category: Type (Track, BikeCategory, Bike,
+#   Machine, FreestyleActivity, else 5 and 0x0037bd80 makes no item), NameTextID, Locked, NumberOfItems
+#   / Item%d into 50 slots +0xc..+0xd0 (no limit: a 51st writes past them); each item's ctor reads
+#   Price (default 100) into +0x10 and sets +0x14 = 1; +0x18 index, +0x1c category. The career's
+#   unlocks (0x0036b900, 0x0036afe0, ...) call profile_unlock with pay 0.
 # P330 — the results menu's own code, read (crates/openmx/src/menu_results.rs; tests/race_results.rs).
 race_results_sort           boot 0x0029b720 (record list, key) the insertion sort of the list (count +0,
 #                                           records +4.., key +0x2c) on record word key+1: skipped if

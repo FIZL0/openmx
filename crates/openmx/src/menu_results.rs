@@ -333,6 +333,9 @@ pub struct RiderRecord {
     pub wrecks: u16,
     pub race_time: F,
     pub points: i32,
+    /// P369: the unlock shop's items the rider owns, a bit an item, a word a category: the
+    /// profile's unlock table, which keeps a word a slot of 50 a category.
+    pub unlocked: [u64; SHOP_CATEGORIES],
 }
 
 impl RiderRecord {
@@ -377,6 +380,119 @@ impl RiderRecord {
     /// P364: a card's banked total added to the points, cut to a whole number (the word wraps).
     pub fn add_points(&mut self, banked: F) {
         self.points = self.points.wrapping_add(fpu::to_i32(banked.0));
+    }
+
+    /// P369: whether the rider owns the shop's item at `category`, `index`.
+    pub fn owns(&self, category: usize, index: usize) -> bool {
+        self.unlocked.get(category).is_some_and(|w| index < SHOP_ITEMS && w >> index & 1 != 0)
+    }
+
+    /// P369: the shop's purchase of `item` with these points, as the original's does it: an item
+    /// already owned only buzzes (no dialog); else the buy check unlocks it when its price is no
+    /// more than the points, and the profile's unlock marks it and takes the price off; a price
+    /// over the points unlocks nothing and puts up "Not Enough Points".
+    pub fn buy(&mut self, item: &ShopItem) -> Bought {
+        if self.owns(item.category, item.index) {
+            return Bought::Owned;
+        }
+        if self.points < item.price {
+            return Bought::NotEnoughPoints;
+        }
+        self.unlock(item, true);
+        Bought::Bought
+    }
+
+    /// P369: the profile's unlock of `item`: its bit set and, when `pay`, its price taken off the
+    /// points (the word wraps). The career's free unlocks pass no pay; a category or slot past the
+    /// table's is not kept.
+    pub fn unlock(&mut self, item: &ShopItem, pay: bool) {
+        if let Some(w) = self.unlocked.get_mut(item.category).filter(|_| item.index < SHOP_ITEMS) {
+            *w |= 1 << item.index;
+        }
+        if pay {
+            self.points = self.points.wrapping_sub(item.price);
+        }
+    }
+}
+
+/// P369: how many categories a record's unlock table keeps, and items a category (the profile's
+/// table and a store category both hold 50).
+pub const SHOP_CATEGORIES: usize = 16;
+pub const SHOP_ITEMS: usize = 50;
+
+/// P369: the store's kinds of category, by the `Type` its section names: a category whose type is
+/// none of these is kind 5, which the original makes no items for.
+pub const SHOP_KINDS: [&str; 5] = ["Track", "BikeCategory", "Bike", "Machine", "FreestyleActivity"];
+
+/// P369: where the store's list lives: `appstart.res`'s `ui\store.dat`.
+pub const SHOP_FILE: &str = "ui\\store.dat";
+
+/// P369: what the shop's purchase answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bought {
+    Bought,
+    Owned,
+    NotEnoughPoints,
+}
+
+/// P369: one of the store's items: its section's name, the track it names (a Track's `TrackName`,
+/// a machine's or an activity's `Track`, else empty), its price (`Price`, 100 when the section has
+/// none), and its category's place in the store and its own in the category.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShopItem {
+    pub key: String,
+    pub track: String,
+    pub price: i32,
+    pub category: usize,
+    pub index: usize,
+}
+
+/// P369: one of the store's categories: its name, its kind ([`SHOP_KINDS`], 5 for none) and its
+/// items in the file's order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShopCategory {
+    pub name: String,
+    pub kind: usize,
+    pub items: Vec<ShopItem>,
+}
+
+/// P369: the unlock shop's list, as the original's store reader makes it from `store.dat`:
+/// `[Store] NumberOfCategories` categories named `Category1`.., each a section whose `Type` gives
+/// its kind and whose `NumberOfItems` items are named `Item1`.., each a section with its `Price`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shop {
+    pub categories: Vec<ShopCategory>,
+}
+
+impl Shop {
+    /// The store read out of `store.dat`'s text. A kind-5 category keeps no items (the original
+    /// makes none for it), and a category keeps its first [`SHOP_ITEMS`].
+    pub fn parse(text: &str) -> Shop {
+        let ini = game_sim::phy::Ini::parse(text);
+        let store = ini.section("Store");
+        let count = store.int("NumberOfCategories").unwrap_or(0).max(0) as usize;
+        let mut categories = Vec::new();
+        for c in 0..count {
+            let name = store.text(&format!("Category{}", c + 1)).unwrap_or_default().to_string();
+            let sec = ini.section(&name);
+            let ty = sec.text("Type").unwrap_or_default();
+            let kind = SHOP_KINDS.iter().position(|k| k.eq_ignore_ascii_case(ty)).unwrap_or(SHOP_KINDS.len());
+            let n = sec.int("NumberOfItems").unwrap_or(0).clamp(0, SHOP_ITEMS as i32) as usize;
+            let items = if kind == SHOP_KINDS.len() {
+                Vec::new()
+            } else {
+                (0..n)
+                    .map(|i| {
+                        let key = sec.text(&format!("Item{}", i + 1)).unwrap_or_default().to_string();
+                        let it = ini.section(&key);
+                        let track = it.text(if kind == 0 { "TrackName" } else { "Track" }).unwrap_or_default().to_ascii_lowercase();
+                        ShopItem { key, track, price: it.int("Price").unwrap_or(100), category: c, index: i }
+                    })
+                    .collect()
+            };
+            categories.push(ShopCategory { name, kind, items });
+        }
+        Shop { categories }
     }
 }
 
@@ -494,7 +610,7 @@ impl Records {
                     r.wrecks,
                     r.race_time.0.to_bits(),
                     r.points
-                )
+                ) + &unlocked_line(k, &r.unlocked)
             })
             .collect()
     }
@@ -503,12 +619,27 @@ impl Records {
         let mut out = Records::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
+            // P369: the items a record owns, `unlocked.N = category:index ..`.
+            if let Some(k) = key.trim().strip_prefix("unlocked.").and_then(|k| k.parse::<usize>().ok()).filter(|&k| k < 16) {
+                let r = out.seat(k);
+                for pair in value.split_whitespace() {
+                    if let Some((c, i)) = pair.split_once(':')
+                        && let (Ok(c), Ok(i)) = (c.parse::<usize>(), i.parse::<usize>())
+                        && c < SHOP_CATEGORIES
+                        && i < SHOP_ITEMS
+                    {
+                        r.unlocked[c] |= 1 << i;
+                    }
+                }
+                continue;
+            }
             let Some(k) = key.trim().strip_prefix("seat.").and_then(|k| k.parse::<usize>().ok()).filter(|&k| k < 16) else { continue };
             let w: Vec<&str> = value.split_whitespace().collect();
             let bits = |s: &str| u32::from_str_radix(s, 16).ok().map(|b| F(f32::from_bits(b)));
             let Some(([races, wins, rate], rest)) = w.split_first_chunk::<3>() else { continue };
             let (Ok(races), Ok(wins), Some(win_rate)) = (races.parse(), wins.parse(), bits(rate)) else { continue };
-            let mut r = RiderRecord { races, wins, win_rate, ..RiderRecord::default() };
+            let unlocked = out.seats.get(k).map_or([0; SHOP_CATEGORIES], |r| r.unlocked);
+            let mut r = RiderRecord { races, wins, win_rate, unlocked, ..RiderRecord::default() };
             if let [play, feet, preloads, clutches, wrecks, raced, ref points @ ..] = rest[..] {
                 let (Ok(play_time), Some(feet), Ok(preloads), Ok(clutches), Ok(wrecks), Some(race_time)) =
                     (play.parse(), bits(feet), preloads.parse(), clutches.parse(), wrecks.parse(), bits(raced))
@@ -541,6 +672,12 @@ impl Records {
         let path = dir.join(RECORDS_FILE);
         crate::files::write(&path, self.text()).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+/// P369: a record's `unlocked.N` line, none when it owns nothing.
+fn unlocked_line(k: usize, unlocked: &[u64; SHOP_CATEGORIES]) -> String {
+    let pairs: Vec<String> = (0..SHOP_CATEGORIES).flat_map(|c| (0..SHOP_ITEMS).filter(move |&i| unlocked[c] >> i & 1 != 0).map(move |i| format!("{c}:{i}"))).collect();
+    if pairs.is_empty() { String::new() } else { format!("unlocked.{k} = {}\n", pairs.join(" ")) }
 }
 
 /// What the race hands the front end at its end: the score manager's cards as the results menu
