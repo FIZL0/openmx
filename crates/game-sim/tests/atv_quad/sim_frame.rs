@@ -1222,6 +1222,7 @@ fn sim_chain(
     let dt = F::from_bits(DT);
     let mut seen = Palm::default();
     for k in 0..frames {
+        replay::between_frames(k, &mut ee, twin.as_mut());
         let lay = before(k, &ee);
         let p = &lay;
         for &(a, v) in &lay {
