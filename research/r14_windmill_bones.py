@@ -31,6 +31,9 @@ After the load it rides 30 frames (no pad) before it pauses; `ride=0` teleports 
 as the pause lands (B15/C37: a state saved mid-jump, research/c37/south3.sh's).
 With `req` each row also has the riding request's (body actor +0x488) +0x10 rows, +0x50 frame (the
 bike model's "Bike" root node in the world), +0xa0 rates and +0xb0..+0xe0 hands and feet (S466).
+With `cross` each row also has the rider's crossup (+0x600), the motion driver's shown pose and fore-aft
+(+0x9e8/+0x9ec) and the chassis' measured speed (+0x34): what the drawn bike's air lean is played from
+(S474).
 Run it under `./kit pcsx2 with --`, with PCSX2 started under QT_ACCESSIBILITY=1.
 """
 
@@ -55,6 +58,7 @@ OUT = Path(sys.argv[7])
 BONES = 'bones' in sys.argv[8:]   # move the ragdoll with the bike
 RIDE = next((int(a[5:]) for a in sys.argv[8:] if a.startswith('ride=')), 30)
 REQ = 'req' in sys.argv[8:]       # S466: the riding request's rows, frame and rates too
+CROSS = 'cross' in sys.argv[8:]   # S474: the crossup, the shown pose and the speed too
 SYM = cfg().symbols
 FRAME = SYM['frame_counter']
 MANAGER = SYM['game_manager']
@@ -181,6 +185,8 @@ reads += [(lo, hi - lo)]
 REQ_AT = p.read32(actor + 0x488)
 if REQ:
     reads += [(REQ_AT + 0x10, 0x40), (REQ_AT + 0x50, 0x40), (REQ_AT + 0xa0, 0x10), (REQ_AT + 0xb0, 0x40)]
+if CROSS:
+    reads += [(rider + 0x600, 4), (rider + 0x9e8, 8), (ch + 0x34, 4)]
 
 head = ['frame', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'body_2d0_x', 'body_2d0_y', 'body_2d0_z', 'body_310_x',
         'body_310_y', 'body_310_z', 'cofg_x', 'cofg_y', 'cofg_z', 'pub_x', 'pub_y', 'pub_z', 'reason', 'riding',
@@ -192,6 +198,8 @@ if REQ:
     head += ['frame%d%s' % (r, c) for r in range(4) for c in 'xyzw']
     head += ['rates_%s' % c for c in 'xyzw']
     head += ['%s_%s' % (h, c) for h in ('hand0', 'hand1', 'foot0', 'foot1') for c in 'xyzw']
+if CROSS:
+    head += ['crossup', 'pose', 'fore_aft', 'speed']
 head += ['same']
 
 
@@ -218,6 +226,8 @@ def row(f, raw):
         out += struct.unpack_from('<3f', raw, o + b - lo + 0x60) + struct.unpack_from('<3f', raw, o + b - lo + 0x70)
     if REQ:
         out += struct.unpack_from('<52f', raw, o + hi - lo)
+    if CROSS:
+        out += struct.unpack_from('<4f', raw, o + hi - lo + (52 * 4 if REQ else 0))
     return out
 
 
