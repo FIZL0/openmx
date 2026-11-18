@@ -377,6 +377,14 @@ impl Sim {
                     flight_search::Bike { transform, in_world: p.rider.state.wreck.is_none() && !p.rider.ghost.on }
                 })
                 .collect();
+            // The bikes are their riders' collision records, as split's are (N22b; B9 found the AI
+            // bikes' frame collidables owned by their records in biplane.p2m2's state): the plane's
+            // own rays name the bike they strike, its resolve pushes that bike's chassis, and the
+            // mirrors go to the bike's record. Player 1's own bike is never one of them.
+            let riders: Vec<(&Rider, &Phy)> =
+                std::iter::once((&self.rider, &*self.phy)).chain(self.others.iter().map(|p| (&p.rider, &*p.phy))).collect();
+            let mut met = rider_contact::met_plane(&riders, 0, riders.len(), Vec::new(), flying, &*world);
+            drop(riders);
             let plane = self.plane.as_mut().expect("a plane ride");
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
@@ -391,10 +399,9 @@ impl Sim {
             // A downed rider's wreck bike meets the plane (S276, [`wreck_plane`]): its search with the
             // hull in its world before the plane's frame, its mirrors on the plane's list, and its
             // step, the plane's body on its resolve, after. The downed rider is not stepped otherwise.
-            let mut met = flight::Met::default();
             let mut riders: Vec<&mut crate::rider::Rider> = self.others.iter_mut().map(|p| &mut p.rider).collect();
             let downed = wreck_plane::search_downed(&mut riders, plane, dt, world, &mut met);
-            let meets = (!downed.is_empty()).then_some(&mut met);
+            let meets = Some(&mut met);
             let (_struck, seam) = if self.traffic.props.is_empty() {
                 plane.frame_met(dt, pad, world, &self.tables.ride, &bikes, meets)
             } else {
@@ -404,6 +411,12 @@ impl Sim {
                 plane.frame_props_in(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0, &mut prop_movers)
             };
             wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, false);
+            drop(riders);
+            // The bikes the plane's resolve pushed take their chassis back. Its mirrors on their
+            // records (`met.struck`) wait for a bike resolve that does not run here: while player 1
+            // flies, the other riders are not stepped (B9a).
+            let mut riders: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
+            rider_contact::pushed_riders(&mut riders, &met);
             drop(riders);
             let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
             let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];

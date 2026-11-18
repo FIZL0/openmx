@@ -7,7 +7,9 @@
 //! 2. **the listener** — the original's struck listener run on the state keeps the striker on the
 //!    bike, and the port's keeps the striker's category;
 //! 3. **the ride** — a plane flown level into a wall of bikes strikes one, does not crash on it and
-//!    does not fly through; with the bikes out of the world it flies through.
+//!    does not fly through; with the bikes out of the world it flies through;
+//! 4. **the records** (B9) — each bike is its collision record's, and the plane's rays on a bike
+//!    moved into it name that record and file their mirrors on it as the port's search does.
 
 use game_render::disc::Disc;
 use game_sim::archive::{Psr, Res};
@@ -310,3 +312,175 @@ fn a_plane_flown_into_named_bikes_pushes_them() {
     assert!(f.record.contacts.iter().all(|c| c.other.is_none()), "unnamed, the plane's entries name no bike");
     assert!(met.struck.is_empty() && met.pushed.is_empty() && met.vehicles.iter().all(|v| v.velocity == Vf::ZERO), "unnamed bikes moved");
 }
+
+/// A collision record's list (count `+0x100`, entries of 0x80 at `+0x108`), each entry's other side
+/// named by its place in `recs` (99: something else, `None`: nothing).
+fn list_at(ee: &Ee, r: u32, recs: &[u32]) -> Vec<game_sim::contact::Contact> {
+    let (n, at) = (ee.u32_at(r + 0x100), ee.u32_at(r + 0x108));
+    (0..n)
+        .map(|k| {
+            let e = at + 0x80 * k;
+            let other = ee.u32_at(e + 0x74);
+            game_sim::contact::Contact {
+                kind: ee.u32_at(e),
+                from: quad(ee, e + 0x10),
+                on_body: quad(ee, e + 0x20),
+                normal: quad(ee, e + 0x30),
+                point: quad(ee, e + 0x40),
+                arm: quad(ee, e + 0x50),
+                other_arm: quad(ee, e + 0x60),
+                surface: ee.u32_at(e + 0x70) as i32,
+                other: (other != 0).then(|| recs.iter().position(|&o| o == other).unwrap_or(99)),
+                mover: (ee.u32_at(e + 0x78) != 0).then_some(99),
+            }
+        })
+        .collect()
+}
+
+/// Every field of two entries the same, bit for bit.
+fn same_entry(port: &game_sim::contact::Contact, orig: &game_sim::contact::Contact) -> bool {
+    let q = |c: &game_sim::contact::Contact| [c.from, c.on_body, c.normal, c.point, c.arm, c.other_arm].map(Vf::to_bits);
+    q(port) == q(orig) && (port.kind, port.surface, port.other, port.mover) == (orig.kind, orig.surface, orig.other, orig.mover)
+}
+
+/// A plane's body off the state (S48's offsets).
+fn body_of(ee: &Ee, b: u32) -> game_sim::biplane::Body {
+    game_sim::biplane::Body {
+        enabled: ee.u32_at(b) != 0,
+        inv_mass: F(ee.f32_at(b + 0x10)),
+        damping: quad(ee, b + 0x20),
+        last_position: quad(ee, b + 0x50),
+        position: quad(ee, b + 0x60),
+        velocity: quad(ee, b + 0x70),
+        last_force: quad(ee, b + 0x80),
+        force: quad(ee, b + 0x90),
+        accel: quad(ee, b + 0xa0),
+        shock_peak: quad(ee, b + 0xb0),
+        shock: quad(ee, b + 0xc0),
+        step: quad(ee, b + 0xf0),
+        inv_inertia: quad(ee, b + 0x120),
+        ang_damping: quad(ee, b + 0x130),
+        last_quat: quad(ee, b + 0x150),
+        quat: quad(ee, b + 0x170),
+        cofg: quad(ee, b + 0x180),
+        moment: quad(ee, b + 0x190),
+        last_moment: quad(ee, b + 0x1a0),
+        rates: quad(ee, b + 0x1b0),
+        ang_accel: quad(ee, b + 0x1c0),
+        twist_peak: quad(ee, b + 0x1d0),
+        twist: quad(ee, b + 0x1e0),
+    }
+}
+
+/// A bike's chassis as a vehicle off its collision record (N22a's offsets: `+0xf0` the chassis,
+/// `+0xf8` its node).
+fn vehicle_at(ee: &Ee, rec: u32) -> game_sim::contact::Vehicle {
+    let (v, n) = (ee.u32_at(rec + 0xf0), ee.u32_at(rec + 0xf8));
+    game_sim::contact::Vehicle {
+        node: game_sim::contact::Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) },
+        cofg: quad(ee, v + 0x190),
+        mass: F(ee.f32_at(v + 0x210)),
+        inv_mass: F(ee.f32_at(v + 0x214)),
+        inv_inertia: [0xf0, 0x104, 0x118].map(|at| F(ee.f32_at(v + at))),
+        velocity: quad(ee, v + 0x260),
+        rates: quad(ee, v + 0x290),
+        shock: quad(ee, v + 0x170),
+        twist: quad(ee, v + 0x180),
+    }
+}
+
+/// **B9: the one-player plane's rays name the AI riders' bikes**. In the state each bike's collidable
+/// among the plane's candidates is its collision record's frame collidable (record `+0x1f8`, owner
+/// `+0x80` the record, capacity [`game_sim::rider_contact::CAPACITY`]), as split's are (N22b). With
+/// one bike moved into the plane (its transform's origin and its box's centre rebuilt by the
+/// original's bounds, the plane's search refilled by its own refill), the original's collide of the
+/// plane's record files kind-0 entries naming that bike's record and kind-1 mirrors on it; the port's
+/// search with the bikes named ([`game_sim::flight::Met::bikes`], as `Sim::step` builds it) gives the
+/// same entries and the same mirrors, every field, in order, at every pose in [`B9_POSES`].
+#[test]
+fn the_one_player_planes_rays_name_the_states_bikes() {
+    let Some(ee) = image() else { return };
+    let Some((plane, mesh)) = the_plane() else { return };
+    let found = bikes_in(&ee);
+    let recs: Vec<u32> = found.iter().map(|&o| ee.u32_at(o + 0x80)).collect();
+    for (k, (&o, &r)) in found.iter().zip(&recs).enumerate() {
+        assert_eq!(ee.u32_at(r + 0x1f8), o, "bike {k}: the record's frame collidable");
+        assert_eq!(ee.u32_at(r + 0x104) as usize, game_sim::rider_contact::CAPACITY, "bike {k}: its record's capacity");
+    }
+    let (mut entries, mut hit) = (0, 0);
+    for (pose, &(moved, offset)) in B9_POSES.iter().enumerate() {
+        let Some(mut ee) = image() else { return };
+        let mut plane = plane.clone();
+        let rec = ee.u32_at(PLANE + PLANE_COLLISION);
+        plane.body = body_of(&ee, ee.u32_at(rec + 0xf4));
+        let dt = ee.f32_at(addr("frame_dt").unwrap());
+        let p = plane.body.position;
+        let at = Vf::new(p.x() + offset[0], p.y() + offset[1], p.z() + offset[2], 1.0);
+        let o = found[moved];
+        for (l, x) in at.0.iter().enumerate() {
+            ee.set_f32(o + at::TRANSFORM + 0x30 + 4 * l as u32, *x);
+        }
+        // Its box's centre (`+0x40`) rebuilt; the half extent goes to spare stack (the gather reads
+        // the radius).
+        let spare = (ee.stack - 0x8000) & !0xf;
+        ee.call(addr("mesh_collidable_bounds").unwrap(), &[u64::from(o), u64::from(o + at::CENTRE), u64::from(spare)], &[], 1_000_000);
+        // The plane's nearby search refilled where it stands, as its post does every tick (S99), so
+        // the moved bike's distance is fresh.
+        ee.call(addr("plane_refresh_search").unwrap(), &[u64::from(PLANE + 0x50)], &[], 50_000_000);
+
+        let bikes: Vec<Bike> = found.iter().map(|&o| Bike { transform: matrix(&ee, o + at::TRANSFORM), in_world: true }).collect();
+        let sim = game_sim::Sim::new(0x5354);
+        let mut met = game_sim::flight::Met {
+            colliders: vec![game_sim::rider_contact::collider(&sim.phy.collisions, sim.phy.mass.mass); bikes.len()],
+            vehicles: recs.iter().map(|&r| vehicle_at(&ee, r)).collect(),
+            bikes: (0..bikes.len()).collect(),
+            named: Some(bikes.len()),
+            ..Default::default()
+        };
+        let mut ground = Flat { y: F(-1.0e6), ..Default::default() };
+        plane.search_alone(F(dt), &mut ground, &mesh, &bikes, Some(&mut met));
+
+        // the original: the plane's and the bikes' lists emptied, then the plane's collide
+        let mut named = recs.clone();
+        named.push(rec);
+        for &r in &named {
+            ee.call(ee.u32_at(ee.u32_at(r + 8) + 0x74), &[u64::from(r)], &[], 1_000_000);
+        }
+        ee.call(addr("collision_record_collide").unwrap(), &[u64::from(rec)], &[dt], 50_000_000);
+        let all = list_at(&ee, rec, &named);
+        assert!(all.len() < plane.record.capacity, "pose {pose}: the plane's record filled");
+        let orig: Vec<_> = all.iter().filter(|c| c.other.is_some()).cloned().collect();
+        assert!(orig.iter().all(|c| c.kind == 0 && c.other == Some(moved)), "pose {pose}: the plane's entries name bike {moved}'s record: {orig:?}");
+        let port: Vec<_> = plane.record.contacts.iter().filter(|c| c.other.is_some()).collect();
+        assert_eq!(port.len(), orig.len(), "pose {pose}: the plane's entries on the bike\nport {port:?}\noriginal {orig:?}");
+        for (k, (a, b)) in port.iter().zip(&orig).enumerate() {
+            assert!(same_entry(a, b), "pose {pose}: plane entry {k}\nport {a:?}\noriginal {b:?}");
+        }
+        let pushed: Vec<bool> = (0..bikes.len()).map(|k| k == moved && !orig.is_empty()).collect();
+        assert_eq!(met.pushed, pushed, "pose {pose}: the bikes the plane's entries name");
+        for (k, &r) in recs.iter().enumerate() {
+            let orig = list_at(&ee, r, &named);
+            assert_eq!(met.struck[k].len(), orig.len(), "pose {pose}: bike {k}'s mirrors\nport {:?}\noriginal {orig:?}", met.struck[k]);
+            for (j, (a, b)) in met.struck[k].iter().zip(&orig).enumerate() {
+                assert!(same_entry(a, b), "pose {pose}: bike {k} mirror {j}\nport {a:?}\noriginal {b:?}");
+            }
+        }
+        entries += orig.len();
+        hit += usize::from(!orig.is_empty());
+    }
+    // pose 1 (four feet under the wheels) is the one the plane's rays miss
+    assert_eq!((hit, entries), (7, 36), "the poses the plane's rays struck the bike in, and its entries");
+}
+
+/// The bike moved and its origin's offset from the plane's body, per pose: under the wheels, into
+/// the nose, the tail and either wing, each of the three bikes.
+const B9_POSES: [(usize, [f32; 3]); 8] = [
+    (0, [0.0, -2.0, 0.0]),
+    (0, [0.0, -4.0, 0.0]),
+    (1, [0.0, 0.0, 4.0]),
+    (1, [0.0, -1.0, -6.0]),
+    (2, [5.0, -1.0, 0.0]),
+    (2, [-5.0, -1.0, 0.0]),
+    (0, [2.0, -3.0, 3.0]),
+    (1, [-1.5, -2.5, -2.0]),
+];
