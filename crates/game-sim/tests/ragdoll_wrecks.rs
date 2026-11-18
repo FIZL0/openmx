@@ -1712,6 +1712,76 @@ fn the_port_replays_the_wrecks_through_the_bike() {
     assert!(hits >= 11, "{hits} ticks with a moving hit");
 }
 
+/// The wreck bike's rigid body in an s62 row: `bike_a` starts 0x980 before the request's `+0x1ac`
+/// and the body sits 0x780 before it (`watch/s56-ragdoll.toml`).
+fn wreck_body_of(cap: &Capture, frame: u32) -> Body {
+    let a = cap.bytes(frame, "bike_a");
+    let q = |o: usize| Vf(std::array::from_fn(|k| f32::from_le_bytes(a[0x200 + o + 4 * k..][..4].try_into().unwrap())));
+    use body_at::*;
+    Body {
+        last_position: q(LAST_POSITION as usize),
+        position: q(POSITION as usize),
+        last_quat: q(LAST_QUAT as usize),
+        quat: q(QUAT as usize),
+        cofg: q(COFG as usize),
+        ..Body::default()
+    }
+}
+
+/// A quad of an s62 row's `req_area` (which starts 0x200 before the request).
+fn req_area_quad(cap: &Capture, frame: u32, o: u32) -> Vf {
+    let a = cap.bytes(frame, "req_area");
+    Vf(std::array::from_fn(|k| f32::from_le_bytes(a[0x200 + o as usize + 4 * k..][..4].try_into().unwrap())))
+}
+
+/// **The wreck's frame is the wreck bike node's** (S424): on every wreck row of S62's five captures,
+/// the riding request's rows (`+0x10`), centre (`+0x180`) and quaternion (`+0x190`) and the bike
+/// collidable's frame (`+0x120`, which places the bike sphere and the bike's tree key) are the port's
+/// wreck bike node ([`game_sim::wreck_bike::node_of`]: the pose before the frame's last substep),
+/// the quaternion through `mat4_to_quat`, bit for bit. The body's own quaternion with the node's
+/// origin, which `ragdoll_ride` built its frame from before S424, makes none of them.
+#[test]
+fn the_wrecks_frame_is_the_wreck_bike_nodes() {
+    use game_sim::math::{mat4_to_quat, quat_to_mat4};
+    let (mut rows, mut old) = (0, 0);
+    let mut odd = Vec::new();
+    for (name, start, _) in S62 {
+        let Some(cap) = Capture::load_in("s62", name) else { return };
+        let mut frame = start + 1;
+        while cap.has(frame) {
+            if cap.int(frame, "a_mode") != 2 || cap.int(frame, "wreck_reason") == 0 {
+                frame += 1;
+                continue;
+            }
+            let body = wreck_body_of(&cap, frame);
+            let node = game_sim::wreck_bike::node_of(&body);
+            let node_m = Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin]);
+            let req_rows: [Vf; 3] = [0, 0x10, 0x20].map(|k| req_area_quad(&cap, frame, req_at::ROWS + k));
+            // The collidable is the request's `+0x1ac`, 0x980 into `bike_a`.
+            let far = cap.bytes(frame, "bike_a");
+            let fq = |o: usize| Vf(std::array::from_fn(|k| f32::from_le_bytes(far[0x980 + o + 4 * k..][..4].try_into().unwrap())));
+            let collidable = Mat4([fq(0x120), fq(0x130), fq(0x140), fq(0x150)]);
+            let same = |a: &Mat4, b: &Mat4| (0..4).all(|r| bits(a.0[r]) == bits(b.0[r]));
+            let same_rows = |a: &Mat4| (0..3).all(|r| bits(a.0[r]) == bits(req_rows[r]));
+            rows += 1;
+            let ok = same(&node_m, &collidable)
+                && same_rows(&node_m)
+                && bits(node.origin) == bits(cap.quad(frame, "req_centre"))
+                && bits(mat4_to_quat(&node_m)) == bits(cap.quad(frame, "req_quat"));
+            let old_m = quat_to_mat4(body.quat, node.origin);
+            old += usize::from(same(&old_m, &collidable) || same_rows(&old_m));
+            if !ok && odd.len() < 8 {
+                odd.push(format!("{name} {frame}: node {node_m:?} collidable {collidable:?} rows {req_rows:?}"));
+            }
+            frame += 1;
+        }
+    }
+    eprintln!("S424: {rows} wreck rows the node's; the body's own quaternion's frame on {old}");
+    assert!(odd.is_empty(), "{}", odd.join("\n"));
+    assert!(rows >= 300, "only {rows} wreck rows");
+    assert_eq!(old, 0, "the body's own quaternion makes the request's frame on {old} of {rows} rows");
+}
+
 // --- S105: the bones' spheres against the wreck bike's mesh ----------------------------------------
 
 /// `wreckbikef.col` off the disc, as the shell loads it, or `None` (skipped) without a disc.
