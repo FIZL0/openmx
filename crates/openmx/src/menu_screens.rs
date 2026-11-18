@@ -211,6 +211,13 @@ pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
 /// The room each side of the hints in their tab (P341).
 const HINT_MARGIN: f32 = 2.0;
 
+/// The hints' lead in from their tab's slanted end, which leans 3 ems over its foot (P341).
+const HINT_LEAD: f32 = 1.5 + HINT_MARGIN;
+
+/// How low a list's rows reach: clear of the slanted title, which rises over the column from the
+/// band.
+const LIST_BOTTOM: f32 = STAGE.1 - BAND - 4.2;
+
 /// The screen title's size, in ems.
 const TITLE_SIZE: f32 = 3.1;
 
@@ -910,35 +917,26 @@ impl<'a> Pen<'a> {
     /// [`Pen::hints`] with the tab's foot at `foot` (stage ems): the band's top, or the frame's
     /// bottom edge on the splash, which has no band for it to sit on (P278).
     fn hints_on(&mut self, hints: &[(Btn, &str)], foot: f32) {
-        let spacing = 1.6 * hints.len().saturating_sub(1) as f32;
-        let widths_at = |pen: &Self, size: f32| -> Vec<f32> {
-            let (d, gap) = (1.15 * size, 0.45 * size);
-            hints.iter().map(|(b, s)| pen.button_wide(*b, d) + gap + pen.wide(Weight::Bold, s, size)).collect()
-        };
+        let spacing = Pen::hint_spacing(hints);
         let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
         // The tab's slanted end leans 3 ems over its foot; the hints sit HINT_MARGIN in from its
         // middle and from `right`, so the tab fits them with the same margin each side (P341).
-        let lead = 1.5 + HINT_MARGIN;
+        let lead = HINT_LEAD;
         let room = right - HINT_MARGIN - lead - self.left().max(0.0) - spacing;
         let mut size = 1.55;
-        let full: f32 = widths_at(self, size).iter().sum();
+        let full: f32 = self.hint_widths(hints, size).iter().sum();
         if let Some(t) = self.title.take() {
             // The title held back right of the touch pad's stick (F10) and the hints share the
             // room up to the pedals, half an em apart, both shrunk alike where they must. Where
             // that is past [`SHARED_SHRINK`] (a small phone, a tablet's big pad), the title goes up
             // a row over the tab instead, as big as fits up to the pedals, and the hints keep
             // theirs; unless that puts it over the screen's rows, and then they share anyway.
-            let x = self.clear_of_the_stick(4.5);
-            let title = self.wide(Weight::Heavy, &t, TITLE_SIZE) + Pen::title_lean(TITLE_SIZE);
-            let beside = right - HINT_MARGIN - lead - spacing - x - 0.5;
-            let k = if title + full > beside { (beside / (title + full)).max(0.0) } else { 1.0 };
-            let fit = ((right - x) / title).min(1.0);
-            let up = [x, foot - 3.8 - CAP * TITLE_SIZE * fit, title * fit, CAP * TITLE_SIZE * fit];
+            let (k, fit, up) = self.title_beside(&t, hints, foot);
             if k >= SHARED_SHRINK || self.over_the_rows(up) {
-                self.title_at(&t, x, foot - 1.2, TITLE_SIZE * k);
+                self.title_at(&t, up[0], foot - 1.2, TITLE_SIZE * k);
                 size *= k;
             } else {
-                self.title_at(&t, x, foot - 3.8, TITLE_SIZE * fit);
+                self.title_at(&t, up[0], foot - 3.8, TITLE_SIZE * fit);
                 if full > room && room > 0.0 {
                     size *= room / full;
                 }
@@ -948,7 +946,7 @@ impl<'a> Pen<'a> {
         }
         let d = 1.15 * size;
         let gap = 0.45 * size;
-        let widths = widths_at(self, size);
+        let widths = self.hint_widths(hints, size);
         let content: f32 = widths.iter().sum::<f32>() + spacing;
         let x0 = right - HINT_MARGIN - content - lead;
         let (top, h) = (foot - 3.4, 3.4);
@@ -965,6 +963,42 @@ impl<'a> Pen<'a> {
         }
         let hb = self.b([x0 + lead, mid - d / 2.0, content, d]);
         self.parts.push(Part::Hints(hb));
+    }
+
+    /// The ems between the hints.
+    fn hint_spacing(hints: &[(Btn, &str)]) -> f32 {
+        1.6 * hints.len().saturating_sub(1) as f32
+    }
+
+    /// Each hint's ems at `size`: its button, the gap and its word.
+    fn hint_widths(&self, hints: &[(Btn, &str)], size: f32) -> Vec<f32> {
+        let (d, gap) = (1.15 * size, 0.45 * size);
+        hints.iter().map(|(b, s)| self.button_wide(*b, d) + gap + self.wide(Weight::Bold, s, size)).collect()
+    }
+
+    /// Where the title `t` held back right of the touch pad's stick (F10) goes beside `hints` on a
+    /// tab with its foot at `foot` (stage ems): the shrink `k` both take to share the band's top,
+    /// and the box (stage ems) it fills raised a row over the tab instead, `fit` of its size.
+    fn title_beside(&self, t: &str, hints: &[(Btn, &str)], foot: f32) -> (f32, f32, Box4) {
+        let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
+        let full: f32 = self.hint_widths(hints, 1.55).iter().sum();
+        let x = self.clear_of_the_stick(4.5);
+        let title = self.wide(Weight::Heavy, t, TITLE_SIZE) + Pen::title_lean(TITLE_SIZE);
+        let beside = right - HINT_MARGIN - HINT_LEAD - Pen::hint_spacing(hints) - x - 0.5;
+        let k = if title + full > beside { (beside / (title + full)).max(0.0) } else { 1.0 };
+        let fit = ((right - x) / title).min(1.0);
+        (k, fit, [x, foot - 3.8 - CAP * TITLE_SIZE * fit, title * fit, CAP * TITLE_SIZE * fit])
+    }
+
+    /// How low (stage ems) a screen's rows or cards may reach and leave the title `t` room to go
+    /// up a row over the band's hint tab (F10a): where the touch pad is up and the title and
+    /// `hints` would else share the band's top past [`SHARED_SHRINK`]; else `bottom`.
+    fn above_the_raised_title(&self, t: &str, hints: &[(Btn, &str)], bottom: f32) -> f32 {
+        if !self.pad_up() {
+            return bottom;
+        }
+        let (k, _, up) = self.title_beside(t, hints, STAGE.1 - BAND);
+        if k >= SHARED_SHRINK { bottom } else { bottom.min(up[1] - 0.3) }
     }
 
     /// `right` (stage ems), or left of the page's touch pad's pedals while the pad is up (P208): the
@@ -1051,8 +1085,11 @@ impl<'a> Pen<'a> {
     /// faded, each row's type shrunk till its pill fits `room` ems across (V111: the Online screen's
     /// "Network: Internet + LAN" ran off its plate). Returns nothing; the parts say where each went.
     fn list(&mut self, rows: &[(String, bool)], chosen: usize, centre: f32, top: f32, room: f32) {
-        // Clear of the slanted title, which rises over the column from the band.
-        let bottom = STAGE.1 - BAND - 4.2;
+        self.list_to(rows, chosen, centre, top, room, LIST_BOTTOM);
+    }
+
+    /// [`Pen::list`] with its rows fitted from `top` to `bottom` (stage ems).
+    fn list_to(&mut self, rows: &[(String, bool)], chosen: usize, centre: f32, top: f32, room: f32, bottom: f32) {
         let full = ITEM * (1.0 + 0.34 + 0.4) + 0.55;
         let pitch = full.min((bottom - top) / rows.len().max(1) as f32);
         let full_size = ITEM.min((pitch - 0.3) / 1.74);
@@ -2330,7 +2367,19 @@ impl Pen<'_> {
             top = pill_top + 3.8;
         }
         let tag_of = |id: &str| menu.track_game(id);
-        self.cards(menu, list, at, PICK_COLUMN.0, PICK_COLUMN.1, top, &tag_of);
+        let (id, _) = menu.track_at(at);
+        let (chips, triangle) = menu.pick_strip(id);
+        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Triangle, triangle)];
+        if groups.len() > 1 {
+            hints.push((Btn::LeftRight, "Game"));
+        }
+        if cats.len() > 1 {
+            hints.push((Btn::L1R1, "Category"));
+        }
+        hints.push((Btn::Cross, "Ride"));
+        // F10a: fewer cards where the touch pad is up and the title needs their room to rise.
+        let bottom = self.above_the_raised_title(Screen::Tracks.title(), &hints, STAGE.1 - BAND - 0.4);
+        self.cards(menu, list, at, PICK_COLUMN.0, PICK_COLUMN.1, top, bottom, &tag_of);
         let (id, name) = menu.track_at(at);
         let (x, w) = PICK_SIDE;
         let tag = tag_of(id);
@@ -2353,17 +2402,8 @@ impl Pen<'_> {
         // The setup strip: the modifiers, and Favourite where the track is one (P279: the wrecks are
         // the settings' now). Every ride starts on the bike (P177); the machine is switched from
         // the pause or at a bay.
-        let (chips, triangle) = menu.pick_strip(id);
         self.chips(&chips, x, y + 1.0, w);
         self.title(Screen::Tracks.title());
-        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Triangle, triangle)];
-        if groups.len() > 1 {
-            hints.push((Btn::LeftRight, "Game"));
-        }
-        if cats.len() > 1 {
-            hints.push((Btn::L1R1, "Category"));
-        }
-        hints.push((Btn::Cross, "Ride"));
         self.hints(&hints);
     }
 
@@ -2371,12 +2411,11 @@ impl Pen<'_> {
     /// pill's gradient, rim and shadow, the others glass; each the track's picture (the lit one
     /// turning through a disc track's stills), its name, and the line under it — Last ridden, or
     /// where the track is from, or the text after its name's colon (P252: the name's title on the
-    /// card, its text under it). As many as fit from `top`, the lit one kept in view, its name and
-    /// line scrolling where they are too long.
+    /// card, its text under it). As many as fit from `top` to `bottom`, the lit one kept in view,
+    /// its name and line scrolling where they are too long.
     #[allow(clippy::too_many_arguments)]
-    fn cards(&mut self, menu: &Menu, list: &[usize], at: usize, x: f32, w: f32, top: f32, tag_of: &dyn Fn(&str) -> String) {
+    fn cards(&mut self, menu: &Menu, list: &[usize], at: usize, x: f32, w: f32, top: f32, bottom: f32, tag_of: &dyn Fn(&str) -> String) {
         const CARD_GAP: f32 = 0.5;
-        let bottom = STAGE.1 - BAND - 0.4;
         let shown = (((bottom - top + CARD_GAP) / (CARD_H + CARD_GAP)) as usize).max(1);
         let n = list.len();
         let lit_at = list.iter().position(|&i| i == at).unwrap_or(0);
@@ -3000,12 +3039,16 @@ impl Pen<'_> {
         const SHOWN: usize = 9;
         let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
         let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
-        self.list(&rows, at - first, 19.0, 10.4, 18.0);
+        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National"), (Btn::Cross, "Select")];
+        // F10a: the rows closer where the touch pad is up and the title needs their room to rise;
+        // the down arrow an em under them, clear of it too.
+        let floor = self.above_the_raised_title(Screen::Race.title(), &hints, LIST_BOTTOM + 1.0);
+        self.list_to(&rows, at - first, 19.0, 10.4, 18.0, floor - 1.0);
         if first > 0 {
             self.arrow(19.0, 9.6, [0.0, -1.0], 0.7, BONE);
         }
         if first + SHOWN < tracks.len() {
-            self.arrow(19.0, STAGE.1 - BAND - 3.6, [0.0, 1.0], 0.7, BONE);
+            self.arrow(19.0, floor - 0.4, [0.0, 1.0], 0.7, BONE);
         }
         let kind = race::RACE_KINDS[menu.race.kind % race::RACE_KINDS.len()];
         let (x, w) = (34.0, 40.0);
@@ -3015,7 +3058,7 @@ impl Pen<'_> {
         let id = tracks.get(at).map_or(String::new(), |(id, _)| id.clone());
         self.chips(&[format!("*{}* of {}", at + 1, tracks.len()), id], x, y + 1.0, w);
         self.title(Screen::Race.title());
-        self.hints(&[(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National"), (Btn::Cross, "Select")]);
+        self.hints(&hints);
     }
 
     /// P327's race setup: the laps and the riders, each stepped with Left and Right, and Start Race.

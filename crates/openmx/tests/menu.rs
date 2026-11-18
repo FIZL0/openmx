@@ -1990,8 +1990,9 @@ fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
 /// F10: with the page's touch pad up, every screen's slanted title stands right of the stick's
 /// resting base and clear of the pad's other controls, in the frame, off the hints and off the
 /// screen's rows, pills and cards; the title and the hints, shrunk to share the band's top or the
-/// title a row up, stay at least half their size on the phones of P208 and a third on a small
-/// phone or a tablet. With the pad down the title is where it was, over the stick.
+/// title a row up, stay at least half their size (F10a: the Tracks and Race picks make the raised
+/// title room on a small phone and a tablet). With the pad down the title is where it was, over the
+/// stick.
 #[test]
 fn the_title_stands_clear_of_the_touch_pads_stick() {
     let mut disc = match game_render::Disc::open_configured() {
@@ -2003,10 +2004,9 @@ fn the_title_stands_clear_of_the_touch_pads_stick() {
     };
     let art = menu::Art::load(&mut disc).expect("the menus' art");
     let (mut titles, mut covered) = (0, 0);
-    // the least each was drawn at, against its unshrunk size: on the phones of P208, and anywhere
-    let (mut phone_least, mut least) = (f32::MAX, f32::MAX);
+    // the least each was drawn at, against its unshrunk size
+    let mut least = f32::MAX;
     for (w, h) in [(844, 390), (667, 375), (932, 430), (1180, 820)] {
-        let phone = matches!((w, h), (844, 390) | (932, 430));
         let (thumb, stick) = touch_controls((w as f32, h as f32));
         let em = (w as f32 / 80.0).min(h as f32 / 45.0);
         for screen in Screen::ALL {
@@ -2060,9 +2060,6 @@ fn the_title_stands_clear_of_the_touch_pads_stick() {
             }
             for k in sizes {
                 least = least.min(k);
-                if phone {
-                    phone_least = phone_least.min(k);
-                }
             }
             let now = over(&up, t);
             let was = was.unwrap_or_default();
@@ -2071,10 +2068,9 @@ fn the_title_stands_clear_of_the_touch_pads_stick() {
     }
     assert!(titles > 0, "no title drawn");
     assert!(covered > 0, "the stick covered no title with no room made for it, so this proves nothing");
-    // a 667x375 phone's and a tablet's Tracks and Race pick have rows where the title would go up
-    // a row, so it and the hints share the band's top at about a third of their size
-    assert!(phone_least >= 0.5, "the title or the hints shrank past half on a phone: {phone_least}");
-    assert!(least >= 0.3, "the title or the hints shrank past a third: {least}");
+    // F10a: a 667x375 phone's and a tablet's Tracks and Race picks leave the title room to go up a
+    // row (they shared the band's top at about a third of their size), so nowhere past half
+    assert!(least >= 0.5, "the title or the hints shrank past half: {least}");
 }
 
 /// P278: the splash has no band, so its hint tab sits on the frame's bottom edge: the gap under its
