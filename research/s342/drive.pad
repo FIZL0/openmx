@@ -1,0 +1,28 @@
+# S342: C34's switch (pause, down twice to "Switch To Machine", Cross, Cross on the card), then a
+# short gas and a coast with the stick centred, so the baja's springs and tires are working and steer is 0
+release
+sleep 30t
+down start
+sleep 9t
+up start
+sleep 45t
+down down
+sleep 9t
+up down
+sleep 36t
+down down
+sleep 9t
+up down
+sleep 36t
+down cross
+sleep 9t
+up cross
+sleep 150t
+down cross
+sleep 9t
+up cross
+sleep 60t
+down cross
+sleep 45t
+up cross
+sleep 60t

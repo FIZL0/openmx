@@ -8417,6 +8417,10 @@ atv_record_apply            atv 0x00207240 = collision_apply
 #   root, z, dir, 0,1,1) and the same for Upper: rows [dir x z, dir, z] (not squared) taken into the
 #   parent, place kept. The hub's bottom and top swingarm nodes keep the world 0x001b2870 left them,
 #   before the hub's post-turn. Truck 0x003e07b0 not compared (first_recording's parked truck @0x00e1e210).
+# S342 — the baja through the same 0x0039edb0, matched node for node: context/states/s342-baja-free07.ee.bin
+#   (+ .p2s), car @0x00605270 (root "Baja"), research/s342/drive.sh (boot.py free07 2 5 -> cheat flag ->
+#   switch tape -> 1.5 s gas -> coast). Steer 0, comps FL 0.26 FR 0.31 RL 0.71 RR 0.62. A parked, never
+#   switched baja has fresh tire objects (all 0) and its car +0 reads 1: the step has not run on it.
 # S245 — the cars drawn (crates/game-render/src/car.rs, psg.rs node lists; tests game-render/tests/car.rs,
 #   openmx/tests/car_picture.rs; journal research/journal/2026-11-02-s245-cars-drawn). The pose steps:
 #   baja/buggy 0x0039edb0 (ctor 0x0039dcf0 looks up its node table at +0xe04..+0xe88), truck 0x003e07b0
