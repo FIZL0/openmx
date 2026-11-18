@@ -744,19 +744,28 @@ impl crate::Sim {
     }
 }
 
-/// A ragdoll's bone collisions as the collision entries read them (S422): each contact's flags, zone
-/// and point, and its bone's velocity.
-fn balls_of(doll: &crate::ragdoll::Ragdoll, contacts: &[crate::ragdoll_contact::Contact]) -> Vec<Option<Ball>> {
-    contacts
+/// The bones of the feed's nine spheres, in its order (S476): the rider body keeps one collision per
+/// named bone (the two feet, then the pelvis, the spine, the head, the arms and the legs), filled by
+/// bone as the rider file's collisions are built, and the body hands those nine to the feed every
+/// frame. So the order is the slots', not the file's, and a slot no collision fills is empty.
+pub const FEED_BONES: [usize; 9] = [17, 14, 0, 2, 3, 10, 6, 16, 13];
+
+/// A ragdoll's bone collisions as the collision entries read them (S422), in the feed's order
+/// ([`FEED_BONES`], S476): each contact's flags, zone and point, and its bone's velocity. A collision
+/// that is off (a held foot) is handed over all the same: its flags are cleared every tick, so it
+/// touches nothing, and its zone and point are the last solve's (S476).
+pub fn balls_of(doll: &crate::ragdoll::Ragdoll, contacts: &[crate::ragdoll_contact::Contact]) -> Vec<Option<Ball>> {
+    FEED_BONES
         .iter()
-        .zip(&doll.collisions)
-        .map(|(c, k)| {
+        .map(|&bone| {
+            let k = doll.collisions.iter().position(|k| k.bone == bone)?;
+            let c = contacts.get(k)?;
             Some(Ball {
                 ground: c.ground,
                 object: c.scene,
                 surface: c.surface,
                 point: c.point,
-                velocity: doll.bones[k.bone].body.velocity,
+                velocity: doll.bones[bone].body.velocity,
             })
         })
         .collect()

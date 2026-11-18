@@ -199,3 +199,108 @@ fn s422_collision_entries_draw_as_the_original() {
     assert!(t[0][1] > 0 && t[1][1] > 0, "both kinds drew in the wreck: {t:?}");
     assert!(culls[0] > 0 && culls[1] > 0, "the view tests answered both ways: {culls:?}");
 }
+
+/// The rider body actors in `ee` (the original's class, by its vtable at `+8`, with eighteen parts)
+/// and, for each, a body's bone: the part (`+0x2f4`, `0xb0` each, body `+0xa4`) it is.
+fn actors(ee: &Ee) -> Vec<u32> {
+    (0x0010_0000..0x0200_0000u32).step_by(16).filter(|&a| ee.u32_at(a + 8) == 0x0045_8eb0 && ee.u32_at(a + 0x2e0) == 18).collect()
+}
+
+fn bone_of(ee: &Ee, actor: u32, body: u32) -> Option<usize> {
+    (0..18).find(|&i| ee.u32_at(ee.u32_at(actor + 0x2f4) + 0xb0 * i as u32 + 0xa4) == body)
+}
+
+/// The bone collision entries' feeds in `ee`: each bone collision entry's manager's `+0x30`.
+fn feeds(ee: &Ee) -> Vec<u32> {
+    let mut feeds: Vec<u32> = (0x0010_0000u32..0x0200_0000)
+        .step_by(4)
+        .filter(|&at| ee.u32_at(at) == PCC)
+        .map(|at| ee.u32_at(ee.u32_at(at - 0x10) + 0x30))
+        .collect();
+    feeds.sort_unstable();
+    feeds.dedup();
+    feeds
+}
+
+/// **S476: the feed's spheres are in the body's slot order, not the rider file's.** In S325's nose
+/// dive image every rider's feed (count `+0x10`, list `+0x14`) holds nine bone collisions, each one
+/// of its body actor's collisions (count `+0x620`, list `+0x624`, file order; a collision's body
+/// `+0x7c`). Read as bones, the actor's list is the rider file's order ([`Records::collisions`],
+/// the disc's `mrider.phy`, where the disc is here) and the feed's is [`FEED_BONES`]. The port's
+/// balls come out in the feed's order. Then the original runs 45 whole frames: each frame the body
+/// rewrites the same nine pointers, held foot or not, and a foot that is off (`+0x04`) is fed with
+/// its ground (`+0x18`) and scene (`+0x1c`) flags clear, so it gives the foot dust nothing.
+#[test]
+fn s476_feed_spheres_in_slot_order() {
+    use super::draws::{neutral_pad, render, render_setup, whole_frame};
+    use game_sim::dust::{FEED_BONES, balls_of};
+    let kit = Kit::load().unwrap();
+    let mut ee = Ee::from_ram(&kit.ctx("capture/s138/s325-nose76-2604.ee.bin")).unwrap();
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let actors = actors(&ee);
+    let feeds = feeds(&ee);
+    assert_eq!(feeds.len(), 4, "the four riders' feeds: {feeds:x?}");
+    let list = |ee: &Ee, f: u32| -> Vec<u32> {
+        assert_eq!(ee.u32_at(f + 0x10), 9, "feed {f:#x}'s count");
+        (0..9).map(|k| ee.u32_at(ee.u32_at(f + 0x14) + 4 * k)).collect()
+    };
+    let mut file_order = None;
+    for &f in &feeds {
+        let spheres = list(&ee, f);
+        let a = *actors
+            .iter()
+            .find(|&&a| (0..ee.u32_at(a + 0x620)).any(|k| ee.u32_at(ee.u32_at(a + 0x624) + 4 * k) == spheres[0]))
+            .unwrap_or_else(|| panic!("feed {f:#x}'s actor"));
+        let bones = |cs: &[u32]| -> Vec<usize> { cs.iter().map(|&c| bone_of(&ee, a, ee.u32_at(c + 0x7c)).expect("a collision's bone")).collect() };
+        let actor_list: Vec<u32> = (0..ee.u32_at(a + 0x620)).map(|k| ee.u32_at(ee.u32_at(a + 0x624) + 4 * k)).collect();
+        assert_eq!(bones(&spheres), FEED_BONES, "feed {f:#x}'s spheres' bones");
+        let file = bones(&actor_list);
+        assert_eq!(*file_order.get_or_insert_with(|| file.clone()), file, "actor {a:#x}'s collisions' bones");
+    }
+    let file_order = file_order.unwrap();
+    match game_render::disc::Disc::open_configured() {
+        Ok(mut disc) => {
+            let name = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len());
+            let bytes = disc.res(&name.expect("the rider archive")).unwrap().read_suffix("mrider.phy").unwrap();
+            assert_eq!(game_sim::ragdoll::Records::read_bytes(&bytes).collisions, file_order, "the rider file's collisions against the actor's");
+        }
+        Err(why) => println!("no disc ({why}): the actor's order {file_order:?} not held against the rider file's"),
+    }
+    // The port's balls: each contact marked with its file index by its surface.
+    let records = game_sim::ragdoll::Records { parts: vec![Default::default(); 18], joints: Vec::new(), collisions: file_order.clone() };
+    let doll = game_sim::ragdoll::Ragdoll::new(records);
+    let contacts: Vec<_> = (0..doll.collisions.len()).map(|k| game_sim::ragdoll_contact::Contact { surface: k as u8, ..Default::default() }).collect();
+    let got: Vec<Option<usize>> = balls_of(&doll, &contacts).iter().map(|b| b.map(|b| file_order[b.surface as usize])).collect();
+    assert_eq!(got, FEED_BONES.map(Some), "the port's balls' bones");
+    // The frames: the same nine pointers each frame, and what an off foot hands over.
+    let first: Vec<Vec<u32>> = feeds.iter().map(|&f| list(&ee, f)).collect();
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    render_setup(&mut ee);
+    let (mut off, mut off_touching, mut wrecks) = (0, 0, 0);
+    let mut seen = std::collections::HashMap::new();
+    for t in 0..45 {
+        neutral_pad(&mut ee);
+        whole_frame(&mut ee, F(1.0 / 30.0), &mut clock);
+        render(&mut ee);
+        for (n, &f) in feeds.iter().enumerate() {
+            assert_eq!(list(&ee, f), first[n], "frame {t}: feed {f:#x}'s spheres moved");
+            wrecks += u32::from(ee.u32_at(ee.u32_at(f + 0x24)) != 0);
+            for &c in &first[n][..2] {
+                let now = (ee.u32_at(c + 4), ee.u32_at(c + 0x18), ee.u32_at(c + 0x1c), ee.u32_at(c + 0x14));
+                let was = seen.insert(c, now);
+                if was != Some(now) {
+                    println!("s476 t{t} feed {f:#x} foot {c:#x}: on/ground/scene/touching {now:?} from {was:?}");
+                }
+                if ee.u32_at(c + 4) == 0 {
+                    off += 1;
+                    off_touching += u32::from(ee.u32_at(c + 0x18) != 0 || ee.u32_at(c + 0x1c) != 0);
+                }
+            }
+        }
+    }
+    println!("s476: feet off and fed {off} times, {off_touching} of them still touching; wrecking feed-frames {wrecks}");
+    // Measured: 283 off, none touching (the port clears every contact's flags each tick, on or off);
+    // the wrecking rider's feet come on at frame 10 and touch at 11 to 12 and 30 to 42.
+    assert!(off > 0 && wrecks > 0, "no foot off ({off}) or no feed wrecking ({wrecks}) in 45 frames");
+    assert_eq!(off_touching, 0, "an off foot handed over a touch");
+}
