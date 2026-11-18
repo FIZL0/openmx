@@ -6633,3 +6633,35 @@ fn the_pad_read_leaves_the_preload_unbound_until_one_is_bound() {
     assert_eq!(bound.preload.map(|v| v.0.to_bits()), Some(pad.axis_through(Axis::RightY, &range).0.to_bits()));
     assert_eq!(bound.with_preload(&pad, None, &range).preload, None);
 }
+
+/// S410: on a pack ride a trick's node grows only in MX vs. ATV's hold window — its buttons held
+/// and its clock at its `HoldTime` (the clock stops there), not while the clock eases into it. The
+/// pack's `Varial` (Cross left, HoldTime 0.4, 1000 and 1000 a second): let go at once it stays at its
+/// 1000; held, it first grows once the clock reaches 0.4 s (this ride's 60 Hz ticks ease into it
+/// from 0.3 s for about 30 ticks), and then grows every tick held.
+#[test]
+fn s410_a_pack_trick_grows_in_its_hold_window() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let hands = |off: usize| md16_script(&[(200, -1.0, 0.0, false, [true, false]), (off, 0.0, 0.0, false, [false; 2])]);
+    let varial = Trick::EXTRA + 2;
+    let open = |ride: &[Md16], t: usize| ride[t].total - ride[t - 1].total;
+
+    let (tapped, _) = ride_md16(&q, wheels, &tables, set.clone(), &hands(202), 360);
+    let start = tapped.iter().position(|t| t.frame.started == Some(Trick(varial))).expect("Cross left starts the Varial");
+    let landed = tapped[start..].iter().position(|t| t.seat.on_ground).map_or(tapped.len(), |k| start + k);
+    assert!(landed - start > 70, "in the air past the Varial's hold and its release: {}", landed - start);
+    assert!(tapped[start..landed].iter().all(|t| t.total == 1000.0), "let go, it never grows: {:?}",
+            tapped[start..landed].iter().map(|t| t.total).collect::<Vec<_>>());
+
+    let (held, _) = ride_md16(&q, wheels, &tables, set, &hands(start + 60), 360);
+    assert_eq!(held[start].frame.started, Some(Trick(varial)));
+    let grew: Vec<usize> = (start + 1..start + 70).filter(|&t| open(&held, t) > 0.0).collect();
+    // The old approximation grew from the first easing tick, the 19th (0.3 s).
+    let first = grew.first().map(|g| g - start).expect("held, it grows");
+    assert!(first > 40, "no growth before the clock is at its hold: first at tick {first}, {grew:?}");
+    assert_eq!(grew, (grew[0]..start + 60).collect::<Vec<_>>(), "then every tick held, up to the release");
+    let ticks = grew.len() as f32;
+    assert!((held[start + 69].total - (1000.0 + ticks * 1000.0 / 60.0)).abs() < 2.0, "1000 a second held: {}", held[start + 69].total);
+}

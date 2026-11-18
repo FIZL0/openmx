@@ -569,6 +569,18 @@ pub const ATV_BANK: F = F(0.2);
 pub const ATV_RECOVER: F = F(f32::from_bits(0x3f73_3334));
 pub const ATV_REPEAT: F = F(0.8);
 pub const ATV_REPEAT_FLOOR: F = F(f32::from_bits(0x3ed1_b719));
+/// A trick's hold window (S410): from its `HoldTime`, or [`ATV_HOLD_EARLY`] if that is less, to its
+/// `HoldTime` and [`ATV_HOLD_SLACK`] (state 4's tuning word, 0.04).
+pub const ATV_HOLD_EARLY: F = F(0.3);
+pub const ATV_HOLD_SLACK: F = F(f32::from_bits(0x3d23_d70a));
+
+/// **The marks MX vs. ATV's trick step makes on a running stunt's node** (S410), in its order: on
+/// first, then off. See [`Score::atv_hold_marks`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AtvHoldMarks {
+    pub on: bool,
+    pub off: bool,
+}
 /// A node's flags past [`flag`]'s, MX vs. ATV's: it is still running, and it is held (grows).
 pub mod atv_flag {
     pub const LIVE: u32 = 0x10;
@@ -640,6 +652,33 @@ impl Score {
         if let Some(k) = hit {
             let n = &mut self.nodes[k];
             n.flags = if on { n.flags | atv_flag::MARKED } else { n.flags & !atv_flag::MARKED };
+        }
+    }
+
+    /// **Which marks a running stunt's step makes** (S410), before its clip clock (`time`) runs on by
+    /// `dt`: with the gesture of the stunt's own kind held (`same_kind`), a hold time (`hold`) over 0
+    /// and the clock inside the hold window ([`ATV_HOLD_EARLY`], [`ATV_HOLD_SLACK`]), the node is
+    /// marked; at or past `hold` the clip is held there and that is all. Otherwise the clock runs on,
+    /// and unless the stunt is `special` (one of the kept ones, [`Score::atv_kept`], on a driven bike)
+    /// a clock still short of its `duration` lets the node go (one at or past it ends the stunt,
+    /// which the caller's clock tells).
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+    pub fn atv_hold_marks(time: F, hold: F, duration: F, dt: F, same_kind: bool, special: bool) -> AtvHoldMarks {
+        let early = hold.min(ATV_HOLD_EARLY);
+        let on = same_kind && !(hold <= F::ZERO) && !(time < early) && time <= hold + ATV_HOLD_SLACK;
+        if on && !(time < hold) {
+            return AtvHoldMarks { on, off: false };
+        }
+        AtvHoldMarks { on, off: !special && time + dt < duration }
+    }
+
+    /// The marks [`Score::atv_hold_marks`] answered, made on `id`'s node in their order.
+    pub fn atv_hold(&mut self, id: u8, marks: AtvHoldMarks) {
+        if marks.on {
+            self.atv_mark(id, true);
+        }
+        if marks.off {
+            self.atv_mark(id, false);
         }
     }
 
