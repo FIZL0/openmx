@@ -192,6 +192,11 @@ pub fn collidable_distance(extra: F, objects: &[Collidable], broad: &Broad, o: u
     F::ZERO.max(d)
 }
 
+/// [`collidable_distance`] of a reach `reach` round `centre`, not grown, from `p` (S239).
+pub fn reach_distance(centre: [F; 4], reach: F, p: [F; 4]) -> F {
+    F::ZERO.max(length(sub3(centre, p)) - reach)
+}
+
 /// How far apart the reaches of `a` and `b` are; never below 0.
 pub fn pair_distance(objects: &[Collidable], broad: &Broad, a: usize, b: usize) -> F {
     let reach = objects[a].radius + objects[b].radius;
