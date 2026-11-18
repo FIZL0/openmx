@@ -13204,6 +13204,15 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   fade -= +0x14c0 * dt (adda/msub, clamp), +0x14c0 = 3.0 stored only by the constructor at 0x004de5c4.
 #   Plays clip +0x1534[id] at +0x14d8 / clip length only for rows with the UsedForBike byte (+0x59);
 #   out (id 0xff) the same fade into the riding blend. So 1/3 s linear in and out.
+# R47 — when MX vs. ATV's 360 stunt ends (tests/mxvatv_stunt_end.rs on state04; journal 2026-11-18-r47-*).
+#   The stunt clock vt +0x4e8 (0x004e4900) has one caller, the trick step vt +0x4e4 (0x004e49c0), and only
+#   for a remote bike (+0x48c); there a 0 makes the lean put the riding pose / 0xff. Its phase store at
+#   0x004e496c sits in bc1f's delay slot: it stores 1 too. A local bike's step clocks itself (0x004e4bcc):
+#   +0x14d8 += dt, +0x14e4 = min(clock / row +0x48, 1), never zeroed; a kept id with +0x1194/+0x11d0 set is
+#   never ended by the clock; else clock >= +0x48 -> vt +0x4ac and 0. Kind (kept+driven 4, else row byte
+#   +8 & 0xf) == asked (+0x14ec & 0xf) with clock in [min(+0x44, 0.3), +0x44 + 0.04]: mark on, and past
+#   +0x44 vt +0x4ec (0x004e4810) holds the clip (+0x1788 = 1, clock frozen). 360 rows: +0x44 0.72, +0x48 1.5,
+#   kind 0. So a 360 ends only by the 360 step (id 255: ground, touch, yaw floor).
 
 # MD161 — MX vs. ATV Untamed's (SLUS-21701) monster-truck changes ported behind atv_car::Load::untamed, proved by
 # crates/game-sim/tests/untamed_truck.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81c.
