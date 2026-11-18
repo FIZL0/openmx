@@ -13665,6 +13665,21 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   3f75c28f 0 be999999; unit(heading) = 3f7458cc 0 be98b77f = quad +0x60; unit again 3f7458cd 0 be98b780.
 #   Frame rows_facing(start point, unit(unit(start heading))) = spawn_frame(start point, quad +0x60):
 #   box 400833cd 3ff98919 40410f77 (= the box rec +0x60 needs) and the four mounts bit-exact.
+# MD250 — Untamed's (SLUS-21701) part reader frame (tests/untamed_race_quad.rs scene_start/made). Comment rows only.
+#   Creation 0x004f6870 -> 0x004c9cf0: desc point (param_2[0x35]) to quad +0x80 and +0xd30, heading
+#   (param_2[0x36]) to +0x90 and +0xd40, up 0x003b5fa0 (0,1,0,1) to +0xa0 and +0xd50; model 0x004f7ed0;
+#   node position 0x00190710, rows 0x0018fe80; init vt +0x464 0x004dc3e0(q, +0x80, +0x90, +0xa0).
+#   Init: 0x004b84f0 reads +0x80/+0x90/+0xa0 back, load path vt +0xdc 0x004b86f0 -> vt +0xe8 0x004c8880 ->
+#   0x004b9130 -> place vt +0xf0 0x004b92c0 (same steps as SLUS-21104's 0x00492e50). End of init 0x004dc8f4:
+#   phy load vt +0xf4 0x004f6e90 -> 0x004cb7e0 -> part reader 0x004b9680 -> box 0x00192040 on node +0x114.
+#   Put-back 0x004ca900 copies +0xd30/+0xd40/+0xd50 back (with a terrain: ground 0x004b0910, point + 0.3 n,
+#   up = n); 0x004cda80 overwrites +0xd30.. while riding, so the image's +0xd30 is a checkpoint.
+#   Start spot: SX_A.scn [SceneInfo] DefaultStartPosition 395.76,3.76,155.86, DefaultStartDirection 0,0,1;
+#   in md147 spawn RAM at 0x007279f0 and 0x00748ff0 (43c5e147 4070a3d7 431bdc28). Image quad +0x80 is
+#   trigger 0x00daad60's point (0x00daad70) + 0.3 x ground normal, i.e. put back.
+#   Not exact: frame spawn_frame(start, +z) gives mounts 11/12 words (wheel 2 z c01d7080, image c01d70c0)
+#   and box 4004287d 3fff2a9a 4044d004; record +0x60/+0x70 need 4004287d 3fff2a9e/9f 4044d026. Yaw, pitch,
+#   roll sweeps (+-0.05 rad, 1e-5 step), start - cofg (0,1,0), origin sweeps: none give box and mounts.
 # MD234 — MD160's Untamed drives with the ground from Rocksbury's terrain and the noise from the port
 # (tests/mxvatv_car_frame/untamed_terrain.rs). Comment rows only. Journal: research/journal/2026-11-17-md234-untamed-terrain-replay.
 #   Smooth noise 0x001324b0: permutation words 0x00408080 (256), gradients 0x0040b0c0 (256), unbuilt flag

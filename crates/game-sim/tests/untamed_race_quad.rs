@@ -626,13 +626,30 @@ struct Setup {
     segments: [[Vf; 2]; 4],
 }
 
-/// The pack's quad made and rigged as the shell makes it, at the image's body and in its world's box.
+/// MD250: Rocksbury's start spot and heading, `SX_A.scn`'s `[SceneInfo]` `DefaultStartPosition` and
+/// `DefaultStartDirection` (`395.76,3.76,155.86` facing `0,0,1`), where the quad is made and its
+/// wheel setup and part reader read the model. `w` 1 on both, as the creation copies them.
+fn scene_start() -> (Vf, Vf) {
+    let path = kit().expect("the kit").ctx("untamed/sx_a").join("env/sx_a/SX_A.scn.bpb");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e} (SX_A.res extracted, MD168b)", path.display()));
+    let ini = game_sim::bpb::ini(&bytes).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let three = |key: &str| {
+        let (_, _, value) = ini.entries().find(|&(s, k, _)| s == "SceneInfo" && k == key).unwrap_or_else(|| panic!("SX_A.scn has no {key}"));
+        let w: Vec<f32> = value.split(',').map(|x| x.trim().parse().unwrap_or_else(|e| panic!("{key}: {e}"))).collect();
+        Vf::new(w[0], w[1], w[2], 1.0)
+    };
+    (three("DefaultStartPosition"), three("DefaultStartDirection"))
+}
+
+/// The pack's quad made and rigged as the shell makes it, at the image's body and in its world's box;
+/// the model read at the scene's start spot ([`scene_start`]).
 fn made(fs: &Files, ee: &Ee, at: &At) -> quad::Ride {
     let spot = v(ee, at.body + 0x70);
     let bounds = (at.area != 0).then(|| (v(ee, at.area + 0x30), v(ee, at.area + 0x40)));
     let curve = game_sim::camera::CurveTable::build();
     let (spot, heading) = (Vf::new(spot.0[0], spot.0[1], spot.0[2], 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
-    let load = quad::Load::read_model(&fs.ini, &fs.model, spot, heading, &curve).unwrap_or_else(|e| panic!("{e}"));
+    let (start, facing) = scene_start();
+    let load = quad::Load::read_model(&fs.ini, &fs.model, start, facing, &curve).unwrap_or_else(|e| panic!("{e}"));
     let mut ride = quad::Ride::spawn(&load, &fs.model, spot, heading, bounds, Vec::<Call>::new());
     ride.rig(&load, &fs.riding, &fs.wreck);
     ride
@@ -1031,9 +1048,9 @@ fn untamed_quad_resolves_its_hits_on_the_bale_as_the_original() {
     let (quad_body, bale_body) = (ee.u32_at(rec + 0xe4), ee.u32_at(BALE + 0xe4));
     assert_eq!(ee.u32_at(ee.u32_at(rec + 4) + 0x88), RESOLVE, "the quad record's vt +0x88");
     // The quad's record from its files is the image's, but for what the resolution writes first and
-    // the inverse inertia: the part reader's box is read at the start spot (MD134), and this test makes
-    // the quad at the settled one, heading +z, so it is some 36 ulps off (MD250). The cases below read
-    // the image's.
+    // the inverse inertia, some 36 ulps off: read at the scene's start spot, the part reader's box is
+    // still the image's but for 8 ulps in y and 34 in z, and no turn of the frame gives it (MD250). The
+    // cases below read the image's.
     let fresh = |c: &game_sim::contact::Collider| game_sim::contact::Collider { cofg_world: Vf::ZERO, normal_speed: F::ZERO, relative: Vf::ZERO, inv_inertia: Vf::ZERO, ..*c };
     let image_record = untamed_held(&ee, rec).record;
     assert_eq!(fresh(&held.record.collider), fresh(&image_record.collider), "the quad's record is not the image's");
