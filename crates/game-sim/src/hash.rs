@@ -496,6 +496,10 @@ impl State for Sim {
         if let Some(quad) = &self.quad {
             w.blob("quad", &quad.hash_bytes());
         }
+        // And the AI riders (S327), as their bytes: only on a Sim that has them.
+        if let Some(ai) = &self.ai {
+            w.blob("ai", &crate::snapshot::ai_bytes(ai));
+        }
         // Players 2 to 8, in player order. Only a session with more than one rider has this group,
         // so a one-player walk — and every hash pinned on one — is what it was before (S54).
         if !self.others.is_empty() {

@@ -555,3 +555,102 @@ fn an_mxvatv_planes_switch_is_this_machines_through_a_snapshot() {
     plane.put_back(&mark);
     assert!(plane.mxvatv, "a marker put back flies MX Unleashed's steps");
 }
+
+/// [`players`]' session with its last three riders AI (S327): a free ride's brains, no character
+/// file, drawing from their own generator, and a track's AI path net with pools part used.
+fn with_ai() -> Sim {
+    use game_sim::ai::{AiRider, Entry, Roster};
+    use ps2_float::F;
+    let mut sim = players::start();
+    let roster = Roster { humans: 1, ghost: false, ai: (0..3).map(|k| AiRider { identity: k, skill: 1 + k }).collect(), all_ai: None };
+    let mut rng = game_sim::rng::Rng::default();
+    rng.seed(0x5327);
+    sim.spawn_ai(&roster, None, 90, 2, &Entry { live: true, ..Entry::default() }, rng);
+    let paths = game_sim::race::TrackPaths {
+        word_34: 0,
+        ahead: F(200.0),
+        behind: F(200.0),
+        lap_length: F(0.0),
+        pick: 3,
+        paths: Vec::new(),
+        free_routes: 7,
+        free_parents: 5,
+        free_candidates: 3,
+    };
+    assert!(sim.give_ai_net(paths), "a lane to take the net");
+    sim
+}
+
+/// The AI lane's every word that rides the wire, as text: what a decode must have made the same.
+fn lane(sim: &Sim) -> String {
+    sim.ai.as_deref().map_or_else(String::new, |l| format!("{:?} {:?} {:?} {:?} {:?}", l.seek, l.rng, l.pilots, l.net, l.cards))
+}
+
+/// The scripted ride with the AI riders driving their bikes: the brains' levers for theirs.
+fn ride_ai(sim: &mut Sim, from: usize, n: usize) {
+    (from..from + n).for_each(|f| players::step(sim, &players::inputs(f), &mut Seen::default()));
+}
+
+#[test]
+fn the_ai_lane_rides_the_wire_and_the_hash() {
+    let mut sim = with_ai();
+    let fresh = lane(&sim);
+    let mut at = 0;
+    for &send_at in &[0, 30, 111] {
+        ride_ai(&mut sim, at, send_at - at);
+        at = send_at;
+        let bytes = snapshot::encode(&sim);
+        // The other machine's lane is somewhere else in the ride, its generator a draw or more on.
+        let mut there = with_ai();
+        ride_ai(&mut there, 0, 5 + send_at % 7);
+        let tables = Arc::clone(&there.ai.as_ref().unwrap().tables);
+        assert_ne!(lane(&there), lane(&sim), "sent at tick {at}: the lanes were the same already");
+        snapshot::decode(&mut there, &bytes).unwrap();
+        assert_eq!(lane(&there), lane(&sim), "sent at tick {at}");
+        assert!(Arc::ptr_eq(&there.ai.as_ref().unwrap().tables, &tables), "sent at tick {at}: the tables are this machine's");
+        assert_eq!(players::whole(&there), players::whole(&sim), "sent at tick {at}");
+        assert_eq!(there.hash(), sim.hash(), "sent at tick {at}");
+        assert_eq!(snapshot::encode(&there), bytes, "sent at tick {at}: re-encoded differently");
+        let mut here = sim.clone();
+        for f in at..at + 40 {
+            let pads = players::inputs(f);
+            players::step(&mut here, &pads, &mut Seen::default());
+            players::step(&mut there, &pads, &mut Seen::default());
+            assert_eq!(here.hash(), there.hash(), "sent at tick {at}: apart at {}", f + 1);
+        }
+        assert_eq!(lane(&here), lane(&there), "sent at tick {at}: the lanes rode apart");
+    }
+    assert_ne!(lane(&sim), fresh, "the brains wrote nothing in the ride");
+
+    // The hash sees each part of the lane.
+    let base = sim.hash();
+    let poked: [(&str, fn(&mut game_sim::ai::Lane)); 5] = [
+        ("the generator", |l| {
+            l.rng.rand();
+        }),
+        ("a pilot's levers", |l| l.pilots[1].1.levers.gas += ps2_float::F(0.5)),
+        ("a card", |l| l.cards[0].active = !l.cards[0].active),
+        ("the seeker world", |l| l.seek.groups.push(Default::default())),
+        ("the path net's pools", |l| std::sync::Arc::make_mut(l.net.as_mut().unwrap()).free_routes -= 1),
+    ];
+    for (what, poke) in poked {
+        let mut s = sim.clone();
+        poke(s.ai.as_deref_mut().unwrap());
+        assert_ne!(s.hash(), base, "the hash misses {what}");
+        let mut back = sim.clone();
+        snapshot::decode(&mut back, &snapshot::encode(&s)).unwrap();
+        assert_eq!(lane(&back), lane(&s), "{what} off the wire");
+    }
+
+    // A lane can only be put on a machine that has one (its tables are the machine's); a state
+    // without one takes this machine's away. Neither touches a state it refuses.
+    let mut plain = players::start();
+    ride(&mut plain, 0, 3, &mut Seen::default());
+    let before = players::whole(&plain);
+    assert!(snapshot::decode(&mut plain, &snapshot::encode(&sim)).is_err(), "a lane decoded onto a Sim with none");
+    assert_eq!(players::whole(&plain), before);
+    let mut there = with_ai();
+    snapshot::decode(&mut there, &snapshot::encode(&plain)).unwrap();
+    assert!(there.ai.is_none(), "the sender had no AI riders");
+    assert_eq!(there.hash(), plain.hash());
+}
