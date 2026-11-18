@@ -1040,7 +1040,8 @@ pub struct LapCard {
     pub records: Vec<LapRecord>,
     /// The gate race's next gate to pass, an index into its chain of gates (`+0x80`; `None` for none),
     /// the gates passed this lap (`+0x84`) and in the whole run (`+0x38`). Only
-    /// [`LapRules::gate_line`] reads them.
+    /// [`LapRules::gate_line`] reads them, and the AI drivers the gate through [`Laps`]' checkpoint
+    /// list, which is the same chain ([`ListGate`]).
     pub gate: Option<usize>,
     pub gates_this_lap: i32,
     pub gates_passed: i32,
@@ -2243,10 +2244,16 @@ pub enum RaceNotice {
 
 /// One gate on one of the score manager's line lists, with the spot on the path where it stands
 /// (`+0x94`). Only a live gate ([`flags::CLOSED`]) is tested.
+///
+/// In a gate race the checkpoint list (`+0x70`) is the chain of gates, and a card's
+/// [`LapCard::gate`] indexes it; the gate driver ([`crate::ai::drive::mode_four`]) reads two more of
+/// the gate's words: a side gate's facing (`+0xb0`) and its target speed (`+0xa4`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ListGate {
     pub gate: Gate,
     pub spot: Spot,
+    pub side: Vf,
+    pub speed: F,
 }
 
 /// The score manager's two line lists, as the race handler tests each card against them.
