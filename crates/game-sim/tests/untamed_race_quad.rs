@@ -559,6 +559,7 @@ struct Rocksbury {
     terrain: u32,
     record: u8,
     area: F,
+    props: game_sim::world::Props,
 }
 
 impl game_sim::world::World for Rocksbury {
@@ -573,8 +574,8 @@ impl game_sim::world::World for Rocksbury {
     fn wheel_surface(&mut self, _at: Vf) -> Option<u8> {
         Some(self.record)
     }
-    fn solid(&mut self, _bundle: &game_sim::collide::Bundle, _record: &mut game_sim::collide::Record) -> bool {
-        false
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.props.sweep(bundle, record)
     }
     fn area(&self) -> Option<game_sim::biplane::Area> {
         Some(game_sim::biplane::Area { width: self.area, depth: self.area })
@@ -642,7 +643,38 @@ fn setup(kit: &Kit, state: &str) -> Option<Setup> {
     let segments = ride.trigger_segments().expect("the quad's trigger probe");
     let terrain = ee.u32_at(at.wheels[0] + 0x1e0);
     let area = f(&ee, terrain + 0x40);
-    Some(Setup { ride, world: Rocksbury { ee, terrain, record: 0, area }, segments })
+    let props = solids(kit)?;
+    Some(Setup { ride, world: Rocksbury { ee, terrain, record: 0, area, props }, segments })
+}
+
+/// MD198: Rocksbury's solids, the scene's collision list (`SX_A.scn`'s `[CollisionObjects]`, as the
+/// Free Ride activity leaves it) placed from the disc's `SX_A.res` (`context/untamed/sx_a`): the
+/// stadium's shell (`FP01A_A.col`), whose side wall hazard-time's quad strikes on row 255, the
+/// towers, gates and lights. A file the archive does not have is skipped (`FP01A_E.col`).
+fn solids(kit: &Kit) -> Option<game_sim::world::Props> {
+    let dir = kit.ctx("untamed/sx_a");
+    let Ok(bytes) = std::fs::read(dir.join("env/sx_a/SX_A.scn.bpb")) else {
+        skip(&format!("{} has no SX_A.scn.bpb (SX_A.res extracted, MD168b)", dir.display()));
+        return None;
+    };
+    let ini = game_sim::bpb::ini(&bytes).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let mut text = String::new();
+    let mut last = None;
+    for (section, key, value) in ini.entries() {
+        if last != Some(section) {
+            text += &format!("[{section}]\n");
+            last = Some(section);
+        }
+        text += &format!("{key}={value}\n");
+    }
+    let scene = game_sim::track::Scene::parse(text.as_bytes()).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let files: Vec<PathBuf> = std::fs::read_dir(dir.join("col")).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let (props, missed) = game_sim::world::Props::load(&scene, |name| {
+        let p = files.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name))).ok_or("not in SX_A.res")?;
+        std::fs::read(p).map_err(|e| e.to_string())
+    });
+    assert_eq!(missed, ["FP01A_E.col: not in SX_A.res"], "Rocksbury's solids not placed");
+    Some(props)
 }
 
 /// The row's hex column as words.
@@ -697,13 +729,8 @@ fn replay(kit: &Kit, state: &str, csv: &str, last: usize) -> Option<Replayed> {
         }
         let off = body_off(r, &s.ride.body);
         if !off.is_empty() {
-            // Held off as well: the map edge, which the port's world box puts nearer than Rocksbury's
-            // (hazard-time's row 180 and 238 throw it, reason 13; the original rides on).
             let mut held = before;
             held.tailed.as_mut().unwrap().vehicle.stuck_time = F::ZERO;
-            if let Some(w) = held.wrecked.as_mut() {
-                w.edge = false;
-            }
             held.step(&controls(r), dt, &mut s.world, s.segments);
             if body_off(r, &held.body).is_empty() {
                 out.before_put_back.push(n);
@@ -806,12 +833,15 @@ fn clock_matches(clock: &[(F, F)], from: usize) {
 /// the 31st tick in the air, row 180, where it puts the quad back (MD168a: Untamed's put-back,
 /// [`quad::Ride::tail_on_untamed`]) to where it was last free, the tick it left the ground (row 150),
 /// stood on the ground. The port's body is the row's on every well-read row through the put-back and
-/// the landing after it to row 190, its clock the row's from row 140. Row 180 itself was read before
-/// the tick's tail: it is the port's tick with the put-back held off.
+/// the landing after it, and on along the ground to row 254, its clock the row's from row 140. Row 180
+/// itself was read before the tick's tail: it is the port's tick with the put-back held off. MD198: no
+/// map-edge throw on the way (the image's edge word is off in Free Ride); on row 255 the quad strikes
+/// the stadium's side wall (`FP01A_A.col`, [`solids`]) and wrecks, where the port's bounce is not yet
+/// the original's (MD198a).
 #[test]
 fn untamed_quad_replays_md147_hazard_time_through_the_put_back() {
     let Some(kit) = kit() else { return };
-    let Some(r) = replay(&kit, "hazard-time", "hazard-time", 190) else { return };
+    let Some(r) = replay(&kit, "hazard-time", "hazard-time", 254) else { return };
     assert!(r.off.is_empty(), "{} rows off:\n{}", r.off.len(), r.off.join("\n"));
     assert!(r.skipped.len() < 4, "rows {:?} were read badly", r.skipped);
     assert_eq!(r.before_put_back, [180], "the rows read before a put-back");
