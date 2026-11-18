@@ -493,6 +493,8 @@ impl Chassis {
         let params = Params { rate_stunt: game_sim::motion::Params::default().blend_rate, ..params };
         let mut stance = Stance::new(set, prefix, stunts, params);
         stance.restart_tricks = true;
+        // MD248: and the bike runs its 360 on its own animate, at its own fade.
+        stance.lib.bike = true;
         let nodes = Nodes::of(&stance.set.skeleton);
         let shape = Geometry::of(&stance.set.skeleton, nodes);
         let wheels = wheels_of(&stance.set.skeleton, nodes);

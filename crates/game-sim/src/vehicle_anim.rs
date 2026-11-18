@@ -48,7 +48,7 @@
 //!   40..=45 wreck/hold group      played once               a cross into the clip, then mode 0
 //!   46..=59 get_ready group       played once               the same
 //!   60..=67 a trick pack's extras (MD21, the port's own)    the stunt cross-fade, as 0..=23
-//!   68, 69  threesixtyL/R (MD21, the port's own)           played once, as 40..=59
+//!   68, 69  threesixtyL/R (MD21, the port's own)           mode 1 on MX vs. ATV's 360 fade (MD248)
 //! ```
 //!
 //! The last two rows are not the original's: MX Unleashed's table stops at 59. They are where MX vs.
@@ -71,6 +71,7 @@ use crate::hash;
 use crate::motion::{Animations, Clip, ClipId, Played, Player, Put, clamp01, remap};
 use crate::rng::Rng;
 use crate::trick::{EXTRA_SLOTS, SLOTS, Stunt};
+use ps2_float::fpu::Acc;
 use ps2_float::{Dest, F, Vf, libm};
 
 /// How many animation states the machine has: the length of both of its jump tables, and of the clip
@@ -162,6 +163,15 @@ pub const PACK_EXTRA: i32 = STATES as i32;
 /// `threesixtyL` and `threesixtyR`.
 pub const SPIN_LEFT: i32 = PACK_EXTRA + EXTRA_SLOTS as i32;
 pub const SPIN_RIGHT: i32 = SPIN_LEFT + 1;
+/// **MD248 (R43):** MX vs. ATV's rider fades a 360 in at its stunt rate, 2 a second: the saved pose's
+/// weight falls 1 to 0 over half a second. Every state it hands back to but the wreck poses and pause
+/// takes 2 a second too, so the cross out is half a second as well.
+const SPIN_RATE_RIDER: F = F(2.0);
+/// **MD248 (R43):** MX vs. ATV's bike fades its 360 in and out on its own animate, at 3 a second.
+const SPIN_RATE_BIKE: F = F(3.0);
+/// **MD248 (R43):** the 360 rows' `Duration` in MX vs. ATV's stunt table. The rider's clip plays at the
+/// stunt clock over this, held at its end once the clock is past it.
+const SPIN_ROW: F = F(1.5);
 /// How many states [`Library::pack`] holds.
 pub const PACK_STATES: usize = EXTRA_SLOTS + 2;
 /// The last extra state.
@@ -171,6 +181,16 @@ const PACK_LAST: i32 = SPIN_LEFT - 1;
 /// a clip for.
 fn gesture_state(lib: &Library, state: i32) -> bool {
     (0..SLOTS as i32).contains(&state) || pack_state(lib, state, PACK_EXTRA..=PACK_LAST)
+}
+
+/// **MD248:** one of MX vs. ATV's two 360 states, which `lib` has a clip for.
+fn spinning(lib: &Library, state: i32) -> bool {
+    pack_state(lib, state, SPIN_LEFT..=SPIN_RIGHT)
+}
+
+/// **MD248:** the rate MX vs. ATV fades a 360 in and out at, on this table's actor.
+fn spin_rate(lib: &Library) -> F {
+    if lib.bike { SPIN_RATE_BIKE } else { SPIN_RATE_RIDER }
 }
 
 /// One of the states past the sixty in `range`, which `lib` has a clip for. Without it a state past
@@ -213,11 +233,15 @@ pub struct Library {
     /// **The port's own (MD21):** a trick pack's clips for the states past the sixty — the extras,
     /// then the two 360s ([`PACK_EXTRA`]). Empty without a pack.
     pub pack: [Option<ClipId>; PACK_STATES],
+    /// **MD248:** the table is a bike's. MX vs. ATV's bike runs its 360 on its own animate, not the
+    /// rider's layer: its own fade rate ([`SPIN_RATE_BIKE`]), its fade held at 1 on the tick the 360
+    /// starts or ends, and its clip at the stunt clock over the clip's own length.
+    pub bike: bool,
 }
 
 impl Default for Library {
     fn default() -> Library {
-        Library { clip: [None; STATES], extra: Vec::new(), pack: [None; PACK_STATES] }
+        Library { clip: [None; STATES], extra: Vec::new(), pack: [None; PACK_STATES], bike: false }
     }
 }
 
@@ -762,8 +786,10 @@ impl Driver {
         if restart {
             self.rate = match self.want {
                 0..=23 | NO_HANDER => p.rate_stunt,
-                // MD21's pack states take the gesture slots' rate, the 360s too.
-                s if pack_state(lib, s, PACK_EXTRA..=SPIN_RIGHT) => p.rate_stunt,
+                // MD248: the 360s fade at MX vs. ATV's own rates, the rider's or the bike's.
+                s if spinning(lib, s) => spin_rate(lib),
+                // MD21's pack extras take the gesture slots' rate.
+                s if pack_state(lib, s, PACK_EXTRA..=PACK_LAST) => p.rate_stunt,
                 REVERSE_L | REVERSE_R => {
                     // The only arm of the rate switch that does anything besides pick a rate.
                     self.reverse = F::ZERO;
@@ -781,6 +807,13 @@ impl Driver {
                 START_POS..=59 => p.rate_ready,
                 _ => p.rate_default,
             };
+            // MD248: out of a 360, MX vs. ATV's next state's rate — the bike's 3 a second whatever
+            // follows, the rider's 2 but for the wreck and start-line groups, which keep theirs (the
+            // original's wreck poses and pause are 0.25, as here).
+            if spinning(lib, self.state) && !spinning(lib, self.want) && (lib.bike || !(HOLD..=59).contains(&self.want))
+            {
+                self.rate = spin_rate(lib);
+            }
         }
 
         // 4 — the restart itself, the held request's override of it, and the latch.
@@ -795,7 +828,15 @@ impl Driver {
             self.ramp = F::ZERO;
         }
         self.state = self.want;
-        self.ramp = self.ramp - self.rate * dt;
+        // MD248: a fade into or out of a 360 is MX vs. ATV's, `adda(0, fade) msub(rate, dt)`; the
+        // bike's holds at 1 on the tick it starts and falls from the next (R43).
+        if spinning(lib, self.state) || spinning(lib, self.prev) {
+            if !(lib.bike && restart) {
+                self.ramp = Acc::adda(F::ZERO, self.ramp).msub(self.rate, dt);
+            }
+        } else {
+            self.ramp = self.ramp - self.rate * dt;
+        }
         self.from_table = false;
         // The backflip is the one state a run-out ramp does not let go of the held pose on.
         if self.holding && self.state != BACKFLIP && self.ramp <= F::ZERO {
@@ -920,26 +961,28 @@ impl Driver {
                     a = lib.clip(self.want);
                     (w1, mode) = (phase, 1);
                 }
+                // MD248: MX vs. ATV's 360, one clip faded in from the saved pose over the ramp. Its
+                // phase is the stunt clock (dt on the first tick, then dt more a tick; kept in the
+                // reverse pair's clock, which nothing else reads while a 360 runs): the rider's over
+                // the 360 rows' Duration, held at 1, the bike's over its own clip (R43).
+                s if spinning(lib, s) => {
+                    self.reverse = if restart { F::ZERO } else { self.reverse } + dt;
+                    a = lib.clip(s);
+                    w1 = if lib.bike {
+                        self.reverse / a.map_or(F::ZERO, &length)
+                    } else {
+                        (self.reverse / SPIN_ROW).min(F::ONE)
+                    };
+                    mode = 1;
+                }
                 // The two played-once groups: a cross into the clip on the frame the state starts, and
                 // from then on the clip runs on its own.
-                s if (HOLD..=59).contains(&s) || pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) => {
+                HOLD..=59 => {
                     if restart {
                         let clip = lib.clip(self.state);
-                        // MD78: the 360 restarts at the gesture slots' fade *rate*, 4 a second, and a
-                        // play's length is seconds — taken as it stands the cross was 4 s over a
-                        // 1.47 s clip, and the throw never got past a third of its weight. The cross
-                        // is the gesture rows' own quarter second instead. A held request's zero rate
-                        // is still the hard cut. (MD79: the stunt start's record numbers MD78 took for
-                        // a fade are the 360's score, 2000 and 15000 a second, so the original's own
-                        // cross is still unread.)
-                        let cross = if pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) && self.rate > F::ZERO {
-                            F::ONE / self.rate
-                        } else {
-                            self.rate
-                        };
                         play = Some(Play {
                             clip,
-                            length: cross,
+                            length: self.rate,
                             duration: clip.map_or(F::ZERO, &length),
                         });
                     }
