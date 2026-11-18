@@ -163,6 +163,10 @@ pub struct Sim {
     /// generator. `None` — a ride whose shell plays its own note — draws nothing for them, as every
     /// state did before. Not on the wire yet, like the lane.
     pub notes: Option<Box<engine_note::Notes>>,
+    /// The bikes' particle emitters (S328c, [`dust`]): those that place particles draw on the race's
+    /// generator. `None` — a ride whose shell runs its own particles — draws nothing for them, as every
+    /// state did before. Not on the wire yet, like the notes.
+    pub dust: Option<Box<dust::Dust>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -275,6 +279,7 @@ impl Sim {
             ai: None,
             seek: None,
             notes: None,
+            dust: None,
         }
     }
 
@@ -427,6 +432,8 @@ impl Sim {
             said
         };
         self.race_bike(0, controls.clutch);
+        // The bike's particle emitters, after the bike (S328c).
+        self.dust_frame(0, dt);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
         // The body's look-around clock, after the bike (S328a).
@@ -708,6 +715,8 @@ impl Sim {
             };
             self.props_back(i);
             self.think(i, dt, world);
+            // Its particle emitters, after its brain (S328c).
+            self.dust_frame(i, dt);
             self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
@@ -832,6 +841,7 @@ impl Clone for Sim {
             ai: self.ai.clone(),
             seek: self.seek.clone(),
             notes: self.notes.clone(),
+            dust: self.dust.clone(),
         }
     }
 }
@@ -1431,6 +1441,9 @@ pub mod event;
 
 /// The bike's engine note (S328b): the machine that picks its samples, on the game's generator.
 pub mod engine_note;
+
+/// The bikes' particle emitters' draws on the game's generator (S328c).
+pub mod dust;
 
 /// The race activities (S13): the gates a race is counted through — the start gate and its penalty.
 pub mod race;

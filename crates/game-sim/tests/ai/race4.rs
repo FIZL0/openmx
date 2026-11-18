@@ -16,7 +16,7 @@
 // has reached, so that a fix shows as a raised mark and a regression as a failure. The human, with no
 // pad but the stick its image was saved holding on the first step, agrees on every row (S329).
 
-use super::draws::{C33_NOTE_PICKS, C33_NOTES_ON, c33_looks};
+use super::draws::{C33_DUST, C33_NOTE_PICKS, C33_NOTES_ON, c33_dust, c33_looks};
 use super::lane::s323_free09;
 use super::sim::{s12e_bike, s12e_racer, s12e_seek_world, s12e_u64};
 use super::*;
@@ -25,7 +25,7 @@ use game_sim::Sim;
 use game_sim::ai::{Lane, Pilot, Seat};
 use game_sim::bike_col::{self, BikeCol};
 use game_sim::eco::Wooded;
-use game_sim::engine_note;
+use game_sim::{dust, engine_note};
 use game_sim::phy::Phy;
 use game_sim::ride::{Controls, Ride, Wheel};
 use game_sim::rider::{Rider as Bike, Tables};
@@ -405,6 +405,8 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new(), edge: None }));
     // S328b: the four engine notes, as the image holds them, on the lane's generator.
     sim.notes = Some(Box::new(c33_notes(&ee)));
+    // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
+    sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
 
     // The image's RAM already holds the bodies of the first row: it is tick 3's, saved before its
     // frame counter moved on. Each step from it is the next row.
@@ -440,6 +442,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         assert_eq!(row.frame, C33_FROM + 2 + n as u64, "the capture's rows run on from the image, one a tick");
         // The step into a row is the frame length the row before it read.
         let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(k)).body.look).collect();
+        let gen_was = sim.ai.as_ref().unwrap().rng.state();
         sim.step_all(last.dt, &controls, &mut world);
         // S328b: the notes switch on and pick as the original's do (draws.rs's C33_NOTES_ON and
         // C33_NOTE_PICKS), through 16.
@@ -456,6 +459,32 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
                     false => (engine_note::Note::Idle, 0),
                 };
                 assert_eq!((note.brain.note, note.brain.current.index), want, "tick {}: {name}'s note", row.frame);
+            }
+        }
+        // S328c: the emitters draw as the original's do (draws.rs's C33_DUST) while the riders' bodies
+        // agree, each through its C33_AGREES_THROUGH and the table's window.
+        if row.frame <= C33_DUST_THROUGH {
+            let dust = &sim.dust.as_ref().unwrap().riders;
+            let mut drew: Vec<(&'static str, usize)> = Vec::new();
+            for (k, name) in C33_NAMES.iter().enumerate() {
+                if row.frame > C33_AGREES_THROUGH[k] {
+                    continue;
+                }
+                for (i, e) in dust[c33_player(k)].entries.iter().enumerate() {
+                    if e.draws != 0 {
+                        drew.push((name, i));
+                    }
+                }
+            }
+            drew.sort();
+            let want: Vec<(&'static str, usize)> = c33_dust(row.frame).into_iter().filter(|(n, _)| row.frame <= C33_AGREES_THROUGH[C33_NAMES.iter().position(|m| m == n).unwrap()]).collect();
+            assert_eq!(drew, want, "tick {}: the emitters that drew", row.frame);
+            // From 17 through 28 nothing else draws in the original's sim half (draws.rs), so the
+            // Sim's generator steps two a drawing emitter.
+            if (17..=28).contains(&row.frame) {
+                let mut g = Rng::from_state(gen_was);
+                let steps = (0..=64).find(|_| g.state() == sim.ai.as_ref().unwrap().rng.state() || { g.rand(); false });
+                assert_eq!(steps, Some(2 * want.len()), "tick {}: the Sim's draws", row.frame);
             }
         }
         // S328a: the bodies' look-around clocks re-arm on the generator as the original's do
@@ -587,6 +616,85 @@ fn c33_notes(ee: &Ee) -> engine_note::Notes {
         .collect();
     riders.sort_by_key(|r| r.0);
     engine_note::Notes { riders: riders.into_iter().map(|r| r.1).collect() }
+}
+
+/// The last tick [`C33_DUST`] covers.
+const C33_DUST_THROUGH: u64 = 63;
+
+/// S328c: the image's emitters as the Sim's, by Sim player: each rider's manager (`+0x1490`) entries
+/// in its list's order. An entry: its tyre record `+4` (records of `0x2c` from the feed's `+4`, the
+/// feed at the manager's `+0x30`), live bit `+8`, `Disable` `+0xc`, vtable `+0x10`, emitter `+0x14`;
+/// the exhaust's MaxSpeed `+0x18`, the spray's clock `+0x28` and threshold `+0x30`. An emitter: its
+/// switch byte `+0x240` (4 on, 2 just on), point `+0x40`, previous `+0x60`, node offset `+0x70`,
+/// MinimumEmissionSpeed `+0x3c4`. Its place on the bike is its point in the seeded bike's frame.
+fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
+    use dust::{Emitter, Entry, Kind, RiderDust};
+    const EXHAUST: u32 = 0x0045_e780;
+    const GENERIC: u32 = 0x0045_e6f0;
+    const SPRAY: u32 = 0x0045_e720;
+    let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+    let mut riders: Vec<(usize, RiderDust)> = C33_RIDERS
+        .iter()
+        .enumerate()
+        .map(|(k, &(r, _, _))| {
+            let bike = sim.rider_of(c33_player(k)).ride.transform();
+            let m = ee.u32_at(r + 0x1490);
+            let records = ee.u32_at(ee.u32_at(m + 0x30) + 4);
+            let entries = (0..ee.u32_at(m + 0x34))
+                .map(|i| {
+                    let e = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
+                    let em = ee.u32_at(e + 0x14);
+                    let kind = match ee.u32_at(e + 0x10) {
+                        EXHAUST => Kind::Exhaust { max_speed: F(ee.f32_at(e + 0x18)) },
+                        GENERIC => Kind::Generic,
+                        SPRAY => Kind::Spray { threshold: F(ee.f32_at(e + 0x30)), clock: F(ee.f32_at(e + 0x28)) },
+                        _ => Kind::Quiet,
+                    };
+                    let rec = ee.u32_at(e + 4);
+                    let tyre = (rec != 0).then(|| ((rec - records) / 0x2c) as usize);
+                    let flag = ee.read(e + 8, 1) as u8;
+                    let switch = ee.read(em + 0x240, 1) as u8;
+                    assert_eq!(vf(em + 0x70).0[..3], [0.0; 3], "{}'s entry {i}: an emitter offset", C33_NAMES[k]);
+                    let pos = vf(em + 0x40);
+                    let at = dust::place_on(&bike, pos).expect("a bike transform that inverts");
+                    Entry {
+                        kind,
+                        tyre,
+                        disable: ee.u32_at(e + 0xc) as u8,
+                        live: flag & 1 != 0,
+                        zone_off: flag & 2 != 0,
+                        emitter: Emitter { on: switch & 4 != 0, just_on: switch & 2 != 0, min_speed: F(ee.f32_at(em + 0x3c4)), at, pos, prev: vf(em + 0x60) },
+                        draws: 0,
+                    }
+                })
+                .collect();
+            // The snapshot the manager reads, through the feed's pointers: wreck `+0x24`, throttle
+            // `+0x18`, clutch `+0x1c`, speed `+0x20`; a tyre record's ground `+8`, object `+0xc`,
+            // spinning `+0x14`, side load `+0x20`.
+            let feed = ee.u32_at(m + 0x30);
+            let at = |p: u32, o: u32| ee.u32_at(p + o);
+            let tyre = |t: u32| {
+                let rec = records + 0x2c * t;
+                dust::Tyre {
+                    ground: ee.u32_at(at(rec, 8)) != 0,
+                    object: ee.u32_at(at(rec, 0xc)) != 0,
+                    spinning: ee.u32_at(at(rec, 0x14)) != 0,
+                    side: F(ee.f32_at(at(rec, 0x20))),
+                }
+            };
+            assert_eq!(ee.u32_at(feed), 2, "{}'s manager has two tyres", C33_NAMES[k]);
+            let feed = dust::Feed {
+                wrecking: ee.u32_at(at(feed, 0x24)) != 0,
+                throttle: F(ee.f32_at(at(feed, 0x18))),
+                clutch: F(ee.f32_at(at(feed, 0x1c))),
+                airspeed: F(ee.f32_at(at(feed, 0x20))),
+                tyres: [tyre(0), tyre(1)],
+            };
+            (c33_player(k), RiderDust { entries, feed })
+        })
+        .collect();
+    riders.sort_by_key(|r| r.0);
+    dust::Dust { riders: riders.into_iter().map(|r| r.1).collect() }
 }
 
 /// The controls rider `r`'s image was saved holding: its stick, read back from the limiter's
