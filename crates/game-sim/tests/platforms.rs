@@ -462,8 +462,10 @@ const RIDERS_DIGEST: u64 = 0x448f17a4bb03dd13;
 /// The bytes moved with S328a, the length did not: the Sim runs each body's look-around clock, which
 /// a free ride draws on the body's own idle pool. S351's stock engine (EngineBraking and the low end)
 /// moved both, the length by one byte (the riders end the run in a different state).
-const RIDERS_WIRE_DIGEST: u64 = 0x693d94383e71ea07;
-const RIDERS_WIRE_LEN: usize = 13612;
+/// 13616 since S467: each rider's body driver carries the 360's clip-start count it last saw (a
+/// byte, four riders).
+const RIDERS_WIRE_DIGEST: u64 = 0x878876b2575cd389;
+const RIDERS_WIRE_LEN: usize = 13616;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed
