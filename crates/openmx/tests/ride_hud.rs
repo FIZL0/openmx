@@ -1177,7 +1177,7 @@ fn with_the_touch_pad_up_the_meters_sit_under_the_fps_line() {
 fn the_last_lap_waves_white_and_the_finish_checkered() {
     let t0 = Instant::now();
     let g = gauges(Speedometer::Digital);
-    let race = |run: u32| ride_hud::RaceShown { lap: Some((run + 1).min(3)), laps: 3, place: Some(2), riders: 4, run };
+    let race = |run: u32| ride_hud::RaceShown { lap: Some((run + 1).min(3)), laps: 3, place: Some(2), riders: 4, run, board: None };
     let mut t = Tracker::default();
     t.note_race(t0, Some(&race(0)));
     assert_eq!(t.race_flag(t0), None, "no flag at the start");
@@ -1231,4 +1231,48 @@ fn the_last_lap_waves_white_and_the_finish_checkered() {
     t.note_race(at(6.0), None);
     t.note_race(at(7.0), Some(&race(0)));
     assert_eq!(t.race_flag(at(7.0)), None, "a new race starts with none up");
+}
+
+/// P375: the 30 second board. From the start's lights it grows in top centre over 0.25 s, turns a
+/// quarter anticlockwise once its clock passes 0.75 s and shrinks away from 0.25 s past 1.5 s, as the
+/// original's race overlay plays its `CountdownBoard` (frames read off PCSX2 on sx01); it is a grey
+/// card with a dark `30` on it.
+#[test]
+fn the_thirty_second_board_grows_turns_and_goes() {
+    let dt = 0.03333;
+    let look = |up: f32| ride_hud::board_look(up);
+    assert_eq!(look(dt), None, "the first tick shows it at nothing");
+    let (s, a, turn) = look(3.0 * dt).unwrap();
+    assert!(near(s, 4.0 * 0.03333, 1e-3) && near(a, s, 0.003) && turn == 0.0, "growing: {s} {a} {turn}");
+    assert_eq!(look(0.5), Some((1.0, 1.0, 0.0)), "grown");
+    let (s, _, turn) = look(27.0 * dt).unwrap();
+    assert!(s == 1.0 && near(turn, 0.4 * std::f32::consts::FRAC_PI_2, 1e-3), "turning: {turn}");
+    assert_eq!(look(1.5).map(|l| l.2), Some(std::f32::consts::FRAC_PI_2), "turned");
+    assert_eq!(look(1.75).map(|l| l.0), Some(1.0), "held a while past 1.5 s");
+    let (s, a, _) = look(57.0 * dt).unwrap();
+    assert!(near(s, 1.0 - (10.0 * 0.03333 - 0.25) / 0.25, 1e-3) && near(a, s, 0.003), "going: {s}");
+    assert_eq!(look(2.2), None, "gone");
+
+    let g = gauges(Speedometer::Digital);
+    let draw = |board: Option<f32>| {
+        let mut sh = shown(&g, &[], &[], None);
+        sh.race = Some(ride_hud::RaceShown { lap: Some(1), laps: 3, place: Some(2), riders: 4, run: 0, board });
+        let mut frame = Frame::new(1920, 1080, [90, 120, 160]);
+        let d = ride_hud::draw(&mut frame, &sh, &Tracker::default(), Instant::now());
+        (frame, d)
+    };
+    let (frame, d) = draw(Some(0.5));
+    let (p, s, turn, b) = d.board.expect("the board is drawn");
+    assert_eq!((s, turn), (1.0, 0.0));
+    assert!(near(p[0], 960.0, 1.0) && near((b[0] + b[2]) / 2.0, 960.0, 0.01 * 1920.0), "top centre: {p:?} {b:?}");
+    assert!(b[1] < 0.1 * 1080.0 && b[3] < 0.35 * 1080.0, "at the top: {b:?}");
+    assert!(b[3] - b[1] > b[2] - b[0], "standing: {b:?}");
+    let grey = count(&frame, b, [200, 200, 200, 255]) + count(&frame, b, [180, 180, 180, 255]);
+    let dark = count(&frame, b, [52, 52, 52, 255]);
+    assert!(grey > 5000 && dark > 3000, "a grey card with a dark 30: {grey} grey, {dark} dark");
+    let (_, d) = draw(Some(1.5));
+    let (_, _, turn, b) = d.board.unwrap();
+    assert!(near(turn, 90.0, 1e-3) && b[2] - b[0] > b[3] - b[1], "lying on its side: {b:?}");
+    assert_eq!(draw(Some(2.2)).1.board, None);
+    assert_eq!(draw(None).1.board, None, "none outside the lights and the drop");
 }

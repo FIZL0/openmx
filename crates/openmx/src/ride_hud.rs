@@ -206,6 +206,9 @@ pub struct RaceShown {
     pub riders: u32,
     /// The laps the view's card has run, which the flags go by (P328).
     pub run: u32,
+    /// The seconds the 30 second board has been up (P375): from the start's lights to the drop,
+    /// `None` outside them (`race_start::board_up`).
+    pub board: Option<f32>,
 }
 
 /// The flag the race's HUD waves at a counted lap (P328): white as the last lap starts, checkered
@@ -655,6 +658,9 @@ pub struct Drawn {
     pub race: Vec<Line>,
     /// The race's flag (P328) and the box its cloth and pole fill.
     pub flag: Option<(RaceFlag, [f32; 4])>,
+    /// The 30 second board (P375): its pivot, its scale, its turn (degrees anticlockwise) and the box
+    /// its corners fill.
+    pub board: Option<([f32; 2], f32, f32, [f32; 4])>,
 }
 
 // ---- the pen --------------------------------------------------------------------------------------
@@ -863,6 +869,9 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
         race(&mut pen, r, &mut drawn);
         if let Some((f, t)) = tracker.race_flag(now) {
             flag(&mut pen, f, t, &mut drawn);
+        }
+        if let Some(up) = r.board {
+            board(&mut pen, up, &mut drawn);
         }
     }
     if let Some(p) = tracker.popup(now) {
@@ -1087,6 +1096,96 @@ fn flag(pen: &mut Pen, f: RaceFlag, t: f32, drawn: &mut Drawn) {
         }
     }
     drawn.flag = Some((f, b));
+}
+
+/// Where the 30 second board stands, in layout pixels: the middle of its 128-pixel icon, which it
+/// grows, turns and shrinks about. The original's `racingoverlays.lyt` centres its `CountdownBoard`
+/// there, top centre; on a wider view it stays in the middle across.
+pub const BOARD_AT: (f32, f32) = (320.0, 88.0);
+/// The length of each of the board's three moves, in seconds: in, the turn, out.
+const BOARD_MOVE: f32 = 0.25;
+/// The board's clock past which it starts its turn, then its way out (the original's tests are
+/// `up <= 0.75` to come in, then past 0.75 and past 1.5).
+const BOARD_TURN_AT: f32 = 0.75;
+const BOARD_OUT_AT: f32 = 1.5;
+/// How far the board turns: a quarter, anticlockwise.
+const BOARD_TURN: f32 = FRAC_PI_2;
+
+/// The 30 second board `up` seconds after the lights showed it (P375): its scale, its alpha and its
+/// turn (radians anticlockwise), or `None` while it is too small to see. The original's race overlay
+/// grows it in over 0.25 s, fading in with it; turns it a quarter anticlockwise over 0.25 s once its
+/// clock passes 0.75 s; and once past 1.5 s holds it 0.25 s more, then shrinks and fades it out over
+/// 0.25 s. Each move starts on the first tick whose clock passes its mark and plays from the tick
+/// after, its own clock read before the tick adds to it, so on the board's ticks each lags its mark
+/// by two ticks or less.
+pub fn board_look(up: f32) -> Option<(f32, f32, f32)> {
+    let dt = game_sim::tick::DeltaTime::CAP_30;
+    let tick = (up / dt).round();
+    // The move's own clock: from the tick after the first tick (from the board's first, 1) whose
+    // clock is past `mark`, less the tick that reads it.
+    let clock = |mark: Option<f32>| {
+        let first = mark.map_or(1.0, |m| (m / dt).floor() + 1.0);
+        (tick - first - 1.0) * dt
+    };
+    let grown = (clock(None) / BOARD_MOVE).clamp(0.0, 1.0);
+    let turned = (clock(Some(BOARD_TURN_AT)) / BOARD_MOVE).clamp(0.0, 1.0);
+    let gone = ((clock(Some(BOARD_OUT_AT)) - BOARD_MOVE) / BOARD_MOVE).clamp(0.0, 1.0);
+    let scale = if gone > 0.0 { 1.0 - gone } else { grown };
+    let alpha = (scale * 255.0).round() / 255.0;
+    (scale > 0.0).then_some((scale, alpha, turned * BOARD_TURN))
+}
+
+/// The 30 second board (P375), shown from the start's lights: a grey card with a big dark `30`, a
+/// dark badge over it and a slot by each edge, grown in top centre, turned a quarter and shrunk away
+/// ([`board_look`]). The original draws its `30secboard` texture, 128 pixels square; this is drawn by
+/// eye off it in its place, the badge without the sponsor's name on it.
+fn board(pen: &mut Pen, up: f32, drawn: &mut Drawn) {
+    let Some((scale, alpha, turn)) = board_look(up) else { return };
+    pen.corner = Corner::TopLeft;
+    // The art at full size, in the icon's 128 pixels from its corner, then grown and turned about
+    // the icon's middle.
+    let (cx, cy) = BOARD_AT;
+    let (ix, iy) = (cx - 64.0, cy - 64.0);
+    let mut art = Vec::new();
+    let mut at = Pen { out: &mut art, view: pen.view, s: pen.s, base: pen.base, corner: Corner::TopLeft, alpha: pen.alpha * alpha };
+    let card = [ix + 24.0, iy + 1.0, 80.0, 101.0];
+    at.round(card, 4.5, [206, 206, 206, 255], [172, 172, 172, 255]);
+    at.ring(card, 4.5, 0.8, [128, 128, 128, 255]);
+    let slot = [34, 34, 34, 255];
+    for b in [[55.5, 4.0, 17.0, 3.2], [55.5, 95.0, 17.0, 3.2], [28.0, 42.0, 3.2, 18.0], [96.8, 42.0, 3.2, 18.0]] {
+        at.round([ix + b[0], iy + b[1], b[2], b[3]], 1.6, slot, slot);
+    }
+    // The badge: a dark slant with a red rule along its foot.
+    let badge = |x: f32, y: f32| at.px((ix + x, iy + y));
+    let corners = [badge(43.0, 16.0), badge(89.0, 16.0), badge(85.0, 27.0), badge(39.0, 27.0)];
+    let dark = at.tint([26, 26, 26, 255]);
+    at.out.push(Sprite { corners, uv: [[0.0; 2]; 4], local: [[0.0; 2]; 4], clamp: [0.0; 4], image: None, tint: dark, shape: Shape::Plain });
+    at.bar((ix + 46.5, iy + 24.0), (ix + 80.5, iy + 24.0), 0.6, 0.6, [196, 32, 32, 255]);
+    // The `30`, 51 pixels tall, narrowed to the 54 the card's is wide.
+    let from = at.out.len();
+    let size = 51.0 / Pen::cap(Face::Words, 1.0);
+    let wide = Pen::measure(Face::Words, Weight::Heavy, "30", size);
+    let r = at.text(Face::Words, Weight::Heavy, "30", (ix + 64.0 - wide / 2.0, iy + 87.0), size, 0.0, [52, 52, 52, 255]);
+    let narrow = (54.0 / wide).min(1.0);
+    let mid = (r[0] + r[2]) / 2.0;
+    for sp in &mut at.out[from..] {
+        sp.corners.iter_mut().for_each(|c| c[0] = mid + (c[0] - mid) * narrow);
+    }
+    // Drawn about the layout's middle, stood at the view's: the original centres it across.
+    let q = pen.px(BOARD_AT);
+    let p = [pen.view[0] + pen.view[2] / 2.0, q[1]];
+    let (sin, cos) = turn.sin_cos();
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for mut sp in art {
+        for c in &mut sp.corners {
+            let (dx, dy) = (c[0] - q[0], c[1] - q[1]);
+            // Anticlockwise on the screen, whose y runs down.
+            *c = [p[0] + scale * (dx * cos + dy * sin), p[1] + scale * (dy * cos - dx * sin)];
+            b = [b[0].min(c[0]), b[1].min(c[1]), b[2].max(c[0]), b[3].max(c[1])];
+        }
+        pen.out.push(sp);
+    }
+    drawn.board = Some((p, scale, turn.to_degrees(), b));
 }
 
 fn mix(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
