@@ -632,12 +632,21 @@ impl Down {
                 }
             }
         }
-        // Where the first sphere stood, if it stood: its collision on and its bone enabled.
+        // Where the first sphere last stood, if it stood: its collision on and its bone enabled. Every
+        // pass of every substep stands each sphere that is on, in the list's order, so the first
+        // sphere's last stand leads the last pass (S473: the original's collider keeps its last
+        // place, not the frame's first, a substep's travel apart).
         if let (Some(b), Some(s), Some(c)) = (&bike_scene, kit.spheres.first(), self.ragdoll.collisions.first())
             && c.enabled
             && self.ragdoll.bones.get(s.bone).is_some_and(|b| b.body.enabled)
         {
-            self.search.stood = b.stood.first().copied();
+            let on = kit
+                .spheres
+                .iter()
+                .zip(&self.ragdoll.collisions)
+                .filter(|(s, c)| c.enabled && self.ragdoll.bones.get(s.bone).is_some_and(|b| b.body.enabled))
+                .count();
+            self.search.stood = b.stood.len().checked_sub(on).map(|i| b.stood[i]);
         }
         for b in &mut self.ragdoll.bones {
             b.body.quat = normalize(b.body.quat);
