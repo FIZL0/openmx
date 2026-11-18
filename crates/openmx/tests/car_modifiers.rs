@@ -148,6 +148,9 @@ fn a_taken_car_lands_at_once() {
 /// as fast as at 100% a second in and 0.9 times two seconds in. Held, the baja was at 11.7 against
 /// 28 ft/s a second in at every value, and the monster truck at 21 against 35 from 180%; the slowest
 /// now (the baja at 200%, about 25 against 37) spins its rear wheels on the torque it is given.
+/// P370b left that: raising the driven tires' forward grip with k (as Knob::AtvAccel does for the
+/// quad) put the baja at 0.84 times or better, but tipped the monster truck onto its tail and off the
+/// floor from 280% (from 300% with the raise held to 1.2).
 #[test]
 fn a_car_taken_on_the_gas_over_100_is_not_held() {
     let Some(machines) = machines() else { return println!("skipped: no disc") };
