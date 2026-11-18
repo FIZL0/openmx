@@ -234,7 +234,7 @@ fn four_seats_switch_and_back(map: &str, world: &mut dyn World, start: Spawn, lo
         let under = ground_at(world, p.at);
         assert_eq!((p.at.x(), p.at.z()), (bike.x(), bike.z()), "{map}: seat {seat}'s plane is not on its player");
         assert!((p.at.y() - (under + rest)).abs() < 1e-3, "{map}: seat {seat}'s plane is not on its wheels: {} over {under}", p.at.y());
-        assert_eq!(p.livery, vehicle::livery(seat));
+        assert_eq!(p.flier, seat);
         // The others are where they were: on their bikes.
         for other in (0..SEATS).filter(|&o| o > seat) {
             assert_eq!(garages[other].up, Kind::Bike, "{map}: seat {other} moved with seat {seat}");

@@ -106,7 +106,7 @@ fn every_player_has_one_of_each_machine() {
             for (p, g) in garages.iter().enumerate() {
                 let plane = g.plane.as_ref().unwrap();
                 assert_eq!(plane.at, lot.bay(Machine::Biplane, p).unwrap().spawn.at);
-                assert_eq!(plane.livery, p % 2);
+                assert_eq!(plane.flier, p, "each plane is its own seat's flier (P315h)");
                 assert_eq!(g.plane_shown().map(|p| p.at), Some(plane.at), "a plane flown from its bay is drawn there");
             }
             for (p, g) in garages.iter().enumerate() {

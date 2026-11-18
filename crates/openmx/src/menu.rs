@@ -2918,9 +2918,9 @@ const MAIN_CONTROLLERS: usize = 7;
 pub const PAUSE: [&str; 9] =
     ["Resume", "Restart", "Garage", "Settings", "Controllers", "Game Modifiers", "Tricks", "Main Menu", QUIT];
 const PAUSE_GARAGE: usize = 2;
-/// The seats that fly fliers of their own picking (P315g): a ride builds one flier a livery, and a
-/// seat past them wears the first's or the second's (the shell's `vehicle::LIVERIES`).
-const OWN_FLIERS: usize = 2;
+/// The seats that fly fliers of their own picking (P315g): every seat since a ride builds one flier
+/// a seat (P315h).
+const OWN_FLIERS: usize = SEATS_MAX;
 const PAUSE_SETTINGS: usize = 3;
 const PAUSE_CONTROLLERS: usize = 4;
 const PAUSE_MODIFIERS: usize = 5;

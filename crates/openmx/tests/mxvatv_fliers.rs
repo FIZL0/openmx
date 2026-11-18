@@ -151,6 +151,11 @@ fn on_the_biplane_is_mx_vs_atvs_on_both_models() {
 /// scratch folder of its own (the shell keeps its files beside the disc it was given), or `None`
 /// with no disc to ride.
 fn ride_two(name: &str, garage: &str) -> Option<String> {
+    ride_seats(name, garage, 2)
+}
+
+/// [`ride_two`] for `players` players.
+fn ride_seats(name: &str, garage: &str, players: usize) -> Option<String> {
     let iso = match game_render::disc::Disc::configured_path() {
         Ok(iso) => iso,
         Err(e) => {
@@ -167,7 +172,7 @@ fn ride_two(name: &str, garage: &str) -> Option<String> {
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(root())
         .arg(&link)
-        .args(["--headless", "--track", "free09", "--frames", "10", "--steady-clock", "--mods", "mods", "--players", "2", "--garage"])
+        .args(["--headless", "--track", "free09", "--frames", "10", "--steady-clock", "--mods", "mods", "--players", &players.to_string(), "--garage"])
         .output()
         .expect("the shell runs");
     let said = String::from_utf8_lossy(&out.stdout).to_string();
@@ -204,6 +209,50 @@ fn p1_and_p2_fly_their_own_picks() {
     let same = "seat1.flier = biplane mxvatv_fliers biplane4\nseat2.flier = biplane mxvatv_fliers biplane4\n";
     let Some(said) = ride_two("p315b-same", same) else { return };
     for line in ["biplane: P1 mxvatv_fliers's, drawn in biplane4", "biplane: P2 mxvatv_fliers's, drawn in biplane3"] {
+        assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
+    }
+}
+
+#[test]
+fn every_seat_of_four_flies_its_own_picks() {
+    // P315h: seats three and four build their own plane and helicopter, not P1's and P2's.
+    if !pack() {
+        return;
+    }
+    let garage = "seat1.flier = biplane mxvatv_fliers biplane3\nseat1.flier = kiowa original kiowa\n\
+                  seat2.flier = biplane original biplane2\nseat2.flier = kiowa original kiowa2\n\
+                  seat3.flier = biplane mxvatv_fliers biplane\nseat3.flier = kiowa mxvatv_fliers kiowa3\n\
+                  seat4.flier = biplane original biplane\nseat4.flier = kiowa mxvatv_fliers kiowa4\n";
+    let Some(said) = ride_seats("p315h-four", garage, 4) else { return };
+    for line in [
+        "biplane: 4 of 4 liveries loaded",
+        "biplane: P1 mxvatv_fliers's, drawn in biplane3",
+        "biplane: P2 MX Unleashed's, drawn in biplane2",
+        "biplane: P3 mxvatv_fliers's, drawn in biplane",
+        "biplane: P4 MX Unleashed's, drawn in biplane",
+        "kiowa: P1 MX Unleashed's, drawn in kiowa",
+        "kiowa: P2 MX Unleashed's, drawn in kiowa2",
+        "kiowa: P3 mxvatv_fliers's, on its steps, drawn in kiowa3",
+        "kiowa: P4 mxvatv_fliers's, on its steps, drawn in kiowa4",
+    ] {
+        assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
+    }
+    let seat_lines: Vec<&str> = said.lines().filter(|l| l.starts_with("fliers: P")).collect();
+    assert!(seat_lines.iter().any(|l| l.starts_with("fliers: P3 biplane ") && l.ends_with("(biplane), from mxvatv_fliers, model 1")), "{seat_lines:?}");
+    assert!(seat_lines.iter().any(|l| l.starts_with("fliers: P4 kiowa ") && l.ends_with("(kiowa4), from mxvatv_fliers, model 2")), "{seat_lines:?}");
+    assert!(!seat_lines.iter().any(|l| l.starts_with("fliers: P4 biplane ")), "P4's plane is MX Unleashed's: {seat_lines:?}");
+
+    // Told apart two by two: P4 on P3's skin wears the other of its model, as P2 on P1's would;
+    // P2 with no pick of its own rides MX Unleashed's first plane.
+    let same = "seat1.flier = biplane mxvatv_fliers biplane4\nseat3.flier = biplane mxvatv_fliers biplane4\n\
+                seat4.flier = biplane mxvatv_fliers biplane4\n";
+    let Some(said) = ride_seats("p315h-same", same, 4) else { return };
+    for line in [
+        "biplane: P1 mxvatv_fliers's, drawn in biplane4",
+        "biplane: P2 MX Unleashed's, drawn in biplane",
+        "biplane: P3 mxvatv_fliers's, drawn in biplane4",
+        "biplane: P4 mxvatv_fliers's, drawn in biplane3",
+    ] {
         assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
     }
 }
