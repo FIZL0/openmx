@@ -1130,10 +1130,7 @@ impl Plane {
             None => false,
         };
         if let Some(f) = &mut self.flight {
-            let mut weighed = game_sim::contact::Weighed { body: &mut f.body, mass: f.mass };
-            let mut strikers =
-                [game_sim::contact::Other { collider: &mut f.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
-            props.step_with(dt, &movers, &mut strikers);
+            props.step_flown(dt, &movers, &mut f.collider, &mut f.body, f.mass);
         }
         sim.traffic.props = props;
         sim.traffic.frame_late(dt, world);

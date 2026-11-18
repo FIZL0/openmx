@@ -405,9 +405,8 @@ impl Sim {
             };
             wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, false);
             drop(riders);
-            let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
-            let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];
-            self.traffic.props.step_with(dt, &prop_movers, &mut strikers);
+            // A plane that struck across a seam is seen a width over by those it struck (MD254).
+            self.traffic.props.step_flown(dt, &prop_movers, &mut plane.collider, &mut plane.body, plane.mass);
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
