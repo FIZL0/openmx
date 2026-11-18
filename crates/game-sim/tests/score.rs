@@ -1218,7 +1218,7 @@ fn a_pack_ride_scores_stunts_as_mx_vs_atv() {
 fn a_pack_ride_banks_after_a_fifth_of_a_second_down() {
     let flip = score::Values { point: F(2000.0), hold: F(10000.0) };
     let wheel = score::Values { point: F(1000.0), hold: F(1000.0) };
-    let rows = score::AtvRows { backflip: flip, wheelie: wheel, stoppie: wheel, trick_running: false, heights: (F(1.0), F::ZERO), move_on: false, flip_torque: false, front_torque: false };
+    let rows = score::AtvRows { backflip: flip, wheelie: wheel, stoppie: wheel, trick_running: false, heights: (F(1.0), F::ZERO), aloft: false, move_on: false, flip_torque: false, front_torque: false };
     let mut card = Score::default();
     let mut atv = score::Atv::default();
     let mut front = 0;
