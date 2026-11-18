@@ -2217,6 +2217,28 @@ fn every_online_row_sits_on_its_plate() {
     }
 }
 
+/// K77: the parts laid out without the raster are the ones a draw reports, at each window shape.
+#[test]
+fn parts_without_drawing_are_the_drawn_parts() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    for (w, h) in [(640, 448), (1920, 1080), (2520, 1080), (360, 640)] {
+        for screen in [Screen::Splash, Screen::Main, Screen::Keyboard] {
+            let (mut m, _) = fresh();
+            m.open(screen);
+            let drawn = art.parts(&m, &mut game_render::Frame::new(w, h, [90, 90, 90]));
+            assert!(!drawn.is_empty(), "{screen:?} at {w}x{h}");
+            assert_eq!(art.parts_at(&m, (w, h)), drawn, "{screen:?} at {w}x{h}");
+        }
+    }
+}
+
 #[test]
 fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
     let mut disc = match game_render::Disc::open_configured() {
@@ -2238,8 +2260,8 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
             // Every row of a list, and a walk across the keyboard's keys and down to its commands.
             for step in 0..12 {
                 assert_eq!(m.screen(), Some(shown));
-                let mut frame = game_render::Frame::new(w, h, [90, 90, 90]);
-                let parts = art.parts(&m, &mut frame);
+                // The parts as a draw lays them out, without the raster (K77).
+                let parts = art.parts_at(&m, (w, h));
                 let logos: Vec<_> = parts
                     .iter()
                     .filter_map(|p| match p {
