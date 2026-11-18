@@ -241,7 +241,7 @@ const INPUT_TIMES: u32 = 0x98;
 const INPUT_AXES: u32 = 0x118;
 const INPUT_BEFORE: u32 = 0x314;
 const INPUT_DEVICE: u32 = 0x5c;
-/// The front end (`*0x003eab60`) and, in it, the two devices and the controls' binding map.
+/// The front end (the word [`FRONT_END`] points at) and, in it, the two devices and the controls' binding map.
 const FRONT_END: u32 = 0x003e_ab60;
 const FRONT_DEVICES: u32 = 0xc;
 const FRONT_BINDINGS: u32 = 0x648;
