@@ -56,6 +56,9 @@ pub struct PropSet {
     /// Each collection's bodies' scene models ([`crate::track::Scene::models`] indices), in the
     /// collection's object order. A constant of the track.
     pub models: Arc<Vec<Vec<usize>>>,
+    /// Each collection's name, the one it was made under (V134: the race's bale raiser picks its
+    /// groups by it, [`crate::prop_raise::gathered`]). A constant of the track.
+    pub names: Arc<Vec<String>>,
     /// The tables the pins' solve reads: built once, shared. `None` only for an empty set.
     pub tables: Option<Arc<Tables>>,
     /// Each body's ray probe tree (its model's `m.col`, `None` for a model with none), collection by
@@ -157,6 +160,7 @@ impl PropSet {
         // And its collidable mesh, the same way (S197).
         let mut shape_files: std::collections::BTreeMap<String, Option<Mesh>> = std::collections::BTreeMap::new();
         let mut shapes = Vec::with_capacity(kept.len());
+        let mut names = Vec::with_capacity(kept.len());
         let mut bodies = bodies.into_iter().peekable();
         for (c, coll) in kept.iter().enumerate() {
             let mut parts: Vec<(&Part, &str)> = Vec::new();
@@ -210,11 +214,13 @@ impl PropSet {
             on.push(coll.members.iter().map(|m| m.model).collect());
             trees.push(probes);
             shapes.push(meshes);
+            names.push(coll.name.clone());
             collections.push(world);
         }
         let set = PropSet {
             collections,
             models: Arc::new(on),
+            names: Arc::new(names),
             tables: Some(tables),
             rays: Arc::new(trees),
             shapes: Arc::new(shapes),
@@ -236,6 +242,7 @@ impl PropSet {
         let base = self.collections.len();
         self.collections.extend(other.collections);
         Arc::make_mut(&mut self.models).extend(other.models.iter().map(|on| on.iter().map(|m| m + models).collect::<Vec<_>>()));
+        Arc::make_mut(&mut self.names).extend(other.names.iter().cloned());
         Arc::make_mut(&mut self.rays).extend(other.rays.iter().cloned());
         Arc::make_mut(&mut self.shapes).extend(other.shapes.iter().cloned());
         self.listeners.extend(other.listeners.into_iter().map(|(c, l)| (c + base, l)));

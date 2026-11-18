@@ -1003,6 +1003,29 @@ impl Collection {
         o.node = Node { rows: [m.0[0], m.0[1], m.0[2]], origin: m.0[3] };
     }
 
+    /// The placement at another height (V134, the race's bale raiser): [`Collection::place`] handed
+    /// copies — the object's place with its `y` put to `y`, its look and up — so its own place, look
+    /// and up stay as they are.
+    pub fn place_at(&mut self, k: usize, y: F) {
+        let o = &mut self.objects[k];
+        let (look, up) = (o.look, o.up);
+        let mut at = o.place;
+        at.0[1] = y.0;
+        let side = Vf::opmsub(Vf::opmula(look, up), up, look).merge(Dest::W, look);
+        let up = up.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(side, look), look, side));
+        let unit = |v: Vf| v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, vu::dot3(v.0, v.0))));
+        let (look, up) = (unit(look), unit(up));
+        let at = at.merge(Dest::W, Vf::splat(1.0));
+        let quat = mat4_to_quat(&basis(ORIGIN, look, up, false, true));
+        let bone = &mut self.bones[k];
+        bone.reference = quat;
+        reset_body(&mut bone.body, at, quat);
+        let b = &bone.body;
+        let origin = b.position.sub(turn(b.quat, b.cofg));
+        let m = basis(origin, look, up, false, true);
+        o.node = Node { rows: [m.0[0], m.0[1], m.0[2]], origin: m.0[3] };
+    }
+
     /// The post listener: a woken body's pose written to its node — or, once it is past the world's
     /// bounds, the body put to sleep and back.
     fn post(&mut self, k: usize) {

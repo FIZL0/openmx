@@ -6273,6 +6273,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if let Some(k) = &s.sink {
             println!("race: drop gate sinks {:.2} from the line, {} collision pieces", k.trigger.0, k.pieces.len());
         }
+        // V134: and on a track with `[Funnel_Up]` and `[Funnel_Down]`, its bale props raised and
+        // lowered once a rider is past each.
+        s.raiser = race_start::prop_raiser(toy, laps, &cars.props);
+        if let Some(r) = &s.raiser {
+            println!("race: bales rise {:.2} and sink {:.2} from the line, {} up, {} down", r.up.trigger.0, r.down.trigger.0, r.up.bodies.len(), r.down.bodies.len());
+        }
     }
     if let Some(g) = &gate_swing {
         let up = g.at().0[1];

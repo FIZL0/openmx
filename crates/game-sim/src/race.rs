@@ -693,6 +693,11 @@ pub struct Race {
     /// ticked after the race manager, off [`Race::laps`]'s cards ([`crate::Sim`]'s race frame, which
     /// stands its collision pieces). `None` — every other race.
     pub sink: Option<Box<crate::drop_gate::Sink>>,
+    /// The bale raiser (V134), on a race on a track whose `.toy` has `[Funnel_Up]` and
+    /// `[Funnel_Down]` and whose props hold their groups: ticked after the sink, off
+    /// [`Race::laps`]'s cards ([`crate::Sim`]'s race frame); what it moves is placed on the props
+    /// before their step. `None` — every other race.
+    pub raiser: Option<Box<crate::prop_raise::Raiser>>,
     /// P350: riders the race's Sim does not hold — a split-screen seat's, each seat its own Sim —
     /// told after the Sim's players, in their order, by whoever holds them before the Sim's step.
     /// Empty — every ride but a race over several seats — and the tick is what it was. Not walked
@@ -746,6 +751,7 @@ impl Race {
             laps: None,
             flashes: None,
             sink: None,
+            raiser: None,
             guests: Vec::new(),
             guests_did: Frame::default(),
         }

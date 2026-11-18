@@ -50,6 +50,8 @@ pub struct Start {
     pub ai: Vec<game_sim::rider::Rider>,
     /// P313c: the drop gate's sink, on a track whose gate sinks ([`gate_sink`]).
     pub sink: Option<game_sim::drop_gate::Sink>,
+    /// V134: the bale raiser, on a track with both funnel sections and their props ([`prop_raiser`]).
+    pub raiser: Option<game_sim::prop_raise::Raiser>,
     /// C40: the race file's own line spot, as its load spotted it, before [`laps`] moves the line
     /// onto the finish gate: what the drop gate's trigger is measured to.
     pub file_line: Option<race::Spot>,
@@ -69,6 +71,7 @@ impl Start {
         race.activity = Some(self.activity.clone());
         race.laps = self.laps.clone().map(Box::new);
         race.sink = self.sink.clone().map(Box::new);
+        race.raiser = self.raiser.clone().map(Box::new);
         race
     }
 }
@@ -137,7 +140,7 @@ pub fn lay_out(prop: &Prop, drops: Vec<F>, riders: i32, seed: u32) -> Option<Sta
         (0..riders).map(|card| s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, card, riders)).collect();
     let (spot, facing) = grid[0];
     let (lane, place, delay) = (s.lanes[0], s.starting_place(0), s.start_delay);
-    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new(), sink: None, file_line: None })
+    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new(), sink: None, raiser: None, file_line: None })
 }
 
 /// P313a: how many entries the rider database holds, which the roster's identity draws pick from
@@ -479,6 +482,37 @@ pub fn gate_sink<'a>(toy: &str, laps: &mut race::Laps, line: race::Spot, files: 
     let pieces = game_sim::drop_gate::gathered(files, &names).into_iter().filter_map(|k| at_index.get(k).copied().flatten()).collect();
     let [x, y, z] = w.trigger_at;
     Some(game_sim::drop_gate::Sink::bind(laps, line, Vf::new(x, y, z, 1.0), true, F(w.move_time), pieces))
+}
+
+/// V134: a `.toy`'s `[Funnel_Up]` and `[Funnel_Down]` words (the section names in any case), with the
+/// reader's defaults: the trigger at the origin, 5 seconds, and `up_bale` / `down_bale`. `None`
+/// without both sections: the race makes no raiser then.
+pub fn funnel_words(toy: &str) -> Option<(game_sim::prop_raise::Words, game_sim::prop_raise::Words)> {
+    let sections = game_render::ini::parse(toy);
+    let words = |name: &str, substring: &str| {
+        let s = sections.iter().find(|s| s.name.eq_ignore_ascii_case(name))?;
+        let trigger_at = match game_numbers(s, "TriggerPosition").as_deref() {
+            Some(&[x, y, z, ..]) => Vf::new(x, y, z, 1.0),
+            _ => Vf::new(0.0, 0.0, 0.0, 1.0),
+        };
+        Some(game_sim::prop_raise::Words {
+            trigger_at,
+            move_time: F(game_number(s, "MoveTime").unwrap_or(5.0)),
+            substring: s.get("ObjectNameSubstring").map_or(substring, |v| v.trim().trim_matches('"')).to_string(),
+        })
+    };
+    Some((words("Funnel_Up", "up_bale")?, words("Funnel_Down", "down_bale")?))
+}
+
+/// V134: the bale raiser bound to the race's `laps` and the track's `props`, on a track whose `.toy`
+/// has both funnel sections, each spot measured to the course's line — the one the supercross loader
+/// moved onto the finish gate, unlike the drop gate's sink's ([`gate_sink`]): sx01's image holds
+/// 3369.951 for both, which is the moved line's; the file's is 3371.399. `None` on any other
+/// track, or when neither picks a prop out.
+pub fn prop_raiser(toy: &str, laps: &mut race::Laps, props: &game_sim::prop_set::PropSet) -> Option<game_sim::prop_raise::Raiser> {
+    let (up, down) = funnel_words(toy)?;
+    let line = laps.course.line_spot;
+    game_sim::prop_raise::Raiser::bind(laps, line, &up, &down, props)
 }
 
 /// P313b: the drop gate as it falls at the drop. The race activity makes a gate object from the
@@ -873,6 +907,22 @@ mod tests {
         assert!(s.race((s.spot, s.facing)).sink.is_none());
         s.sink = Some(sink.clone());
         assert_eq!(s.race((s.spot, s.facing)).sink.as_deref(), Some(&sink));
+    }
+
+    #[test]
+    fn the_funnel_words_need_both_sections_and_default_as_the_reader_does() {
+        // sx01's, the up section's name in its own case.
+        let sx01 = "[Funnel_up]\nTriggerPosition=562,120,706\nTriggerLook=-1,0,0\nTriggerWidth=60\nTriggerHeight=105\nMoveTime=1\n[Funnel_Down]\nTriggerPosition=562,120,706\nMoveTime=1\n";
+        let (up, down) = funnel_words(sx01).unwrap();
+        assert_eq!(up.trigger_at, Vf::new(562.0, 120.0, 706.0, 1.0));
+        assert_eq!((up.move_time, up.substring.as_str()), (F(1.0), "up_bale"));
+        assert_eq!((down.move_time, down.substring.as_str()), (F(1.0), "down_bale"));
+        let (up, down) = funnel_words("[Funnel_Up]\nObjectNameSubstring=\"lift\"\n[Funnel_Down]\n").unwrap();
+        assert_eq!((up.trigger_at, up.move_time, up.substring.as_str()), (Vf::new(0.0, 0.0, 0.0, 1.0), F(5.0), "lift"));
+        assert_eq!(down.substring, "down_bale");
+        assert!(funnel_words("[Funnel_Up]\nMoveTime=1\n").is_none(), "one section: no raiser");
+        let mut laps = two_cards();
+        assert!(prop_raiser(sx01, &mut laps, &game_sim::prop_set::PropSet::default()).is_none(), "no props: no raiser");
     }
 
     #[test]

@@ -180,6 +180,12 @@ impl Shared {
                 movers
             }
         };
+        // V134: what a seat's race raiser moved this tick, placed on the set before its step.
+        for s in sims.iter_mut() {
+            if let Some(r) = s.race.as_mut().and_then(|r| r.raiser.as_deref_mut()) {
+                r.place(&mut self.set);
+            }
+        }
         let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
         let mut bump = crate::rider_contact::bump_here(&riders, 0, Vec::new());
         drop(riders);

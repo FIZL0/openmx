@@ -775,6 +775,19 @@ impl State for crate::race::Race {
                 w.f("y", k.y);
             });
         }
+        // The bale raiser (V134), on a track with both funnel sections: any other walks as before.
+        if let Some(r) = &self.raiser {
+            for (name, g) in [("raise_up", &r.up), ("raise_down", &r.down)] {
+                w.group(name, |w| {
+                    w.f("trigger", g.trigger);
+                    w.bool("armed", g.armed);
+                    w.i32("count", g.count);
+                    w.bool("on", g.on);
+                    w.f("t", g.t);
+                    w.f("length", g.length);
+                });
+            }
+        }
     }
 }
 

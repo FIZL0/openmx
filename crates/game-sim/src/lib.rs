@@ -615,6 +615,16 @@ impl Sim {
         {
             sink.stand(props);
         }
+        // V134: the bale raiser after the sink (the order between the two was not traced), its
+        // groups placed now when the Sim holds the props, else by the seats' holder before the step.
+        if let Some(race) = self.race.as_mut()
+            && let (Some(raiser), Some(laps)) = (race.raiser.as_deref_mut(), race.laps.as_deref())
+        {
+            raiser.tick(dt, &laps.cards);
+            if !self.traffic.props.is_empty() {
+                raiser.place(&mut self.traffic.props);
+            }
+        }
         if !guests.is_empty() {
             let caught = frame.caught.iter().filter(|(i, _)| *i >= players).map(|&(i, hit)| (i - players, hit)).collect();
             let did = race::Frame { caught, dropped: frame.dropped, start: frame.start, ..race::Frame::default() };
@@ -1607,6 +1617,10 @@ pub mod camera_flash;
 /// The drop gate's sink (P313c): on a track whose `[DropGate]` sets `MoveGateDown`, the gate's
 /// pieces lowered and its collision meshes moved off once a rider is past the `[LowerGate]`.
 pub mod drop_gate;
+
+/// The race's bale raiser (V134): on a track with `[Funnel_Up]` and `[Funnel_Down]`, the `up_bale`
+/// props raised 50 ft and the `down_bale` ones lowered once a rider is past each section's spot.
+pub mod prop_raise;
 
 /// The four-wheeled machines (S149): the monster truck's, the buggy's and the baja's shared `.phy`
 /// loader — part, tires and their surfaces, engine and gearbox, airborne controls, steer tables.
