@@ -10848,6 +10848,48 @@ fn words_of_differing_pages<'a>(a: &'a [u8], b: &'a [u8]) -> impl Iterator<Item 
         .flat_map(move |p| (p..(p + 0x1000).min(a.len())).step_by(4))
 }
 
+/// [`bytes_differ`] of two machines whose RAMs were alike outside the stack when both were marked
+/// ([`Ee::mark`]), over only the pages either has written since: a page neither wrote is alike in
+/// both. Two whole 32 MB compares a case were a third of the world searches' oracles (K74). Marks
+/// both again when they come out alike, for the next compare. A write to `ram` past [`Ee::write`]
+/// is not seen: every `whole`th compare is [`bytes_differ`] of all of it, which a difference left
+/// by such a write still shows (it lasts until both sides write the same bytes).
+fn written_differ(a: &mut Ee, b: &mut Ee, n: usize, whole: usize) -> Vec<String> {
+    let out = if !a.marked() || !b.marked() || n % whole == whole - 1 {
+        bytes_differ(&a.ram, &b.ram, a.stack)
+    } else {
+        let stack = stack_words(a.stack);
+        let pages: std::collections::BTreeSet<u32> = a.marked_pages().into_iter().chain(b.marked_pages()).collect();
+        let mut out = Vec::new();
+        let mut run: Option<(usize, usize)> = None;
+        for at in pages {
+            let p = at as usize..at as usize + 0x1000;
+            if a.ram[p.clone()] == b.ram[p.clone()] {
+                continue;
+            }
+            for i in p.step_by(4) {
+                if stack.contains(&i) || a.ram[i..i + 4] == b.ram[i..i + 4] {
+                    continue;
+                }
+                match &mut run {
+                    Some((_, e)) if *e == i => *e = i + 4,
+                    _ => {
+                        out.extend(run.take().map(|(s, e)| format!("{s:#x}..{e:#x}")));
+                        run = Some((i, i + 4));
+                    }
+                }
+            }
+        }
+        out.extend(run.map(|(s, e)| format!("{s:#x}..{e:#x}")));
+        out
+    };
+    if out.is_empty() {
+        a.mark();
+        b.mark();
+    }
+    out
+}
+
 /// What [`bytes_differ`] leaves out: the interpreter's stack and scratch.
 fn stack_words(stack: u32) -> std::ops::Range<usize> {
     (stack.saturating_sub(0x4_0000) as usize)..(stack as usize + 0x400)
@@ -21305,7 +21347,7 @@ fn the_sweeps_global_search_is_the_originals() {
             ee.set(28, GP);
             ee.call(PROBE_PLACE, &[u64::from(probe)], &[], BUDGET);
         }
-        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        let off = written_differ(&mut a, &mut b, n, 100);
         assert!(off.is_empty(), "search {n}: the set and place left the RAMs apart at {off:?}");
         a.set(28, GP);
         a.call(SEARCH_ALL, &[u64::from(probe), u64::from(lazy)], &[], BUDGET);
@@ -21314,7 +21356,7 @@ fn the_sweeps_global_search_is_the_originals() {
         // F60: with a struck plant's listener that searches the database mid-walk too.
         let ours = sweep_all_in_ram(&mut b, probe, lazy, &mut kinds);
         assert_eq!(theirs.to_bits(), ours.0.to_bits(), "{ctx}: the answer ({theirs} theirs, {} ours)", ours.0);
-        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        let off = written_differ(&mut a, &mut b, n, 100);
         assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
         let hit = a.u8_at(probe + f51_at::FLAGS) & ws::flags::HIT != 0;
         *seen.entry(if byte & bp::more_flags::ACTIVE == 0 { "inactive" } else if theirs == f32::MAX { "max" } else if hit { "hit" } else if lazy != 0 { "lazy" } else { "clear" }).or_default() += 1;
@@ -23593,7 +23635,7 @@ fn the_fade_search_is_the_originals() {
             set_vf(ee, part + 0x60, last);
             ee.set_u32(part + 0x74, budget.to_bits());
         }
-        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        let off = written_differ(&mut a, &mut b, n, 100);
         assert!(off.is_empty(), "search {n}: the place left the RAMs apart at {off:?}");
         a.set(28, GP);
         *a.log.borrow_mut() = Some(Vec::new());
@@ -23618,6 +23660,8 @@ fn the_fade_search_is_the_originals() {
             // A struck plant's listener searched the database mid-walk: not followed (F60).
             *seen.entry("reentered").or_default() += 1;
             b.ram.clone_from(&a.ram);
+            a.mark();
+            b.mark();
             continue;
         }
         let ctx = format!("search {n} (flags {byte:#x}, at {pos:?})");
@@ -23626,7 +23670,7 @@ fn the_fade_search_is_the_originals() {
         if theirs != f32::MAX {
             assert_eq!(theirs.to_bits(), ours, "{ctx}: the answer ({theirs} theirs, {} ours)", f32::from_bits(ours));
         }
-        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        let off = written_differ(&mut a, &mut b, n, 100);
         assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
         let hit = a.u8_at(part + 0x126) & ws::flags::HIT != 0;
         let groups = byte & ws::flags::NO_GROUPS == 0;
