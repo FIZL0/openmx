@@ -1,0 +1,26 @@
+# F71: SLUS-21104's input sample ring, every tick, in save state 2 of PCSX2 copy 3 (the sandrail in Free
+# Ride; the input object 0x0140add0 is the one on the front end's sampler list, *0x003eab60 + 0x28c).
+# research/f71/play.sh adds the start trigger.
+[watch]
+name        = "f71-input-ring"
+description = "MX vs. ATV (SLUS-21104): the input object's sample ring and record axes per tick"
+every       = 1
+frames      = 120
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "ring"           # input +0x94 head, +0x98 32 times, +0x118 32 x 4 axes
+addr = "0x140add0 + 0x94"
+type = "bytes:644"
+
+[[field]]
+name = "axes"           # input +0x318..+0x324: the record's four axes
+addr = "0x140add0 + 0x318"
+type = "f32x4"

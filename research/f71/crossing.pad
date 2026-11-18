@@ -1,0 +1,14 @@
+# F71: the left stick full forward, full back, centre, for a crossing each way the ring can be read at.
+sleep 10t
+stick l 0 -1
+sleep 10t
+stick l 0 1
+sleep 10t
+stick l 0 0
+sleep 10t
+stick l 0 1
+sleep 10t
+stick l 0 -1
+sleep 10t
+release
+sleep 20t

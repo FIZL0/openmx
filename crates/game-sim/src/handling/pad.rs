@@ -9,10 +9,17 @@
 //! up in the controls' bindings ([`Bindings`]) and stores the levers, the stick, the holds, the trick
 //! byte and the stick's way into the bike ([`Words`]).
 //!
-//! **The sampling is not here.** The original's sampler is a callback the engine calls with the time
-//! whenever it passes one of its waits, a number of times a frame (and at moments) set by how long the
-//! hardware made it wait. [`Ring::sample`] is MX Unleashed's stand-in ([`crate::ride::Flick`]): one
-//! reading a tick, pushed [`crate::ride::FLICK_RATE`] times a second on the simulation's clock.
+//! **The sampling** ([`Sampler`]): the input object samples the pad from a callback the engine calls
+//! at five points a frame, each sample stamped with the engine's clock in whole milliseconds (times
+//! 0.001): the frame's start, just before the update that builds the record; right after that update;
+//! twice in drawing; and once while waiting for the screen, when that wait lasts over 4 ms. The pad's
+//! new reading arrives between the first and the second, so the record a frame builds sees its own
+//! frame's first sample still holding the last tick's stick, and the five samples between two records
+//! all hold the earlier tick's axes. A stick crossing from one side to the other between two ticks is
+//! therefore measured over the 1 to 2 ms between a frame's first sample and its second. The port
+//! keeps the frames on the console's grid (two NTSC fields, 1001/30 ms) and the four later samples at
+//! fixed offsets; the original's milliseconds jitter by one with how long its work ran, which the port
+//! cannot know.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use ps2_float::{F, fpu::Acc};
@@ -27,8 +34,6 @@ pub struct Ring {
     pub head: usize,
     pub at: [F; SAMPLES],
     pub axes: [[F; 4]; SAMPLES],
-    /// The stand-in sampler's clock ([`Ring::sample`]).
-    pub now: F,
 }
 
 impl Ring {
@@ -67,18 +72,45 @@ impl Ring {
         std::array::from_fn(|a| self.flick(a))
     }
 
-    /// The stand-in sampler: one reading `dt` after the last, pushed as many times as the original
-    /// samples in that time ([`crate::ride::FLICK_RATE`], at least once; the clock starts at the first
-    /// `dt`, since the scan ignores a remembered time of zero).
-    pub fn sample(&mut self, axes: [F; 4], dt: F) {
-        self.now = self.now + dt;
-        #[allow(clippy::float_arithmetic)] // a count of samples, not a simulated value
-        let times = ((dt.0 * crate::ride::FLICK_RATE).round() as usize).clamp(1, SAMPLES);
-        for _ in 0..times {
-            self.at[self.head] = self.now;
-            self.axes[self.head] = axes;
-            self.head = (self.head + 1) % SAMPLES;
+    /// One sample: `axes` at time `at`, in the slot after the last.
+    pub fn push(&mut self, at: F, axes: [F; 4]) {
+        self.at[self.head] = at;
+        self.axes[self.head] = axes;
+        self.head = (self.head + 1) % SAMPLES;
+    }
+}
+
+/// The engine's clock as a sample's time: whole milliseconds times 0.001.
+pub fn sample_time(ms: i32) -> F {
+    F::from(ms) * F(f32::from_bits(0x3a83_126f))
+}
+
+/// **The sampler's frames**: frame `n`'s first sample at `first + (phase + 1001 n) / 30` ms (the
+/// frames two NTSC fields apart, `phase` in thirtieths of a millisecond), its other four `later` ms
+/// after it; `frame` the frame the next record is built in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sampler {
+    pub first: i32,
+    pub phase: i32,
+    pub later: [i32; 4],
+    pub frame: i32,
+}
+
+impl Sampler {
+    /// Frame `n`'s first sample, in ms.
+    pub fn start(&self, n: i32) -> i32 {
+        self.first + (self.phase + 1001 * n).div_euclid(30)
+    }
+
+    /// The samples from one record to the next, all holding the tick's `axes`: the record's frame's
+    /// last four, then the next frame's first (the one the next record sees as its newest).
+    pub fn tick(&mut self, ring: &mut Ring, axes: [F; 4]) {
+        let start = self.start(self.frame);
+        for d in self.later {
+            ring.push(sample_time(start + d), axes);
         }
+        self.frame += 1;
+        ring.push(sample_time(self.start(self.frame)), axes);
     }
 }
 
