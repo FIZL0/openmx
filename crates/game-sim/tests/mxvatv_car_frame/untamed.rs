@@ -45,12 +45,15 @@ pub(crate) struct UDrive {
     pub(crate) image: &'static str,
     pub(crate) car: u32,
     pub(crate) vtable: u32,
+    /// The recorder reads each row before its frame (MD81f's and MD164's: row 0 is the image), not
+    /// after it as MD160's.
+    pub(crate) before: bool,
 }
 
-pub(crate) const U_THROTTLE: UDrive = UDrive { set: "md160", name: "throttle", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_STEER: UDrive = UDrive { set: "md160", name: "steer", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_JUMP: UDrive = UDrive { set: "md160", name: "jump", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_WRECK: UDrive = UDrive { set: "md160", name: "wreck", image: "flipped", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_THROTTLE: UDrive = UDrive { set: "md160", name: "throttle", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE, before: false };
+pub(crate) const U_STEER: UDrive = UDrive { set: "md160", name: "steer", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE, before: false };
+pub(crate) const U_JUMP: UDrive = UDrive { set: "md160", name: "jump", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE, before: false };
+pub(crate) const U_WRECK: UDrive = UDrive { set: "md160", name: "wreck", image: "flipped", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE, before: false };
 
 /// A state's RAM image and scratchpad (MD160's, `context/untamed/md160`; the flipped state's
 /// pulled out of its `.p2s`).
@@ -149,16 +152,23 @@ fn put_input(ee: &mut Ee, car: u32, p: &Input) {
 }
 
 /// The input step's words for frame `j` (the `j`th from the image) off tape tick `j - 2`, through
-/// [`atv_car::input_untamed`]: Cross the gas at a strength of one (the tapes hold nothing else but
-/// the stick), the stick [`stick_of`] the tape's, the pad word's command untouched; the image's own
-/// before that.
+/// [`atv_car::input_untamed`]: a held button (Cross the gas, Square the brake, Circle the hand brake:
+/// MD164's brake drive) at a strength of one, the stick [`stick_of`] the tape's, the pad word's command
+/// untouched. Frame 1 runs on the pad as it was at the load, released (MD164's land drive, loaded
+/// holding the gas: its row 1's gas pedal is 0); past the tape's end, the frame's own words.
 fn u_feed(ee: &mut Ee, d: &UDrive, ticks: &[Row], j: usize) {
-    let Some(t) = j.checked_sub(2).and_then(|t| ticks.get(t)) else { return };
-    let held: Vec<&str> = t["buttons"].split(' ').collect();
+    let t = match j.checked_sub(2) {
+        Some(t) => match ticks.get(t) {
+            Some(t) => Some(t),
+            None => return,
+        },
+        None => None,
+    };
+    let held: Vec<&str> = t.map_or(Vec::new(), |t| t["buttons"].split(' ').collect());
     let mut p = input_of(ee, d.car);
     let (speed, side_slip) = (F(ee.f32_at(d.car + u(drive::at::SPEED))), F(ee.f32_at(d.car + u(drive::at::SIDE_SLIP))));
-    let value = |c: Command| if c == Command::GAS && held.contains(&"cross") { F::ONE } else { F::ZERO };
-    let stick = (stick_of(t["lx"].parse().unwrap()), stick_of(t["ly"].parse().unwrap()));
+    let value = |c: Command| if drive::button(c).is_some_and(|b| held.contains(&b)) { F::ONE } else { F::ZERO };
+    let stick = t.map_or((F::ZERO, F::ZERO), |t| (stick_of(t["lx"].parse().unwrap()), stick_of(t["ly"].parse().unwrap())));
     atv_car::input_untamed(&keys_of(ee, d.car), &mut p, speed, side_slip, stick, F::ZERO, value);
     put_input(ee, d.car, &p);
 }
@@ -169,9 +179,10 @@ fn u_feed(ee: &mut Ee, d: &UDrive, ticks: &[Row], j: usize) {
 pub(crate) const U_SPOT: std::ops::Range<u32> = 0xd30..0xd6c;
 
 /// The words the game writes outside the sim frame, laid in before frame `j` off the row read after
-/// frame `j - 1` (the image's before frame 2).
+/// frame `j - 1` (the image's before frame 2; the row read before frame `j` for a recorder that reads
+/// before, the image's before frame 1).
 fn u_lay(ee: &mut Ee, d: &UDrive, rows: &[Row], j: usize) {
-    let Some(row) = j.checked_sub(2).and_then(|r| rows.get(r)) else { return };
+    let Some(row) = j.checked_sub(if d.before { 1 } else { 2 }).and_then(|r| rows.get(r)) else { return };
     let car = row_block(row, "car");
     for o in U_SPOT.step_by(4) {
         ee.set_u32(d.car + o, u32::from_le_bytes(car[o as usize..o as usize + 4].try_into().unwrap()));
