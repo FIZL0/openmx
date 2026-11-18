@@ -7644,8 +7644,9 @@ const S64_WHEELS: &str = "s64-slow/s64-wheels-quarter";
 /// into the row and none out of it). That row is a tick later. The last row has nothing after it to
 /// tell by, and is left out.
 ///
-/// A capture with the bike's own clock (`bike_clock`, `watch/s129-train.toml` since S194) is numbered
-/// by that instead, every row: see [`clock_ticks`].
+/// A capture with the bike's own clock (`bike_clock`, `watch/s129-train.toml` since S194, every
+/// one-rider bike spec in `watch/` since S277) is numbered by that instead, every row: see
+/// [`clock_ticks`].
 fn quarter_ticks(cap: &Capture, saved: u64) -> Result<Vec<u64>, String> {
     if column(cap, "bike_clock").is_ok() {
         return clock_ticks(cap, saved);
