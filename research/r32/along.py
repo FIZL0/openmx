@@ -1,6 +1,6 @@
 """R32: rebuild S89's s89-along state while research/r32/switch.pad's tape plays.
 
-usage: python3 -B research/r32/along.py PID SLOT
+usage: python3 -B research/r32/along.py PID SLOT [X Y Z [CLOCK]]
 
 Run under `./kit pcsx2 with --` once the tape is playing (research/r32/make.sh). It waits for the tape's
 brake (Square in port 0's pad buffer), pauses over AT-SPI, moves the human's bike onto the railway bed's
@@ -11,6 +11,12 @@ zeroed), resumes, and pauses again when the train's clock reaches CLOCK, then sa
 CLOCK is where the old s89-along stood: S146's roof state (frame 11932, the engine's clock 41.487) was
 made from it by 16 + 30 frames, so ≈ 41.487 - 46/30 ≈ 39.95, with the boxcar on the z≈2318 straight
 running +x, which tests/traffic.rs and tests/ragdoll_cars.rs ride on.
+
+X Y Z move the bike somewhere else instead, CLOCK saves at another clock. C39's s89-across is S89's
+across spot at 34.8 (3900 136.7 4560 34.8): the ground there slopes down to the bed, so the bike stays
+braked until the tape lets go of the brakes at ≈ 34.5 and rolls the 47 ft to the bed by 39.95. At 34.8
+it has rolled a foot or two and both halves of the pad buffer are empty: a state saved holding the
+brakes leaves them in the older half, which replay.rs reads as row 0's pad.
 """
 
 import struct
@@ -28,7 +34,11 @@ from gi.repository import Atspi          # noqa: E402
 
 PID, SLOT = int(sys.argv[1]), int(sys.argv[2])
 ALONG = (4591.5, 135.46, 2899.7)         # S89's journal: the vehicle's spot on the bed
+if len(sys.argv) >= 6:
+    ALONG = tuple(float(a) for a in sys.argv[3:6])
 CLOCK = 39.95
+if len(sys.argv) == 7:
+    CLOCK = float(sys.argv[6])
 ENGINE = 0x00d525f0                       # the train's engine, the first path car (tests/traffic.rs CARS)
 SYM = cfg().symbols
 FRAME = SYM['frame_counter']

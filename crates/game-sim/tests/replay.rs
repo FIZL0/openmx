@@ -4324,7 +4324,34 @@ fn in_the_world_on<R>(
 ) -> Option<R> {
     let mut disc = Disc::open()?;
     let (area, _) = recorded_on(cap, &mut disc)?;
-    let (props, missed) = area.props(&mut disc);
+    in_the_area(&mut disc, area, phy, model, then)
+}
+
+/// [`in_the_world_on`] over the freeride area `track` (one of [`FREERIDE_TRACKS`]) named, not measured
+/// off the rows: for a capture whose state says where it was (S89's free06 states, C39), when a short
+/// ride stays close enough to another area's dirt that [`recorded_on`] cannot tell the two apart.
+fn in_the_world_named<R>(
+    track: &str,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
+) -> Option<R> {
+    let mut disc = Disc::open()?;
+    let mut areas = Area::all_of(&mut disc, track);
+    assert_eq!(areas.len(), 1, "{track}: one area");
+    let area = areas.pop()?;
+    in_the_area(&mut disc, area, phy, model, then)
+}
+
+/// The world and the bike of [`in_the_world_on`], once the area is known.
+fn in_the_area<R>(
+    disc: &mut Disc,
+    area: Area,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>) -> R,
+) -> Option<R> {
+    let (props, missed) = area.props(disc);
     let terrain = Terrain::parse(&area.terrain).ok()?;
     let ground = Ground::new(&terrain, &area.scene.terrain);
     let (wide, long) = ground.extent();
@@ -4344,8 +4371,8 @@ fn in_the_world_on<R>(
     // folds the game's own {cos, sin} curve into half a dozen parameters, so a bike read against one
     // table and ridden against another is a different bike.
     let tables = Arc::new(RiderTables::build());
-    let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
-        let mounts = the_wheels_of(&mut disc, model).unwrap_or_else(|| {
+    let bike = the_bike_named(disc, &tables, phy).map(|phy| {
+        let mounts = the_wheels_of(disc, model).unwrap_or_else(|| {
             println!(
                 "no {model} model with TireFront/TireRear nodes on this disc: the wheels \
                  hang off the .phy's BodyTireForcePosition instead, which is not where the \
@@ -7884,7 +7911,9 @@ fn the_chassis_inverse_inertia_is_the_save_states() {
 }
 
 /// S89's rides: `context/capture/s89/<name>.csv` and the RAM image of the state it was recorded from,
-/// `context/states/s89-<name>.eeMemory.bin` (`./kit state ram` of the slot it was saved to).
+/// `context/states/s89-<name>.eeMemory.bin` (`./kit state ram` of the slot it was saved to). S89's own
+/// were lost; R32 and C39 remade the states (research/r32/make.sh) and C39 the rides (research/r32/ride.sh),
+/// copies in kept-context/r32. Along is on the bed rows 0-107 and across rows 55-58, as S89's were.
 const S89_RIDES: [&str; 2] = ["along", "across"];
 
 /// The human's rider in S89's states: the fourth entry of the game manager's actor list, where the
@@ -8032,7 +8061,9 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
         // On the ticks, not the rows: a row's pad is the one PAD_LEADS on, and the first tick rides on
         // the controls the state was saved holding (S124; S117's rule).
         let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
-        in_the_world_on(&cap, "race250p.phy", "250_motoxxx", |world, named, bike| {
+        // free06 by name: C39's across ride stays close enough to Free11's dirt for [`recorded_on`] to
+        // take either (2 of 300 rows buried there, none on free06), and both states were made on free06.
+        in_the_world_named("Tracks\\free06.res", "race250p.phy", "250_motoxxx", |world, named, bike| {
             if let Some(b) = &bike {
                 for (w, mount) in [b.mounts.0, b.mounts.1].into_iter().enumerate() {
                     let at = st.wheel_at(w).and_then(|a| st.vf(a + 0xa0));
