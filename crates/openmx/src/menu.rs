@@ -6837,6 +6837,12 @@ impl Art {
         parts
     }
 
+    /// Where [`Art::parts`] would put the logo, the pills and the labels over a `size` frame, without
+    /// drawing it (K77): the raster is nearly all of a draw's time.
+    pub fn parts_at(&self, menu: &Menu, size: (usize, usize)) -> Vec<Part> {
+        self.layout(menu, size, 0, &mut Vec::new())
+    }
+
     /// Every picture [`Art::sprites`] counts into, in its order: the textures in [`TEXTURES`]'
     /// order, the type's atlas, the stills, the mods' pictures. The GPU takes them once
     /// ([`game_render::gpu::Renderer::set_images`]).
