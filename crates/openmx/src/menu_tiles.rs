@@ -414,8 +414,8 @@ impl Menu {
         moved
     }
 
-    /// Whether the pauser picks the skin of flier `m` on the pause's Garage (P315g): the first two
-    /// seats offline; online the first, where the shell said the ride's fliers (P318).
+    /// Whether the pauser picks the skin of flier `m` on the pause's Garage (P315g): every seat
+    /// offline (P315h); online the first, where the shell said the ride's fliers (P318).
     fn own_flier(&self, m: Machine) -> Option<&'static str> {
         let online = self.session || self.opening == Opening::Open;
         if (online && (self.flier_online.is_none() || self.pauser > 0)) || self.pauser >= OWN_FLIERS {

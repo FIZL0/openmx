@@ -44,8 +44,8 @@ pub fn actors_with<'a>(drawn: &'a Biplane, assets: &Assets, surfaces: Surfaces, 
 }
 
 /// A plane as the software path draws it (V38): its model skinned by the moving parts' pose into a
-/// copy of its own — `copy`, made off the livery's model the first time — since a skinned model's
-/// triangles are its pose and two players can fly one livery. The cone is the livery's own.
+/// copy of its own — `copy`, made off the seat's flier's model the first time — since a skinned
+/// model's triangles are its pose and two players can fly one model. The cone is the model's own.
 ///
 /// The shell draws through [`skinned_with`] (V79); this one, at the last tick's pose, is the tests'.
 #[allow(dead_code)]

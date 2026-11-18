@@ -79,7 +79,7 @@ fn a_bay_is_a_see_through_plane_and_off_is_nothing() {
         assert_eq!(helis, lot.of(Machine::Helicopter).copied().collect::<Vec<Bay>>());
         for bay in &planes {
             let plane = vehicle::bay_plane(bay);
-            assert_eq!((plane.at, plane.facing, plane.livery), (bay.spawn.at, bay.spawn.facing, bay.livery));
+            assert_eq!((plane.at, plane.facing, plane.flier), (bay.spawn.at, bay.spawn.facing, bay.copy));
             assert!(plane.flight.is_none(), "a bay's plane is never flown");
         }
         assert!(vehicle::bays_shown(&lot, false).is_empty(), "the setting off shows no bay");
