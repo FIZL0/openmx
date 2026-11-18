@@ -1,4 +1,4 @@
-# 1 — hints clear of the stick (PART)
+# 1 — hints clear of the stick (FINAL)
 
 Task F10b. 2026-11-17.
 
