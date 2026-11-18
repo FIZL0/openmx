@@ -527,9 +527,13 @@ pub struct Atv {
     /// The stunt table's repeat scales the banks have lowered ([`Score::atv_repeat`]), by the port's
     /// trick id, oldest first. A stunt not listed is at 1, as every stunt starts.
     pub scales: Vec<Scale>,
-    /// The bank's clock: set to [`ATV_BANK`] while a stunt runs off one wheel, run down on the ground
-    /// with none running, and the combo banked when it runs out ([`Score::atv_frame`]).
+    /// The bank's clock: set to [`ATV_BANK`] while a stunt runs off one wheel, run down on the ground,
+    /// and the combo banked when it runs out ([`Score::atv_frame`]).
     pub bank: F,
+    /// **The stunt word as the tick starts** (S411): whether the frame before ended with a stunt
+    /// held — a trick in progress, a node other than a wheel's still running, or a backflip's or a
+    /// 360's node with its move still on. The bank's clock is held up on it, not on this frame's.
+    pub held: bool,
     /// The wheelie's and the stoppie's time past their first second on the one wheel: the stunt
     /// starts when it is still 0, and the combo banks when the bike comes off the wheel with it over 0.
     pub wheel: [F; 2],
@@ -595,6 +599,19 @@ pub struct AtvRows {
     pub wheelie: Values,
     pub stoppie: Values,
     pub trick_running: bool,
+    /// The bike's up and forward axes' heights as the frame started (S411): what the backflip's and
+    /// the front flip's watches read, as the original's backflip reads the node it left the frame
+    /// before.
+    pub heights: (F, F),
+    /// The backflip's or the 360's move is still on (S411): its stunt word stays held past the clip
+    /// until the move itself ends, which on a landing is a frame or so after the wheels touch.
+    pub move_on: bool,
+    /// The backflip's torque is on this frame (S411): the original's backflip moves its clip on only
+    /// under the flip's torque, so a bike pitched over in a 360 or off a lip starts no backflip.
+    pub flip_torque: bool,
+    /// The front flip's torque is on this frame: the port's own front flip watch moves on under it
+    /// alone, as the backflip's does under its own, so a backflip's or a 360's back half starts none.
+    pub front_torque: bool,
 }
 
 /// **MX vs. ATV's way (S358, R17)**, on a ride with a trick pack on. The card is the same as MX
@@ -837,21 +854,25 @@ impl Score {
             self.stoppie = F::ZERO;
             atv.wheel = [F::ZERO; 2];
         }
-        // The bank's clock: held up while a stunt runs off one wheel, run down on the ground.
-        let running = rows.trick_running
-            || self.nodes.iter().any(|n| n.flags & atv_flag::LIVE != 0 && n.id != WHEELIE && n.id != STOPPIE);
-        if running && atv.wheel[0] <= F::ZERO && atv.wheel[1] <= F::ZERO {
+        // The bank's clock (S411, against the original's ride): held up off one wheel on the stunt
+        // word the frame started with, and run down every frame on the ground, held or not — so it
+        // starts down a frame before the word goes, and banks on the sixth frame after.
+        if atv.held && atv.wheel[0] <= F::ZERO && atv.wheel[1] <= F::ZERO {
             atv.bank = ATV_BANK;
         }
-        if !s.airborne && !running && F::ZERO < atv.bank {
+        if !s.airborne && F::ZERO < atv.bank {
             atv.bank = atv.bank - dt;
             if atv.bank <= F::ZERO {
                 self.atv_bank(atv);
             }
         }
         // The backflip: started over the top, ended round; a watch forgotten part way ends it too.
+        // Both watches read the heights the frame started with (S411).
+        let s = &Sense { up_y: rows.heights.0, forward_y: rows.heights.1, ..*s };
         let was = self.flip;
-        self.watch_flip(s);
+        if rows.flip_torque || !s.airborne || s.wrecked {
+            self.watch_flip(s);
+        }
         // Not inside a front flip, whose back half passes the backflip's first step.
         if was == 0 && self.flip == 1 && *front_flip == 0 {
             self.atv_start(atv, BACKFLIP, rows.backflip, true);
@@ -862,7 +883,9 @@ impl Score {
             self.flip = 0;
         }
         let was = *front_flip;
-        step_front_watch(front_flip, s);
+        if rows.front_torque || !s.airborne || s.wrecked {
+            step_front_watch(front_flip, s);
+        }
         if was == 0 && *front_flip == 1 {
             self.atv_start(atv, FRONTFLIP, rows.backflip, true);
         } else if was != 0 && was != 3 && (*front_flip == 3 || *front_flip == 0) {
@@ -872,6 +895,13 @@ impl Score {
         if round {
             *front_flip = 0;
         }
+        // The stunt word the next frame starts with.
+        let moves = [BACKFLIP, FRONTFLIP, THREE_SIXTY_LEFT, THREE_SIXTY_RIGHT];
+        atv.held = rows.trick_running
+            || self.nodes.iter().any(|n| {
+                let live = n.flags & atv_flag::LIVE != 0;
+                (live && n.id != WHEELIE && n.id != STOPPIE) || (rows.move_on && moves.contains(&n.id))
+            });
         round
     }
 
@@ -944,6 +974,7 @@ impl State for Atv {
             w.f("scale", s.scale);
         }
         w.f("bank", self.bank);
+        w.bool("held", self.held);
         w.f("wheel", self.wheel[0]);
         w.f("wheel", self.wheel[1]);
     }

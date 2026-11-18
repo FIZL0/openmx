@@ -1,0 +1,24 @@
+# S411: start.p2s is paused on the quit dialog with NO lit. Cross takes NO, Start resumes, gas from tick 66;
+# the probe left the first lip at row 140 and landed at row 185.
+down cross
+sleep 3t
+up cross
+sleep 30t
+down start
+sleep 3t
+up start
+sleep 30t
+down cross
+# Backflip (c15's timing to the lip): R1 and the stick forward on the climb, back on the lip, the stick
+# held back and R1 held through the air for more pitch; then ride on to bank it.
+sleep 42t
+down r1
+stick l 0 -1
+sleep 20t
+stick l 0 1
+sleep 50t
+stick l 0 0
+up r1
+sleep 120t
+release
+sleep 10t

@@ -1367,11 +1367,17 @@ impl Rider {
         match (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
             (Some(moves), Some(t)) => {
                 // MX vs. ATV's way (S358).
+                let front_row = air::UNLEASHED_ROTATIONS.get(t.flip_row).is_some_and(|r| r.name == air::FRONT_FLIP.name);
                 let rows = score::AtvRows {
                     backflip: moves.values("backflip", score::ATV_BACKFLIP),
                     wheelie: moves.values("wheelie", score::ATV_WHEEL),
                     stoppie: moves.values("stoppie", score::ATV_WHEEL),
                     trick_running: tricks.in_progress,
+                    // S411: the original's backflip reads the frame the bike started this one in.
+                    heights: (F(riding_from.0.0[1].y()), F(riding_from.0.0[2].y())),
+                    move_on: ride.air.flipping || ride.air.flip_active || t.spin.active,
+                    flip_torque: ride.air.flip_torque_applied && !front_row,
+                    front_torque: ride.air.flip_torque_applied && front_row,
                 };
                 // A front flip come round, told as a start as the 360 is.
                 if score.atv_frame(&mut t.score, dt, &sensed, rows, &mut t.front_watch) {

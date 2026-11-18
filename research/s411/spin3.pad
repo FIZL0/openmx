@@ -1,0 +1,30 @@
+# S411: start.p2s is paused on the quit dialog with NO lit. Cross takes NO, Start resumes, gas from tick 66;
+# the probe left the first lip at row 140 and landed at row 185.
+down cross
+sleep 3t
+up cross
+sleep 30t
+down start
+sleep 3t
+up start
+sleep 30t
+down cross
+# 360 tried on the lip's last ticks: R1 alone from tick 100, the stick left (arm) at tick 130, right (fire)
+# at tick 138; the spin capture fired at row 135 and a touch on the lip at row 143 ended it unclipped.
+sleep 34t
+down r1
+sleep 30t
+stick l -1 0
+sleep 8t
+stick l 1 0
+sleep 4t
+stick l 0 0
+sleep 6t
+stick l 0 1
+sleep 40t
+stick l 0 0
+sleep 110t
+up r1
+sleep 30t
+release
+sleep 10t

@@ -1,0 +1,14 @@
+# S411 probe: start.p2s is paused on the quit dialog with NO lit. Cross takes NO, Start resumes, then gas
+# toward the first lip, to find the take-off tick.
+down cross
+sleep 3t
+up cross
+sleep 30t
+down start
+sleep 3t
+up start
+sleep 30t
+down cross
+sleep 200t
+release
+sleep 10t

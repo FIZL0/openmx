@@ -1,0 +1,53 @@
+# S411: MX vs. ATV Unleashed's (SLUS-21104) player bike in state 4's Free Ride with its score card, every
+# tick, for when the stunt calls happen on a ride. The bike object is 0x00e714e0 (research/oracle.txt
+# # MD40), its card +0x680 and manager +0x684 (R17); the card's nodes come out of the manager's pool of
+# 100 at 0x012ad6c0 (0x28 each, +0x24 next; the free list's head is manager +0x38). C15's play.sh adds
+# the start trigger.
+[watch]
+name        = "s411-mxvatv-card"
+description = "MX vs. ATV (SLUS-21104) state 4 Free Ride from a generated tape: bike, node rows, score card and pool"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "vptr"           # 0x003d0450 once the state is in
+addr = "0xe714e4"
+type = "u32"
+
+[[field]]
+name = "obj0"           # the bike object, raw, +0x0..+0xc00
+addr = "0xe714e0"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800 (+0x1524 stunt, +0x14f4 bank clock, +0x1754/+0x1758 clips)
+addr = "0xe714e0 + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "node"           # the node (+0x80 world rows: +0x84 up's height, +0x94 forward's)
+addr = "0xe714e0 + 0xe4 -> 0x0"
+type = "bytes:256"
+
+[[field]]
+name = "card"           # the score card, raw (+0xc8 its first node)
+addr = "0xe714e0 + 0x680 -> 0x0"
+type = "bytes:256"
+
+[[field]]
+name = "manager"        # the score manager, raw (+0x38 the pool's free head)
+addr = "0xe714e0 + 0x684 -> 0x0"
+type = "bytes:128"
+
+[[field]]
+name = "pool"           # the manager's 100 nodes
+addr = "0x012ad6c0"
+type = "bytes:4000"
