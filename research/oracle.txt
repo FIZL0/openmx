@@ -6605,6 +6605,20 @@ vehicle_fx_spray_off  boot 0x003d8720 Spray's vt +0x18: flag &= ~1, clock +0x28 
 #   SwingArm (local t 0, 1.923728, -0.572021, rotation from the rear compression) under Bike under
 #   bike\anim\bike.psg; FrontTire_Particle01 under Shocks under Handlebars; the exhaust's under
 #   YZ250_Exhaust_Pipe. The Sim holds each at a fixed place in the chassis frame (S421).
+# S421 — the rear tyre emitters' point (crates/game-sim/src/dust.rs RearNode; tests ai/draws.rs s328_…
+#   per tick in Ee, ai/race4.rs c33_rear_node). emit_timing (0x0014daa0) copies +0x40 to +0x60, calls
+#   0x001b2870(node +0xa4, 0, +0x40): 0x001b1750 rebuilds the dirty node worlds from the first clean
+#   ancestor down (world = local rows 0-2 vmulax/vmadday/vmaddz of the parent's rows, row 3 vaddax of
+#   the parent's row 3 and 0 then the same; flag +0x110 bit 0 clean, parent +0x100, local +0x40, world
+#   +0x80), +0x40 = world row 3 with w 1, then vadd.xyz the offset +0x70 (+0x240 bit 5: offset turned
+#   by the node first, 0x001b2ff0). The root (bike\anim\bike.psg) is the chassis' +0x254 node, clean
+#   and not moved after the emitters in the frame. The drive 0x002593e0 aims SwingArm (vehicle +0x96c)
+#   at 0x00259ccc..0x00259d60: axle = (mount.x, add.s mount.y + snapshot rear compression +0x87c,
+#   mount.z), d = +0x9c0 (pivot, = SwingArm's local position) - axle (vsub.xyz), |d|^2 by vmul.xyz,
+#   vadday.x, vmaddz.x with 1, vrsqrt, vmulq.xyz; node_set_axes(node, d, (0,1,0,1), 1, 1, 1) =
+#   mat4_basis at the node's own position. +0x87c at the emitters is the rear wheel's +0xf0 of the
+#   frame before. Bike's local (vehicle +0x964) is the chassis pose's: it moves by a few ulps in C33
+#   (ticks 7, 9, 14, 18, 64); the Sim holds the image's.
 
 # S100 — the 125 into a free09 trunk, live (tests crates/game-sim/tests/eco.rs
 #   a_free09_tree_against_the_original; captures context/capture/s100/{tree,nowreck}.csv in s2).

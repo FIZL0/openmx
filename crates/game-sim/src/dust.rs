@@ -25,14 +25,29 @@
 //!   on this frame only takes its point. One that is on and moved at least its `MinimumEmissionSpeed`
 //!   draws twice.
 //!
-//! The emitter's place on the bike is the one thing here that is not the original's: its point is the
-//! node it hangs from, under the swingarm or the fork, which the suspension moves. Here it is a fixed
-//! place in the chassis' frame (`research/journal`, S328c).
+//! # The emitter's point (S421)
+//!
+//! An emitter's point is the place of the model node it hangs from, brought up to date down the
+//! node tree (each node's world is its local in its parent's world, [`crate::atv_moto`]'s
+//! `frame_mul`). The rear tyre's emitters hang from `RearTire_Particle01`, under `SwingArm`, under
+//! `Bike`, under the bike's root, whose world is the chassis' transform ([`RearNode`]):
+//!
+//! - **`SwingArm`** is aimed at the rear axle every frame: its local is the look-at
+//!   ([`crate::math::basis`], orthogonalised, the forward kept) from the rear mount lowered by the
+//!   compression up to its pivot, `y` up, at the pivot. The compression is the bike's animation
+//!   snapshot, taken after the emitters have run, so it is the frame before's, like [`Feed`].
+//! - **`Bike`** is the chassis pose's, held at its seeded local: the bike's clips are not in the Sim.
+//! - The emitter's point is the node's world position plus its offset (zero on this disc).
+//!
+//! The front tyre's (under `Shocks` under `Handlebars`) and the exhaust's (under the pipe's own model)
+//! are still a fixed place in the chassis' frame ([`Place::Chassis`]).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use crate::math::{Mat4, transform_point};
+use crate::atv_moto::frame_mul;
+use crate::math::{Mat4, basis, transform_point};
 use crate::rng::Rng;
+use ps2_float::vu::{self, Dest};
 use ps2_float::{F, Vf};
 
 /// The manager's frame flags, as the entries' `Disable` masks name them.
@@ -72,6 +87,54 @@ pub struct Feed {
     pub airspeed: F,
     /// Front, then rear.
     pub tyres: [Tyre; 2],
+    /// The rear wheel's compression, which aims the swingarm ([`RearNode`]).
+    pub rear_compression: F,
+}
+
+/// Where an emitter's point comes from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    /// A fixed place in the chassis' frame.
+    Chassis(Vf),
+    /// The rear tyre's node ([`RearNode`]).
+    Rear,
+}
+
+/// **The rear tyre's emitter node and the two above it** (S421, the module header).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RearNode {
+    /// `Bike`'s local under the bike's root: the chassis pose's, held.
+    pub bike: Mat4,
+    /// `SwingArm`'s place in the `Bike` frame: its local's position, which the aim keeps.
+    pub pivot: Vf,
+    /// The rear wheel's mount.
+    pub mount: Vf,
+    /// The emitter node's local under `SwingArm`.
+    pub node: Mat4,
+}
+
+impl RearNode {
+    /// `SwingArm`'s local at a rear compression of `c`: the direction from the lowered mount up to
+    /// the pivot (`vsub.xyz`; its length squared `vmul`, `vadday.x`, `vmaddz.x`; `vrsqrt`, `vmulq`),
+    /// then the look-at at the pivot, orthogonalised with the forward kept.
+    pub fn swingarm(&self, c: F) -> Mat4 {
+        let m = self.mount;
+        let axle = Vf::new(m.x(), (F(m.y()) + c).0, m.z(), 0.0);
+        let d = self.pivot.merge(Dest::XYZ, self.pivot.sub(axle));
+        let s = d.mul(d);
+        let q = vu::rsqrt(1.0, vu::madd(vu::add(s.x(), s.y()), 1.0, s.z()));
+        let dir = d.merge(Dest::XYZ, d.mul_q(q));
+        basis(self.pivot, dir, Vf::new(0.0, 1.0, 0.0, 1.0), true, true)
+    }
+
+    /// The emitter's point with the bike's root at `root` and a rear compression of `c`: the node's
+    /// world down the tree, its position with `w` 1, plus the (zero) offset (`vadd.xyz`).
+    pub fn point(&self, root: &Mat4, c: F) -> Vf {
+        let bike = frame_mul(&self.bike.0, &root.0);
+        let arm = frame_mul(&self.swingarm(c).0, &bike);
+        let node = frame_mul(&self.node.0, &arm);
+        Vf::new(0.0, 0.0, 0.0, 1.0).merge(Dest::XYZ, node[3].add(Vf::ZERO))
+    }
 }
 
 /// An entry's own update.
@@ -98,8 +161,8 @@ pub struct Emitter {
     pub just_on: bool,
     /// `MinimumEmissionSpeed`.
     pub min_speed: F,
-    /// Its place in the chassis' frame.
-    pub at: Vf,
+    /// Where its point comes from.
+    pub place: Place,
     pub pos: Vf,
     pub prev: Vf,
 }
@@ -117,10 +180,16 @@ impl Emitter {
         self.prev = self.pos;
     }
 
-    /// The emitter's frame: its new point, then the draws it makes (0 or 2).
-    fn frame(&mut self, bike: &Mat4, dt: F) -> u8 {
+    /// The emitter's frame: its new point, `rear` for one on the rear tyre's node, then the draws it
+    /// makes (0 or 2).
+    fn frame(&mut self, bike: &Mat4, rear: Option<Vf>, dt: F) -> u8 {
         self.prev = self.pos;
-        self.pos = transform_point(bike, self.at);
+        self.pos = match (self.place, rear) {
+            (Place::Chassis(at), _) => transform_point(bike, at),
+            (Place::Rear, Some(p)) => p,
+            // A rider seeded without its rear node: the point stays where it was.
+            (Place::Rear, None) => self.pos,
+        };
         if self.just_on {
             self.just_on = false;
             self.prev = self.pos;
@@ -210,6 +279,8 @@ pub struct RiderDust {
     /// What the manager reads: the bike's snapshot, which the bike takes after the manager has run,
     /// so each frame's is the frame before's.
     pub feed: Feed,
+    /// The rear tyre's node, for the entries at [`Place::Rear`].
+    pub rear: Option<RearNode>,
 }
 
 impl RiderDust {
@@ -233,11 +304,12 @@ impl RiderDust {
                 e.update(feed, dt);
             }
         }
+        let rear = self.rear.map(|n| n.point(bike, feed.rear_compression));
         let mut draws = 0;
         for e in &mut self.entries {
             e.draws = match e.kind {
                 Kind::Quiet => 0,
-                _ => e.emitter.frame(bike, dt),
+                _ => e.emitter.frame(bike, rear, dt),
             };
             draws += u32::from(e.draws);
         }
@@ -252,7 +324,7 @@ pub struct Dust {
 }
 
 /// An emitter's place in the chassis' frame, from where it is in the world with the bike at `bike`:
-/// what a seed from an image puts in [`Emitter::at`].
+/// what a seed from an image puts in [`Place::Chassis`].
 pub fn place_on(bike: &Mat4, world: Vf) -> Option<Vf> {
     crate::math::inverse(bike).map(|inv| transform_point(&inv, world))
 }
@@ -279,6 +351,7 @@ impl crate::Sim {
             clutch: r.mv.clutch_in,
             airspeed: r.chassis.speed,
             tyres: [tyre(&r.front), tyre(&r.rear)],
+            rear_compression: r.rear.w.compression,
         };
         let bike = r.transform();
         let Some(dust) = self.dust.as_deref_mut() else { return };
