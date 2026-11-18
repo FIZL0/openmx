@@ -4562,6 +4562,9 @@ async fn front_end(args: Args) -> Result<(), String> {
             }
             png::write_rgb(&path, frame.width, frame.height, &frame.color)?;
             println!("wrote {}", path.display());
+            // A menu's shot is the run's whole point (K62): no `--frames` counts the menu's frames,
+            // so it would otherwise run on to `--seconds`.
+            break;
         }
         shown += 1;
         busy += top.elapsed();
