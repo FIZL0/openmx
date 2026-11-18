@@ -1292,10 +1292,10 @@ fn replay_balls() -> Option<(Tally, Option<u32>)> {
                 take_input(&mut m, r0);
             }
             let dt = r1.dt;
-            let movers = sim.traffic.frame_held(dt, g);
+            let mut movers = sim.traffic.frame_held(dt, g);
             let mut set = std::mem::take(&mut sim.traffic.props);
             let props = CarProps { set: &mut set, me: 0, hull: Some(&hull) };
-            m.step_props(&car, g, &mut col, None, Some(props), dt, &acos, &curve, &mut |_| F::ZERO);
+            m.step_props_in(&car, g, &mut col, None, props, &mut movers, dt, &acos, &curve, &mut |_| F::ZERO);
             let mut weighed = game_sim::contact::Weighed { body: &mut m.body, mass: col.mass };
             let mut strikers = [game_sim::contact::Other { collider: &mut col.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
             set.step_with(dt, &movers, &mut strikers);
@@ -1327,12 +1327,14 @@ fn replay_balls() -> Option<(Tally, Option<u32>)> {
     })?
 }
 
-/// The frame the buggy first strikes free06's ball: the ball's answer to the strike is not yet the
-/// original's (its speed about 2 % off, C34's journal), and the car's follows a frame on.
-const BALL_STRUCK: u32 = 776;
+/// The first frame the port leaves C34's ball drive: the struck ball's rays meet two other balls,
+/// and the original walks them in its kept nearby list's order (a tree gather, ball 5 before ball 0),
+/// the port in collection order, so the resolve's sequence differs (S340's journal).
+const BALL_STRUCK: u32 = 781;
 
-/// The port runs C34's ball drive to the bit up to the strike: the balls asleep where the original
-/// has them, and the car's 49 frames of driving at them on free06. Past it, every ball the original
+/// The port runs C34's ball drive to the bit through the strike: the balls asleep where the original
+/// has them, the car's 49 frames of driving at them on free06, and the car's strike on the ball at
+/// 776 with its ground (S340: the struck ball searches at once). Past it, every ball the original
 /// wakes the port wakes on the same frame, and no other.
 #[test]
 fn the_ball_strike_runs_on_its_own() {
@@ -1345,7 +1347,7 @@ fn the_ball_strike_runs_on_its_own() {
         s += &format!("  {l}\n");
     }
     assert!(t.rows > 200, "{s}");
-    assert!(first_bad.is_none_or(|f| f >= BALL_STRUCK), "off before the strike:\n{s}");
+    assert!(first_bad.is_none_or(|f| f >= BALL_STRUCK), "off before the balls meet:\n{s}");
     assert!(t.bad.keys().all(|k| !k.contains("enabled")), "a ball woke on another frame:\n{s}");
     println!("{s}");
 }

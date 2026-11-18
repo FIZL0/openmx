@@ -2697,7 +2697,7 @@ impl CarRide {
             return;
         }
         use game_sim::input::Axis;
-        let movers = sim.traffic.frame_held(dt, world);
+        let mut movers = sim.traffic.frame_held(dt, world);
         let mut set = std::mem::take(&mut sim.traffic.props);
         let (pad, table) = (sim.input.pad(0), sim.table());
         let (m, c) = (self.driven.as_mut().expect("checked"), self.struck.as_mut().expect("checked"));
@@ -2707,7 +2707,7 @@ impl CarRide {
         let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
         let props = game_sim::car::CarProps { set: &mut set, me: 0, hull: self.hull.as_deref() };
         let tables = &sim.tables.ride;
-        m.step_props(&self.car, &mut Through(world), c, met, Some(props), dt, &tables.acos, &tables.curve, &mut sample);
+        m.step_props_in(&self.car, &mut Through(world), c, met, props, &mut movers, dt, &tables.acos, &tables.curve, &mut sample);
         throw_at_edge(m, world, &mut self.rng);
         let mut weighed = game_sim::contact::Weighed { body: &mut m.body, mass: c.mass };
         let mut strikers = [game_sim::contact::Other { collider: &mut c.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
