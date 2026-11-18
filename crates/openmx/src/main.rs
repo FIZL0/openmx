@@ -14131,8 +14131,11 @@ fn atv_own(args: &Args, atv: &vehicle::AtvRide) -> Option<AtvOwn> {
         println!("atv: {} is gone; the bike's camera, no engine and no particles", atv.pack);
         return None;
     };
-    let file = |name: &str| pack.files.read(name).ok();
+    let file = |name: &str| pack.ini_bytes(name).ok();
     let (pb, ini) = (file(chase::mod_presets(chase::ModMachine::Atv)), file(chase::ATV_CAMERA_INI));
+    if pb.as_deref().is_some_and(chase::slow_fast_layout) {
+        println!("atv: {}'s {} is in MX vs. ATV Untamed's slow/fast layout, which the follow camera does not read; {} instead", pack.id, chase::mod_presets(chase::ModMachine::Atv), chase::ATV_CAMERA_INI);
+    }
     let (presets, from) = chase::atv_presets(pb.as_deref(), ini.as_deref(), game_sim::camera::Aspect::Standard, game_sim::camera::Viewport::Full);
     let camera = match from {
         "" => {
@@ -14183,13 +14186,13 @@ fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::qu
     if name.is_empty() {
         return Err(format!("{} names no particle list", pack.id));
     }
-    let list = pack.files.read(&name.replace('/', "\\"))?;
+    let list = pack.ini_bytes(name)?;
     let track_read = |n: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{n}")).ok());
-    let zones = Some(pack.particle_zones()).filter(|z| !z.is_empty()).and_then(|z| pack.files.read(&z.replace('/', "\\")).ok());
+    let zones = Some(pack.particle_zones()).filter(|z| !z.is_empty()).and_then(|z| pack.ini_bytes(z).ok());
     println!("atv: particles: zones off {}", if zones.is_some() { pack.particle_zones() } else { particles::ZONES });
     let read = |n: &str| match n.eq_ignore_ascii_case(particles::ZONES) {
         true => zones.clone().or_else(|| track_read(n)),
-        false => pack.files.read_suffix(&format!("\\{n}")).ok().or_else(|| track_read(n)),
+        false => pack.ini_suffix(&format!("\\{n}")).ok().or_else(|| track_read(n)),
     };
     let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
     let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;

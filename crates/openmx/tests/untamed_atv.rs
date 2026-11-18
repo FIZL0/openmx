@@ -142,3 +142,38 @@ fn the_untamed_quad_is_drawn_with_untameds_rider() {
     assert!(riders >= frames.len(), "frames without a rider:\n{said}");
     assert!(std::fs::metadata(&shot).is_ok_and(|m| m.len() > 0), "no shot at {}", shot.display());
 }
+
+fn line<'a>(said: &'a str, start: &str) -> &'a str {
+    said.lines().find(|l| l.starts_with(start)).unwrap_or_else(|| panic!("no `{start}` line:\n{said}"))
+}
+
+/// **MD206: the Untamed quad rides its pack's own camera, engine and particles**, as MD136's
+/// Unleashed quad does: Untamed keeps them compiled (`Cam\FC_ATVDefault.pb.bpb` off the PSR,
+/// `Aud\vehicle.aud.bpb` and `Part\*.bpb` in its archive, the `.VAG`s off `MX08AUD.PSR`), and the
+/// pack's reads take a file's `.bpb` twin as its text. The follow camera starts on the pack's first
+/// preset, the engine reads every sound the `.aud` names, and its tires throw the pack's dust.
+#[test]
+fn the_untamed_quad_says_its_cameras_engine_and_particles_are_the_packs() {
+    if !pack("untamed_atv") {
+        return;
+    }
+    let switched = tape("own.tape", 130, &["30 atv"]);
+    let Some(said) = ride(130, &switched, &["--atv", "atv_Race250P@untamed_atv"]) else { return };
+    // Its camera: FC_ATVDefault.pb.bpb is in Untamed's slow/fast layout, which the follow camera does
+    // not read, so FC_ATV.ini(.bpb)'s presets, in SLUS-21104's layout, starting on the first.
+    assert!(said.contains("atv: untamed_atv's Cam\\FC_ATVDefault.pb is in MX vs. ATV Untamed's slow/fast layout, "), "\n{said}");
+    let camera = line(&said, "atv: untamed_atv's camera, ");
+    assert!(camera.starts_with("atv: untamed_atv's camera, 12 presets in Cam\\FC_ATV.ini: RaceCam1, RaceCam2, "), "{camera}");
+    assert_eq!(line(&said, "atv: its camera starts on"), "atv: its camera starts on RaceCam1, 12 presets in Cam\\FC_ATV.ini");
+
+    let engine = line(&said, "atv: untamed_atv's engine, ");
+    assert!(!said.contains("atv: untamed_atv's engine: "), "a sound not read:\n{said}");
+    let n: usize = engine.split_whitespace().nth(3).and_then(|w| w.parse().ok()).unwrap_or_else(|| panic!("no count in `{engine}`"));
+    assert!(n > 0 && engine.ends_with(" sounds in Aud/vehicle.aud.bpb, 4 wreck"), "{engine}");
+
+    assert_eq!(line(&said, "atv: particles: zones off"), "atv: particles: zones off Part/atvparticlezones.dat.bpb");
+    let list = line(&said, "atv: particles: 18 entries off ");
+    assert!(list.contains(" entries off untamed_atv's Part/atvparticles.dat.bpb;"), "{list}");
+    let air = said.lines().filter(|l| l.starts_with("atv: particles: ") && l.ends_with(" in the air")).last().unwrap_or_else(|| panic!("no particles line:\n{said}"));
+    assert!(air.contains("Tire Dust"), "{air}");
+}
