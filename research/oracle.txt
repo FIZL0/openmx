@@ -13652,3 +13652,25 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   through vt +0x98 from 0x004fe1e4 in the Linked effects item step 0x004fe010 (post-wreck; the in-frame
 #   calls come from 0x00128b68). Before the wreck's first frame these sum to 22 (race-jump, row 66) and 50
 #   (race-wheelie-launch, row 80), the lags R37/R41 found by inverting the spin.
+# F31d — the bike's pad reader and its input object's record (crates/game-sim/src/handling/pad.rs; proofs
+#   crates/game-sim/tests/mxvatv_bike_ride.rs the_pad_reader_is_the_originals and
+#   the_input_flicks_are_the_originals, 12,000 cases each on state 4; the_tape_gives_every_reader_word and
+#   flip_replays_in_pure_rust on C15's tapes). Journal: research/journal/2026-11-18-f31d-pad-reader.
+# The reader (atv_bike_pad_reader, MD178) in full: the low byte of +0x14ec cleared; wrecked (+0xc80) -> +0x12a8,
+#   +0x12ac, +0x310, +0x314, +0x12c0, +0x14d4 = 0 and return (holds, d-pad flags, way, angle, reach, +0x12c4 and
+#   +0x17ac kept). Else stick = record lx/ly; +0x12b4 = entry 0x20 (entries +0x304), +0x12b0 = entry 0x21
+#   (+0x31c); d-pad commands 0/1 (x -1/+1), 2/3 (y -1/+1) flag +0x12a0/+0x12a4; gas command 0xe -> +0x314 1/0;
+#   brake 0xf -> 0, +0x13b4 when +0x13b0, else 1; both on: speed +0xc38 >= 5 -> +0x12c4 = 0, gas = +0xde0 ? 1 : 0;
+#   under 5 -> +0x12c4 = 1, gas = brake = 0; commands 0x11/0x12/0x13 -> trick bits 1/2/4; none -> +0x14d4 = 1;
+#   then the way.
+atv_stick_way               atv 0x004e3c80 = the stick's way: +0x12b8 angle (acos table *0x003ea9c0, scale *0x003ea9d8 14999.5; x * rsqrt(1, x²+y²) clamped twice; negated for y < 0), +0x12bc reach; reach² <= 0.25 -> 0, else 4 |a| <= π/4, 2 π/4..3π/4, 3 past 3π/4, 1 -3π/4..-π/4 (0x3f490fdb, 0x4016cbe4); +0x14c8 = way, trick byte |= 2:0x80 1:0x40 4:0x20 3:0x10
+atv_input_update            atv 0x00507880 = the input object's frame (a0 input = bike +0xbc4, f12 dt): device (+0x5c) vt (+0x1c)+0x1c(dev, i, input+0x328+0x18i) for 32 buttons; record axes +0x318..+0x324 = axis objects (+0x7c..+0x88)+0x24 (the second device +0x60 when larger); flicks for 4 axes into input+0x62c+0x18a (entries 0x20..0x23); the record [device, input+0x328, axes] to listeners on +0x30 via (+0x48)+0x20; ends in 0x00128af0. 0x00507df0 is its zeroed-record twin
+#   The flick scan: ring head +0x94, times +0x98+4s, axes +0x118+0x10s+4a; oldest first, |v| > 0.8 remembered
+#   (time, value); the other sign with a remembered time != 0: time > 0 -> (v - from)/(t - time), any gap,
+#   kept if larger in magnitude; forget. MXU's flick (ride.rs Flick::speed) is the same scan.
+atv_input_sampler           atv 0x00505f80 = the ring's sampler, a callback registered with the front end's +0x2cc object (vtable 0x003b7320, +0x14 0x00125420 registers into list +0x288, +0x18 0x00125480 removes): time f12 into +0x98+4*head, each axis read afresh (0x00117e70, the d-pad override through the binding lookup). Its call sites and times not traced (F31d)
+atv_binding_lookup          atv 0x00118e10 = (controls *(*0x003eab60), cmd, 2, 10, device): map controls+0x648; no map, cmd > 0x4f or device > 1 -> -1; else *(map + 0x140 + device*0x140 + cmd*4). State 4: both devices left 15, right 13, up 12, down 14, gas 2 (Cross), brake 3 (Square), clutch 4 (L1), tricks 1, 0, 5 (Circle, Triangle, R1)
+#   992.97 (0x44783e10) on flip-1 rows 66..71 = (1 - (-1)) / (264 * 2^-17 s): the ring's last sample at -1
+#   (tape tick 64) and first at +1 (tick 65) 2.014 ms apart; held while that pair stays in the 32 samples.
+#   MD164's -992.97 the same the other way. The port's stand-in (150 samples/s on the sim clock) gives 60.006;
+#   state 4's bike clamps the hold at max_backflip_time +0x11a8 = max_preload_time +0xc68 = 60.

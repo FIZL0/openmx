@@ -36,6 +36,7 @@ pub mod ground;
 pub mod heap;
 pub mod mass;
 pub mod node;
+pub mod pad;
 pub mod rider;
 pub mod ragdoll;
 pub mod record;
