@@ -411,7 +411,7 @@ fn preload_path(s: &PreloadState) -> &'static str {
     let (a, st) = (&s.air, &s.st);
     if a.preload_firing {
         if a.preload_timer - st.dt > F::ZERO { "firing" } else { "fired out" }
-    } else if !a.on_ground || s.ch.vel.y() <= 5.0 || a.contact_vel.z() <= 30.0 || st.brake != 0.0 {
+    } else if !a.on_ground || F(s.ch.vel.y()) <= 5.0 || F(a.contact_vel.z()) <= 30.0 || st.brake != 0.0 {
         "off the lip"
     } else if st.stick.1 > 0.8 {
         "armed"
@@ -434,36 +434,90 @@ fn preload_path(s: &PreloadState) -> &'static str {
 #[test]
 fn mxvatv_preload_is_the_originals() {
     let Some(mut ee) = image() else { return };
-    let posts = Rc::new(RefCell::new(Vec::<[u32; 5]>::new()));
-    let log = posts.clone();
-    ee.hooks.insert(POST_EVENT, Box::new(move |ee| {
-        log.borrow_mut().push([ee.r(5) as u32, ee.r(6) as u32, ee.r(7) as u32, ee.r(8) as u32, ee.r(9) as u32]);
-    }));
+    let posts = hook_preload_post(&mut ee);
     let mut g = Gen(0x0d63_0003);
     let mut tally = BTreeMap::new();
     let mut cues = 0;
     for k in 0..10_000 {
         let s = g.preload();
-        let path = preload_path(&s);
+        let (path, posted) = preload_same_as_the_original(&mut ee, &posts, &s, k);
         *tally.entry(path).or_insert(0u32) += 1;
-        reset(&mut ee);
-        poke_preload(&mut ee, &s);
-        posts.borrow_mut().clear();
-        ee.call(PRELOAD, &[u64::from(OBJ)], &[s.st.dt.0], 10_000);
-        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
-        let was = snap(&ee);
-
-        let mut t = s.clone();
-        let posted = step::preload(&t.p, &mut t.air, &mut t.ch, &t.st, &mut t.cue);
-        reset(&mut ee);
-        poke_preload(&mut ee, &t);
-        compare(k, path, &was, &snap(&ee), &s);
-        let want: Vec<[u32; 5]> = if posted { vec![[OBJ + 0x674, 8, 14, s.tag, 0]] } else { vec![] };
-        assert_eq!(*posts.borrow(), want, "state {k} ({path}): the cue's event");
         cues += u32::from(posted);
     }
     enough(&tally, &["firing", "fired out", "off the lip", "armed", "fired", "fired, equal times", "holding", "waiting"], 100);
     assert!(cues >= 500, "only {cues} cue(s) posted");
+}
+
+/// The cue's event post hooked: each call's five arguments.
+fn hook_preload_post(ee: &mut Ee) -> Rc<RefCell<Vec<[u32; 5]>>> {
+    let posts = Rc::new(RefCell::new(Vec::<[u32; 5]>::new()));
+    let log = posts.clone();
+    ee.hooks.insert(POST_EVENT, Box::new(move |ee| {
+        log.borrow_mut().push([ee.r(5) as u32, ee.r(6) as u32, ee.r(7) as u32, ee.r(8) as u32, ee.r(9) as u32]);
+    }));
+    posts
+}
+
+/// Runs `s` through the original's preload and the port's and panics, naming state `k`, where they part.
+/// Returns the state's path and whether the cue's event was posted.
+fn preload_same_as_the_original(ee: &mut Ee, posts: &RefCell<Vec<[u32; 5]>>, s: &PreloadState, k: usize) -> (&'static str, bool) {
+    let path = preload_path(s);
+    reset(ee);
+    poke_preload(ee, s);
+    posts.borrow_mut().clear();
+    ee.call(PRELOAD, &[u64::from(OBJ)], &[s.st.dt.0], 10_000);
+    only_touched_the_regions(ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+    let was = snap(ee);
+
+    let mut t = s.clone();
+    let posted = step::preload(&t.p, &mut t.air, &mut t.ch, &t.st, &mut t.cue);
+    reset(ee);
+    poke_preload(ee, &t);
+    compare(k, path, &was, &snap(ee), s);
+    let want: Vec<[u32; 5]> = if posted { vec![[OBJ + 0x674, 8, 14, s.tag, 0]] } else { vec![] };
+    assert_eq!(*posts.borrow(), want, "state {k} ({path}): the cue's event");
+    (path, posted)
+}
+
+/// The patterns R45's lip test feeds a speed: ±qNaN, ±sNaN, ±inf.
+const ODD_SPEEDS: [u32; 6] = [0x7fc0_0000, 0xffc0_0000, 0x7f80_0001, 0xff80_0001, 0x7f80_0000, 0xff80_0000];
+
+/// Each pair of lip speeds (`vel.y`, `contact_vel.z`): either an [`ODD_SPEEDS`] pattern or its own value
+/// (`None`), not both its own.
+fn odd_lip_speeds() -> impl Iterator<Item = (Option<u32>, Option<u32>)> {
+    let one = || ODD_SPEEDS.iter().copied().map(Some).chain([None]);
+    one().flat_map(move |vy| one().map(move |cz| (vy, cz))).filter(|&(vy, cz)| vy.is_some() || cz.is_some())
+}
+
+/// R45 — SLUS-21104's preload lip speeds as NaN patterns, as R42's Untamed test: the original branches
+/// on `c.ole`, which reads an exponent-255 pattern as ±max, so a +NaN is over 5 / 30 and a -NaN under.
+/// Lip states only (on the ground, not firing, no brake), stick pushed, pulled or neither.
+#[test]
+fn mxvatv_preload_lip_takes_nan_speeds_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    let posts = hook_preload_post(&mut ee);
+    let mut g = Gen(0x0d63_0045);
+    let mut tally = BTreeMap::new();
+    let mut k = 0;
+    for _ in 0..200 {
+        let mut s = g.preload();
+        s.air.preload_firing = false;
+        s.air.on_ground = true;
+        s.st.brake = F::ZERO;
+        for (vy, cz) in odd_lip_speeds() {
+            let mut t = s.clone();
+            if let Some(b) = vy {
+                t.ch.vel = Vf::new(t.ch.vel.x(), f32::from_bits(b), t.ch.vel.z(), t.ch.vel.w());
+            }
+            if let Some(b) = cz {
+                let c = t.air.contact_vel;
+                t.air.contact_vel = Vf::new(c.x(), c.y(), f32::from_bits(b), c.w());
+            }
+            *tally.entry(preload_same_as_the_original(&mut ee, &posts, &t, k).0).or_insert(0u32) += 1;
+            k += 1;
+        }
+    }
+    enough(&tally, &["off the lip", "armed", "fired", "holding", "waiting"], 20);
 }
 
 // --- the input limiter (MD63a) ------------------------------------------------------------------------
