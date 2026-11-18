@@ -225,92 +225,417 @@ fn tape_of(name: &str) -> &'static str {
     if name.starts_with("flip") { "flip" } else { "ride" }
 }
 
-/// **F31 — the reader's words off a tape tick**: what the pad reader stores for `tick` (C15's tapes
-/// hold cross, square, R1 and a left stick at -1, 0 or 1, nothing else), the bike `up` (not wrecked)
-/// as the frame before left it. Gas cross (0 while wrecked), brake square, the stick as it is, the
-/// stick's way in +0x14c8 (up 1, down 2, left 3, right 4) and the trick byte's bits (left 0x10, right
-/// 0x20, up 0x40, down 0x80, R1 4 while up; its upper three bytes the image's), +0x14d4 the riding
-/// flag; the d-pad, the spin hold, clutch, reverse and +0x17ac 0. The one word not from the tape: the
-/// flip hold +0x12b0, the pad record's entry `0x21` as the reader copies it (−992.97 on MD164's
-/// Untamed rows, 992.97 here, unexplained), is `hold`, the row's.
-fn tape_words(tick: &Row, up: bool, trick_hi: u32, hold: u32) -> Vec<(u32, u32)> {
-    let held = |k: &str| tick["buttons"].split(' ').any(|x| x == k);
-    let stick = |k: &str| {
-        let v: f32 = tick[k].parse().unwrap();
-        assert!(v == -1.0 || v == 0.0 || v == 1.0, "C15's tapes hold the stick at -1, 0 or 1: {k} {v}");
-        v
-    };
-    for b in tick["buttons"].split(' ').filter(|b| !b.is_empty()) {
-        assert!(["cross", "square", "r1"].contains(&b), "C15's tapes press cross, square and R1 only: {b}");
-    }
-    assert_eq!((stick("rx"), stick("ry")), (0.0, 0.0), "C15's tapes leave the right stick alone");
-    let (lx, ly) = (stick("lx"), stick("ly"));
-    let lever = |on: bool| if on { 1.0f32.to_bits() } else { 0 };
-    let way = if ly < 0.0 {
-        1
-    } else if ly > 0.0 {
-        2
-    } else if lx < 0.0 {
-        3
-    } else if lx > 0.0 {
-        4
-    } else {
-        0
-    };
-    let mut bits = 0;
-    for (on, b) in [(lx < 0.0, 0x10), (lx > 0.0, 0x20), (ly < 0.0, 0x40), (ly > 0.0, 0x80), (held("r1") && up, 4)] {
-        if on {
-            bits |= b;
+/// **F31d — the input object's record off a tape tick**: the bike's input object (the bike's
+/// `+0xbc4`, research/oracle.txt `# F31d`) as the port keeps it, its sample ring and the word a miss
+/// reads taken from the image, the bindings the image's own.
+struct Pad {
+    ring: pad::Ring,
+    before: F,
+    bindings: pad::Bindings,
+}
+
+/// The input object's words: the ring's head, times and axes, the word before the record's first
+/// entry, the device it reads and its four axis objects' values.
+const INPUT_HEAD: u32 = 0x94;
+const INPUT_TIMES: u32 = 0x98;
+const INPUT_AXES: u32 = 0x118;
+const INPUT_BEFORE: u32 = 0x314;
+const INPUT_DEVICE: u32 = 0x5c;
+/// The front end (the word [`FRONT_END`] points at) and, in it, the two devices and the controls' binding map.
+const FRONT_END: u32 = 0x003e_ab60;
+const FRONT_DEVICES: u32 = 0xc;
+const FRONT_BINDINGS: u32 = 0x648;
+
+/// The tape's button names and the device's control each is: Triangle, Circle, Cross, Square, L1,
+/// R1, L2, R2, Select, Start, R3, L3, then the d-pad's up, right, down, left.
+const CONTROLS: [&str; 16] = ["triangle", "circle", "cross", "square", "l1", "r1", "l2", "r2", "select", "start", "r3", "l3", "up", "right", "down", "left"];
+
+impl Pad {
+    fn of(ee: &Ee) -> Pad {
+        let input = ee.u32_at(BIKE + 0xbc4);
+        let f = |a: u32| F(f32::from_bits(ee.u32_at(a)));
+        let head = ee.u32_at(input + INPUT_HEAD) as usize;
+        let mut ring = pad::Ring { head, ..Default::default() };
+        for s in 0..pad::SAMPLES {
+            let s32 = s as u32;
+            ring.at[s] = f(input + INPUT_TIMES + 4 * s32);
+            ring.axes[s] = std::array::from_fn(|a| f(input + INPUT_AXES + 0x10 * s32 + 4 * a as u32));
         }
+        ring.now = ring.at[(head + pad::SAMPLES - 1) % pad::SAMPLES];
+        let front = ee.u32_at(ee.u32_at(FRONT_END));
+        assert_eq!(ee.u32_at(front + FRONT_DEVICES), ee.u32_at(input + INPUT_DEVICE), "the bike's input reads device 0");
+        let map = ee.u32_at(front + FRONT_BINDINGS);
+        let table = (map != 0).then(|| Box::new(std::array::from_fn(|d| std::array::from_fn(|c| ee.i32_at(map + 0x140 * (d as u32 + 1) + 4 * c as u32)))));
+        Pad { ring, before: f(input + INPUT_BEFORE), bindings: pad::Bindings(table) }
     }
+
+    /// The record for tape tick `tick`: the tick's axes sampled into the ring ([`pad::Ring::sample`],
+    /// the port's stand-in), each held button's control at 1, the flicks the ring's.
+    fn record(&mut self, tick: &Row) -> pad::Record {
+        let axes = ["lx", "ly", "rx", "ry"].map(|k| F(tick[k].parse::<f32>().unwrap()));
+        self.ring.sample(axes, F(f32::from_bits(DT)));
+        let mut values = [F::ZERO; pad::ENTRIES + 1];
+        values[0] = self.before;
+        for b in tick["buttons"].split(' ').filter(|b| !b.is_empty()) {
+            let c = CONTROLS.iter().position(|&n| n == b).unwrap_or_else(|| panic!("no control for the tape's {b}"));
+            values[1 + c] = F::ONE;
+        }
+        for (a, v) in self.ring.flicks().into_iter().enumerate() {
+            values[1 + pad::FLICKS + a] = v;
+        }
+        pad::Record { device: 0, values, axes }
+    }
+}
+
+/// The reader's words in a bike (`m` its word at an offset), and the words it only reads.
+fn pad_words(m: impl Fn(u32) -> u32) -> (pad::Words, pad::Bike) {
+    let f = |o: u32| F(f32::from_bits(m(o)));
+    let w = pad::Words {
+        brake: f(0x310),
+        gas: f(0x314),
+        dpad: [m(0x12a0), m(0x12a4)],
+        stick: [f(0x12a8), f(0x12ac)],
+        flip_hold: f(0x12b0),
+        spin_hold: f(0x12b4),
+        angle: f(0x12b8),
+        reach: f(0x12bc),
+        clutch: f(0x12c0),
+        reverse: f(0x12c4),
+        way: m(0x14c8),
+        riding: m(0x14d4),
+        trick: m(0x14ec) as u8,
+        latch: f(0x17ac),
+    };
+    let bike = pad::Bike { wrecked: m(0xc80) != 0, brake_scaled: m(0x13b0) != 0, brake_scale: f(0x13b4), speed: f(0xc38), gas_with_brake: m(0xde0) != 0 };
+    (w, bike)
+}
+
+/// The reader's words as stores into the bike, the trick byte into `trick_word` (`+0x14ec`, whose upper
+/// three bytes it keeps).
+fn pad_stores(w: &pad::Words, trick_word: u32) -> Vec<(u32, u32)> {
     vec![
-        (0x310, lever(held("square"))),
-        (0x314, lever(held("cross") && up)),
-        (0x12a0, 0),
-        (0x12a4, 0),
-        (0x12a8, lx.to_bits()),
-        (0x12ac, ly.to_bits()),
-        (0x12b0, hold),
-        (0x12b4, 0),
-        (0x12c0, 0),
-        (0x12c4, 0),
-        (0x14c8, way),
-        (0x14d4, u32::from(up)),
-        (0x14ec, trick_hi & !0xff | bits),
-        (0x17ac, 0),
+        (0x310, w.brake.to_bits()),
+        (0x314, w.gas.to_bits()),
+        (0x12a0, w.dpad[0]),
+        (0x12a4, w.dpad[1]),
+        (0x12a8, w.stick[0].to_bits()),
+        (0x12ac, w.stick[1].to_bits()),
+        (0x12b0, w.flip_hold.to_bits()),
+        (0x12b4, w.spin_hold.to_bits()),
+        (0x12b8, w.angle.to_bits()),
+        (0x12bc, w.reach.to_bits()),
+        (0x12c0, w.clutch.to_bits()),
+        (0x12c4, w.reverse.to_bits()),
+        (0x14c8, w.way),
+        (0x14d4, w.riding),
+        (0x14ec, trick_word & !0xff | u32::from(w.trick)),
+        (0x17ac, w.latch.to_bits()),
     ]
 }
 
-/// Pokes [`tape_words`] into the bike: tick `tick`, the wreck state the bike's own, the flip hold
-/// `row`'s.
-fn feed_tape(ee: &mut Ee, tick: &Row, row: &Row, up: bool) {
-    let hold = obj(row)[0x12b0 / 4];
-    for (at, w) in tape_words(tick, up, ee.u32_at(BIKE + 0x14ec), hold) {
-        ee.set_u32(BIKE + at, w);
+/// **F31d**: the port's pad reader ([`pad::read`]) on [`Pad`]'s record for tape tick `tick`, over the
+/// bike's words as they are in `ee`; answers the stores, the same for both runs of a lockstep.
+fn tape_stores(ee: &Ee, pad: &mut Pad, tick: &Row) -> Vec<(u32, u32)> {
+    let (mut w, bike) = pad_words(|o| ee.u32_at(BIKE + o));
+    let rec = pad.record(tick);
+    let cue = pad::read(&mut w, &bike, &rec, &pad.bindings);
+    assert!(!cue, "C15's tapes never press the clutch");
+    pad_stores(&w, ee.u32_at(BIKE + 0x14ec))
+}
+
+/// The flip hold past which the bike reads no more: the backflip's and the preload's maximum times
+/// (`+0x11a8`, `+0xc68`), the same on state 4's bike.
+fn hold_clamp(ee: &Ee) -> F {
+    let (flip, preload) = (F::from_bits(ee.u32_at(BIKE + 0x11a8)), F::from_bits(ee.u32_at(BIKE + 0xc68)));
+    assert_eq!(flip, preload, "the backflip's and the preload's maximum times");
+    flip
+}
+
+/// **F31d**: the port's pad reader off the tapes ([`tape_stores`]) gives every reader word of every
+/// row past the first, word for word, on both captures (tick t on row t + 1, run over row t's bike),
+/// and covers every word [`READER`] pokes and the stick's angle and reach. The one word that cannot be
+/// the original's is the flip hold on flip-1's rows 66..71: the original measured the stick's −1 to 1
+/// over two samples 2 ms apart (992.97), the port's stand-in over a tick (60.006); both are past the
+/// clamp every reader of the hold puts on it ([`hold_clamp`]), and every other row's hold is the row's.
+#[test]
+fn the_tape_gives_every_reader_word() {
+    let Some(ee) = image() else { return };
+    let mut covered: Vec<u32> = pad_stores(&pad::Words::default(), 0).iter().map(|w| w.0).collect();
+    covered.sort();
+    let mut want: Vec<u32> = READER.iter().flat_map(|&(at, len)| (0..len / 4).map(move |i| at + 4 * i)).chain([0x12b8, 0x12bc]).collect();
+    want.sort();
+    assert_eq!(covered, want, "the port's stores are READER's and the stick's angle and reach");
+    let clamp = hold_clamp(&ee);
+    for name in ["ride-2", "flip-1"] {
+        let (Some(rows), Some(ticks)) = (rows(name), ticks(tape_of(name))) else { return };
+        let mut pad = Pad::of(&ee);
+        let mut past = Vec::new();
+        for r in 1..rows.len() {
+            let (before, o) = (obj(&rows[r - 1]), obj(&rows[r]));
+            let (mut w, bike) = pad_words(|at| before[at as usize / 4]);
+            let rec = pad.record(&ticks[r - 1]);
+            assert!(!pad::read(&mut w, &bike, &rec, &pad.bindings), "{name} row {r}: C15's tapes never press the clutch");
+            let mut bad = Vec::new();
+            for (at, got) in pad_stores(&w, before[0x14ec / 4]) {
+                let row = o[at as usize / 4];
+                if got == row {
+                    continue;
+                }
+                let (g, h) = (F::from_bits(got), F::from_bits(row));
+                if at == 0x12b0 && clamp < g.abs() && clamp < h.abs() && (g < F::ZERO) == (h < F::ZERO) {
+                    past.push(r);
+                    continue;
+                }
+                bad.push(format!("+{at:#x}: {got:#x} ({g}), the row {row:#x} ({h})"));
+            }
+            assert!(bad.is_empty(), "{name} row {r}: {}", bad.join(", "));
+        }
+        let want: Vec<usize> = if name == "flip-1" { (66..72).collect() } else { Vec::new() };
+        assert_eq!(past, want, "{name}: the rows whose flip hold is the port's own, past the clamp");
     }
 }
 
-/// **F31**: [`tape_words`] are the reader's words of every row past the first, word for word, on
-/// both captures (tick t on row t + 1, the wreck state row t's), and cover every word [`READER`] pokes.
-#[test]
-fn the_tape_gives_every_reader_word() {
-    let mut covered: Vec<u32> = tape_words(&[("buttons", ""), ("lx", "0"), ("ly", "0"), ("rx", "0"), ("ry", "0")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), true, 0, 0)
-        .iter()
-        .map(|w| w.0)
-        .collect();
-    covered.sort();
-    let mut want: Vec<u32> = READER.iter().flat_map(|&(at, len)| (0..len / 4).map(move |i| at + 4 * i)).collect();
-    want.sort();
-    assert_eq!(covered, want, "the tape's words are READER's");
-    for name in ["ride-2", "flip-1"] {
-        let (Some(rows), Some(ticks)) = (rows(name), ticks(tape_of(name))) else { return };
-        for r in 1..rows.len() {
-            let o = obj(&rows[r]);
-            let got = tape_words(&ticks[r - 1], !row_wrecked(&rows[r - 1]), o[0x14ec / 4], o[0x12b0 / 4]);
-            let bad: Vec<String> = got.iter().filter(|&&(at, w)| o[at as usize / 4] != w).map(|&(at, w)| format!("+{at:#x}: {w:#x}, the row {:#x}", o[at as usize / 4])).collect();
-            assert!(bad.is_empty(), "{name} row {r}: {}", bad.join(", "));
+// --- F31d: the pad reader and the input's flicks against the original's code ----------------------
+
+use game_sim::handling::pad;
+
+/// The pad reader (the bike's input listener), the driver-live test it calls, the listeners' post
+/// it sends the clutch's press cue through, and the binding lookup.
+const PAD_READER: u32 = 0x004e_36c0;
+const PAD_LIVE: u32 = 0x0024_9330;
+const PAD_POST: u32 = 0x0027_2300;
+/// The input object's update (its flicks, the record, the listeners) and the call it ends with.
+const INPUT_UPDATE: u32 = 0x0050_7880;
+const INPUT_UPDATE_TAIL: u32 = 0x0012_8af0;
+/// Free RAM in state 4's image for the oracles' records and objects.
+const PAD_FREE: u32 = 0x01fc_0000;
+
+struct PadPick(u64);
+
+impl PadPick {
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 33) as u32
+    }
+    fn unit(&mut self) -> f32 {
+        self.next() as f32 / (1u64 << 31) as f32
+    }
+    /// A control's strength: zero of either sign, a tiny one, a full press, a part press, a negative.
+    fn strength(&mut self) -> f32 {
+        match self.next() % 8 {
+            0 | 1 | 2 => 0.0,
+            3 => -0.0,
+            4 => 1e-30,
+            5 => 1.0,
+            6 => -self.unit(),
+            _ => self.unit(),
         }
     }
+    /// A stick axis: centred, full, at the thresholds the way and the flick read, or anything.
+    fn axis(&mut self) -> f32 {
+        let v = match self.next() % 10 {
+            0 => 0.0,
+            1 => 1.0,
+            2 => 0.8,
+            3 => f32::from_bits(0.8f32.to_bits() + 1),
+            4 => 0.5,
+            5 => std::f32::consts::FRAC_1_SQRT_2,
+            6 => 1e-20,
+            _ => self.unit(),
+        };
+        if self.next() % 2 == 0 { -v } else { v }
+    }
+    /// A word the reader finds already there: 0, 1, 1.0, or anything.
+    fn word(&mut self) -> u32 {
+        match self.next() % 4 {
+            0 => 0,
+            1 => 1,
+            2 => 1.0f32.to_bits(),
+            _ => self.next(),
+        }
+    }
+}
+
+/// **F31d — the pad reader is the original's**: SLUS-21104's reader run in the interpreter on state
+/// 4's bike against [`pad::read`], over 12,000 generated records and bike words: strengths of either
+/// zero, tiny, part, full and negative on every control (and on the word a lookup's miss reads), the
+/// sticks at the way's and the flick's thresholds and anywhere, the image's bindings and random ones
+/// (misses and no table among them), the bike wrecked or not, the brake scaled or not, the speed
+/// either side of 5, the latch any word. Every word the reader writes, the trick word's upper bytes and
+/// the press cue must be the port's, bit for bit; the words it leaves alone stay.
+#[test]
+fn the_pad_reader_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let live = Rc::new(std::cell::Cell::new(1u64));
+    let l = live.clone();
+    ee.hooks.insert(PAD_LIVE, Box::new(move |ee: &mut Ee| ee.set(2, l.get())));
+    let posts = Rc::new(std::cell::Cell::new(0u32));
+    let p = posts.clone();
+    ee.hooks.insert(PAD_POST, Box::new(move |_: &mut Ee| p.set(p.get() + 1)));
+    let front = ee.u32_at(ee.u32_at(FRONT_END));
+    let map = ee.u32_at(front + FRONT_BINDINGS);
+    let image_map: Vec<u32> = (0..0xa0).map(|i| ee.u32_at(map + 0x140 + 4 * i)).collect();
+    let (record, entries) = (PAD_FREE, PAD_FREE + 0x100);
+    let commands = [pad::LEFT, pad::RIGHT, pad::UP, pad::DOWN, pad::GAS, pad::BRAKE, pad::CLUTCH, pad::TRICKS[0], pad::TRICKS[1], pad::TRICKS[2]];
+    let mut pick = PadPick(0x4633_3164);
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for case in 0..12_000 {
+        // The bindings: the image's, or random controls (misses among them) for the reader's commands,
+        // or no table.
+        let kind = pick.next() % 8;
+        ee.set_u32(front + FRONT_BINDINGS, if kind == 0 { 0 } else { map });
+        for (i, &w) in image_map.iter().enumerate() {
+            ee.set_u32(map + 0x140 + 4 * i as u32, w);
+        }
+        if kind >= 5 {
+            for d in 0..2 {
+                for &c in &commands {
+                    let control = (pick.next() % 0x26) as i32 - 1;
+                    ee.set_u32(map + 0x140 * (d + 1) + 4 * c, control as u32);
+                }
+            }
+        }
+        let device = pick.next() % 2;
+        let values: Vec<f32> = (0..=pad::ENTRIES).map(|_| pick.strength()).collect();
+        let values: Vec<f32> = values.iter().enumerate().map(|(k, &v)| if k > pad::FLICKS { pick.axis() * 900.0 } else { v }).collect();
+        for (k, &v) in values.iter().enumerate() {
+            ee.set_f32(entries + 0x18 * k as u32 + 4, v);
+        }
+        let axes = [pick.axis(), pick.axis(), pick.axis(), pick.axis()];
+        for (k, v) in [device, entries + 0x18, axes[0].to_bits(), axes[1].to_bits(), axes[2].to_bits(), axes[3].to_bits()].into_iter().enumerate() {
+            ee.set_u32(record + 4 * k as u32, v);
+        }
+        let wrecked = pick.next() % 5 == 0;
+        ee.set_u32(BIKE + 0xc80, if wrecked { 1 + pick.next() % 3 } else { 0 });
+        ee.set_u32(BIKE + 0x13b0, pick.next() % 2);
+        ee.set_f32(BIKE + 0x13b4, pick.unit());
+        let speed = match pick.next() % 4 {
+            0 => 5.0,
+            1 => f32::from_bits(5.0f32.to_bits() - 1),
+            _ => pick.unit() * 10.0,
+        };
+        ee.set_f32(BIKE + 0xc38, speed);
+        ee.set_u32(BIKE + 0xde0, pick.next() % 2);
+        for at in [0x310, 0x314, 0x12a0, 0x12a4, 0x12a8, 0x12ac, 0x12b0, 0x12b4, 0x12b8, 0x12bc, 0x12c0, 0x12c4, 0x14c8, 0x14d4, 0x14ec, 0x17ac] {
+            let w = pick.word();
+            ee.set_u32(BIKE + at, w);
+        }
+        let around: Vec<(u32, u32)> = [0x30c, 0x318, 0x12c8, 0x14c4, 0x14cc, 0x14d0, 0x14d8, 0x14e8, 0x14f0, 0x17a8, 0x17b0].iter().map(|&at| (at, ee.u32_at(BIKE + at))).collect();
+        let (mut w, bike) = pad_words(|o| ee.u32_at(BIKE + o));
+        let trick_word = ee.u32_at(BIKE + 0x14ec);
+        let rec = pad::Record { device, values: std::array::from_fn(|k| F(values[k])), axes: axes.map(F) };
+        let table = (kind != 0).then(|| Box::new(std::array::from_fn(|d| std::array::from_fn(|c| ee.i32_at(map + 0x140 * (d as u32 + 1) + 4 * c as u32)))));
+        let bindings = pad::Bindings(table);
+        // Lookups the record does not hold (past its last entry) are not the reader's to make on
+        // the shipped bindings: such a case is drawn again.
+        if !wrecked && commands.iter().any(|&c| bindings.control(c, device) > pad::ENTRIES as i32 - 1) {
+            continue;
+        }
+
+        posts.set(0);
+        ee.set(28, GP);
+        ee.call(PAD_READER, &[u64::from(BIKE), u64::from(record)], &[], 50_000_000);
+        let cue = pad::read(&mut w, &bike, &rec, &bindings);
+        let want = pad_stores(&w, trick_word);
+        let bad: Vec<String> = want.iter().filter(|&&(at, v)| ee.u32_at(BIKE + at) != v).map(|&(at, v)| format!("+{at:#x}: the game {:#010x}, the port {v:#010x}", ee.u32_at(BIKE + at))).collect();
+        assert!(bad.is_empty(), "case {case} (wrecked {wrecked}, axes {axes:?}, bindings {kind}): {}", bad.join(", "));
+        for &(at, v) in &around {
+            assert_eq!(ee.u32_at(BIKE + at), v, "case {case}: the reader wrote +{at:#x}");
+        }
+        assert_eq!(posts.get(), u32::from(cue), "case {case}: the press cue");
+        let path = if wrecked {
+            "wrecked"
+        } else if w.reverse == F::ONE {
+            "reverse"
+        } else if w.brake != F::ZERO && w.gas != F::ZERO {
+            "gas with the brake"
+        } else if cue {
+            "clutch cue"
+        } else if w.dpad != [0, 0] {
+            "d-pad"
+        } else {
+            ["way 0", "way up", "way down", "way left", "way right"][w.way as usize]
+        };
+        *tally.entry(path).or_default() += 1;
+        if !wrecked && kind == 0 {
+            *tally.entry("no table").or_default() += 1;
+        }
+        if !wrecked && w.brake == bike.brake_scale && bike.brake_scaled {
+            *tally.entry("brake scaled").or_default() += 1;
+        }
+    }
+    for path in ["wrecked", "reverse", "gas with the brake", "clutch cue", "d-pad", "way 0", "way up", "way down", "way left", "way right", "no table", "brake scaled"] {
+        let n = tally.get(path).copied().unwrap_or(0);
+        assert!(n >= 50, "only {n} cases took {path}: {tally:?}");
+    }
+    eprintln!("the pad reader: {tally:?}");
+}
+
+/// **F31d — the input's flicks are the original's**: SLUS-21104's input update run in the interpreter
+/// on state 4's image over a made-up input object (one device, whose button read is a no-op, four axis
+/// objects, no listeners, the update's closing call hooked), against [`pad::Ring::flicks`] over 12,000
+/// generated rings: samples at ±1, the 0.8 threshold and just past it, zero and anywhere; times in
+/// order, equal, zero and negative, the head anywhere. The four flicks and the four axes the record
+/// carries must be the port's, bit for bit.
+#[test]
+fn the_input_flicks_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let (input, device, vtable, axes) = (PAD_FREE + 0x1000, PAD_FREE + 0x2000, PAD_FREE + 0x2100, PAD_FREE + 0x2200);
+    let stub = PAD_FREE + 0x3000;
+    ee.hooks.insert(stub, Box::new(|_: &mut Ee| {}));
+    ee.hooks.insert(INPUT_UPDATE_TAIL, Box::new(|_: &mut Ee| {}));
+    ee.set_u32(input + INPUT_DEVICE, device);
+    ee.set_u32(input + 0x60, 0);
+    ee.set_u32(input + 0x30, 0);
+    ee.set_u32(device + 0x1c, vtable);
+    ee.set_u32(vtable + 0x1c, stub);
+    for a in 0..4 {
+        ee.set_u32(input + 0x7c + 4 * a, axes + 0x40 * a);
+    }
+    let mut pick = PadPick(0x4633_3164_66);
+    let mut crossed = 0;
+    for case in 0..12_000 {
+        let mut ring = pad::Ring { head: (pick.next() % 32) as usize, ..Default::default() };
+        let mut t = pick.unit();
+        let order = pick.next() % 4;
+        for s in 0..pad::SAMPLES {
+            t = match order {
+                0 => t + pick.unit() * 0.01,
+                1 => t,
+                2 => [0.0, -t, t][pick.next() as usize % 3],
+                _ => pick.unit() * 2.0 - 0.5,
+            };
+            ring.at[s] = F(t);
+            for a in 0..4 {
+                ring.axes[s][a] = F(match pick.next() % 6 {
+                    0 => 0.0,
+                    1 | 2 => if pick.next() % 2 == 0 { 1.0 } else { -1.0 },
+                    _ => pick.axis(),
+                });
+            }
+        }
+        ee.set_u32(input + INPUT_HEAD, ring.head as u32);
+        for s in 0..pad::SAMPLES {
+            ee.set_f32(input + INPUT_TIMES + 4 * s as u32, ring.at[s].0);
+            for a in 0..4 {
+                ee.set_f32(input + INPUT_AXES + 0x10 * s as u32 + 4 * a as u32, ring.axes[s][a].0);
+            }
+        }
+        let now: Vec<f32> = (0..4).map(|_| pick.axis()).collect();
+        for (a, &v) in now.iter().enumerate() {
+            ee.set_f32(axes + 0x40 * a as u32 + 0x24, v);
+        }
+        ee.set(28, GP);
+        ee.call(INPUT_UPDATE, &[u64::from(input)], &[f32::from_bits(DT)], 50_000_000);
+        let want = ring.flicks();
+        for a in 0..4u32 {
+            let got = ee.u32_at(input + 0x62c + 0x18 * a);
+            assert_eq!(got, want[a as usize].to_bits(), "case {case} axis {a}: the game {}, the port {}", f32::from_bits(got), want[a as usize]);
+            assert_eq!(ee.f32_at(input + 0x318 + 4 * a).to_bits(), now[a as usize].to_bits(), "case {case}: the record's axis {a}");
+        }
+        crossed += want.iter().filter(|v| **v != F::ZERO).count();
+    }
+    assert!(crossed > 5_000, "too few flicks measured: {crossed}");
 }
 
 /// Tape tick t is read on row t + 1, and not on row t.
@@ -10800,9 +11125,11 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     let rows = rows(name)?;
     let dt = F(f32::from_bits(DT));
     let (mut out, mut all, mut off) = (Vec::new(), BTreeMap::<String, u32>::new(), Vec::<String>::new());
-    // F31: `"tape"` feeds the reader's words off the tape's ticks ([`feed_tape`]) instead of the rows,
-    // the wreck state the reader sees the second run's own.
+    // F31: `"tape"` feeds the reader's words off the tape's ticks instead of the rows.
+    // F31d: all of them the port's pad reader's ([`tape_stores`]) over the second run's bike, the
+    // flicks off the port's ring.
     let tape = if rust.contains(&"tape") { Some(ticks(tape_of(name))?) } else { None };
+    let mut pad = Pad::of(&b);
     for (r, row) in rows.iter().enumerate() {
         match &tape {
             // Row 0 reads the tick before the tape: the image holds its words already.
@@ -10812,9 +11139,10 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
                 assert!(bad.is_empty(), "{name}: the image's reader words are not row 0's at {bad:#x?}");
             }
             Some(ticks) => {
-                let up = !wrecked(|o| b.u32_at(BIKE + o));
-                feed_tape(&mut a, &ticks[r - 1], row, up);
-                feed_tape(&mut b, &ticks[r - 1], row, up);
+                for (at, w) in tape_stores(&b, &mut pad, &ticks[r - 1]) {
+                    a.set_u32(BIKE + at, w);
+                    b.set_u32(BIKE + at, w);
+                }
             }
             None => {
                 poke(&mut a, row, &READER);
@@ -11029,7 +11357,7 @@ fn flip_replays_with_every_port_at_once() {
 /// the handing run's, and the frame reads no byte where the RAM parts from it. Answers the wreck
 /// state per row, where the RAM parts, the interpreter's census by part, and every instruction the
 /// interpreter ran in the second run's frames ([`FRAME_RAN`]). F31: fed off the tape's ticks
-/// ([`feed_tape`]): the reader's words but the flip hold, and the wreck state it sees, are not the rows'.
+/// ([`tape_stores`]): F31d, no reader word is the rows'.
 fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<String, u64>, u64)> {
     INTERPRETED.with(|m| m.borrow_mut().clear());
     FRAME_RAN.with(|n| n.set(0));
@@ -11085,7 +11413,8 @@ fn ride_replays_in_pure_rust() {
 
 /// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
 /// 125 and put back on row 193, with the interpreter running no instruction of any frame; F31: fed
-/// off the flip tape.
+/// off the flip tape; F31d: the flip hold off the tape too (the port's flick on rows 66..71, past
+/// the clamp with the original's, [`the_tape_gives_every_reader_word`]).
 #[test]
 fn flip_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
