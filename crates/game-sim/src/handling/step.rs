@@ -92,8 +92,9 @@ pub fn preload(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: &AirSt
             air.preload_firing = false;
         }
     } else if !air.on_ground
-        || chassis.vel.y() <= 5.0
-        || air.contact_vel.z() <= 30.0
+        // Read as the FPU's c.ole does (through F): a NaN pattern is ±max, so a -NaN speed is under (R45).
+        || F(chassis.vel.y()) <= 5.0
+        || F(air.contact_vel.z()) <= 30.0
         || step.brake != F::ZERO
     {
         air.preload_ready = false;
