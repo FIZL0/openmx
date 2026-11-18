@@ -4338,8 +4338,10 @@ impl Ride<Vec<Call>> {
 ///   against everything solid and the placed groups ([`crate::world::World::solid`],
 ///   [`crate::world::World::groups`]). A ray that hit is one hit: its segment as the part keeps it,
 ///   the world's normal and point, and as what was struck the prop's owner number plus one (0 stays
-///   "nothing") in category 0, with no record and no mover (nothing on an MX Unleashed world has
-///   either);
+///   "nothing") in its category (MD72a: `category` for a prop of MX vs. ATV's stadium class,
+///   [`crate::world::Prop::stadium`], the prop [`crate::world::World::collision`]'s set holds at the
+///   owner number; 0 for any other, and for an ecosystem's trunk), with no record and no mover
+///   (nothing on an MX Unleashed world has either);
 /// - the sweep back ([`Collides::sweep`]): the segment swept as one ray against the same, its hit
 ///   the nearest;
 /// - the heightfield rays' terrain ([`Collides::under`]): [`crate::world::World::ground`] at the
@@ -4354,7 +4356,8 @@ pub struct RecordOn<'a> {
     pub scene: &'a mut crate::atv_moto::Scene,
     pub rays: &'a [[Vf; 2]],
     pub damped: Option<(Vf, Vf)>,
-    /// The category every struck prop is given (MX Unleashed's props have none of their own).
+    /// The category a struck prop of MX vs. ATV's stadium class is given (MD72a; no prop of MX
+    /// Unleashed's is, and any other prop has none of its own).
     pub category: u32,
     /// Another record a hit names: none ever is on an MX Unleashed world, so this is never reached.
     pub nobody: crate::handling::record::Record,
@@ -4365,8 +4368,8 @@ const NO_EDGE: f32 = 1.0e30;
 
 impl RecordOn<'_> {
     /// `segments` (world points) swept as ray bundles against the world: per segment, the hit's
-    /// normal, point and owner number, or none.
-    fn sweep_segments(&mut self, segments: &[[Vf; 2]]) -> Vec<Option<(Vf, Vf, i32)>> {
+    /// normal, point, owner number and struck category ([`RecordOn::struck_category`]), or none.
+    fn sweep_segments(&mut self, segments: &[[Vf; 2]]) -> Vec<Option<(Vf, Vf, i32, u32)>> {
         use crate::collide::{Bundle, MAX_PROBES, Probe, Record};
         let mut out = Vec::with_capacity(segments.len());
         for chunk in segments.chunks(MAX_PROBES) {
@@ -4386,10 +4389,39 @@ impl RecordOn<'_> {
             bundle.radius = radius;
             let mut record = Record::new();
             self.world.solid(&bundle, &mut record);
+            // A placed group's hit nearer than the props' takes the probe over: its owner number is
+            // not a prop's.
+            let solid = record.fraction;
             self.world.groups(&bundle, &mut record);
-            out.extend((0..chunk.len()).map(|k| record.hit[k].then(|| (record.normal[k], record.point[k], record.owner[k]))));
+            for k in 0..chunk.len() {
+                out.push(record.hit[k].then(|| {
+                    let prop = record.fraction[k].to_bits() == solid[k].to_bits();
+                    let category = if prop { self.struck_category(record.owner[k]) } else { 0 };
+                    (record.normal[k], record.point[k], record.owner[k], category)
+                }));
+            }
         }
         out
+    }
+
+    /// **The category of the prop `owner` names** (MD72a): [`RecordOn::category`] when it is of MX
+    /// vs. ATV's stadium class ([`crate::world::Prop::stadium`]), else 0. The owner number is the
+    /// prop's place in [`crate::world::World::collision`]'s set (a tiled world's every shape, each
+    /// tile's from its first owner); one past the set (a moving car's) is no prop of the class.
+    fn struck_category(&mut self, owner: i32) -> u32 {
+        if self.category == 0 || owner < 0 {
+            return 0;
+        }
+        let (_, props) = self.world.collision();
+        let stadium = props.and_then(|p| p.props.get(owner as usize)).is_some_and(|p| p.stadium);
+        if stadium { self.category } else { 0 }
+    }
+
+    /// **Whether the object `record` struck last is of `class`** (MD72a), what the reason-15 wreck
+    /// test asks: touching, something struck, and the category of the prop it names
+    /// ([`RecordOn::struck_category`]) masked with `class`.
+    fn struck_class(&mut self, record: &crate::handling::record::Record, class: u32) -> bool {
+        record.touching && record.struck != 0 && self.struck_category(record.struck.wrapping_sub(1) as i32) & class != 0
     }
 }
 
@@ -4418,8 +4450,8 @@ impl crate::handling::record::Collides for RecordOn<'_> {
         Vf::ZERO
     }
     fn sweep(&mut self, from: Vf, to: Vf, _nearby: bool) -> Option<crate::handling::record::Swept> {
-        let (normal, point, owner) = self.sweep_segments(&[[from, to]])[0]?;
-        let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category: self.category, ..Default::default() };
+        let (normal, point, owner, category) = self.sweep_segments(&[[from, to]])[0]?;
+        let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category, ..Default::default() };
         Some(crate::handling::record::Swept { normal, point, struck })
     }
     fn place_part(&mut self) {
@@ -4435,8 +4467,8 @@ impl crate::handling::record::Collides for RecordOn<'_> {
         rays.iter()
             .zip(hits)
             .filter_map(|(&[from, to], h)| {
-                let (normal, point, owner) = h?;
-                let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category: self.category, ..Default::default() };
+                let (normal, point, owner, category) = h?;
+                let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category, ..Default::default() };
                 Some(crate::handling::record::Hit { from, to, normal, point, struck })
             })
             .collect()
@@ -4935,8 +4967,9 @@ const KEEP_UP: f32 = 0.8;
 
 /// **The quad's wreck on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the reason it is
 /// down for (`0` riding), the clock it is down for, `MaxWreckTime`, the struck class the reason-15
-/// test masks a struck object's category with and the category an MX Unleashed prop is given, and the
-/// spot it is put back to (the body there, and its orientation) with where its scene node is there.
+/// test masks a struck object's category with and the category a prop of the stadium class is given
+/// (MD72a, [`RecordOn::category`]), and the spot it is put back to (the body there, and its
+/// orientation) with where its scene node is there.
 ///
 /// MD133's: whether the clock counts (`+0xc8c`, armed once the quad settles past the window), the
 /// map edge armed (`+0x308`) and wrecks on (the game's switch and `+0xc1c` both), the size word
@@ -5071,6 +5104,7 @@ impl<R: Moto + Default> Ride<R> {
         let body = if r.record.body { Some(&mut view) } else { None };
         // `me` names the record to another one's contact: there is no other on an MX Unleashed world.
         crate::handling::record::pass(&mut r.record, 1, body, dt, &mut on);
+        let struck_class = on.struck_class(&r.record, class);
         if let Some((linear, angular)) = on.damped {
             (self.body.damping, self.body.ang_damping) = (linear, angular);
         }
@@ -5079,7 +5113,7 @@ impl<R: Moto + Default> Ride<R> {
         r.held.refill(&r.record.contacts);
         self.bike.contacts = Some(r.held.clone());
         self.bike.touching = r.record.touching;
-        self.bike.struck_class = r.record.touching && r.record.struck != 0 && category & class != 0;
+        self.bike.struck_class = struck_class;
     }
 
     /// [`Ride::record_on`] among knockable bodies (MD224, [`RecordAmong`]): the quad's hits on them
@@ -5115,6 +5149,10 @@ impl<R: Moto + Default> Ride<R> {
         let mut view = self.body.view();
         let body = if r.record.body { Some(&mut view) } else { None };
         crate::handling::record::pass(&mut r.record, 1, body, dt, &mut among);
+        // A knockable body struck last is no prop: of no class (its hit's contact names it).
+        let struck = r.record.struck;
+        let body_struck = among.knocked.iter().any(|k| k.id == struck) && r.record.contacts.iter().any(|c| c.other == struck);
+        let struck_class = !body_struck && among.on.struck_class(&r.record, class);
         if let Some((linear, angular)) = among.on.damped {
             (self.body.damping, self.body.ang_damping) = (linear, angular);
         }
@@ -5149,7 +5187,7 @@ impl<R: Moto + Default> Ride<R> {
         r.held.refill_among(&r.record.contacts, bodies, &ids);
         self.bike.contacts = Some(r.held.clone());
         self.bike.touching = r.record.touching;
-        self.bike.struck_class = r.record.touching && r.record.struck != 0 && category & class != 0;
+        self.bike.struck_class = struck_class;
     }
 
     /// **The frame's tail** (MD123a, [`update`] on [`Tailed`]), after the steps: the wheels' surfaces,

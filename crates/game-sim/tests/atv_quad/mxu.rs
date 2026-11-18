@@ -123,7 +123,8 @@ fn the_spawned_quad_rides_free09_headless() {
 /// MD123a's seeding beyond MD123's: the image's collision record and its resolution's fields, the
 /// riding and the wreck parts' rays (their count at `+0x178`, the segments at `*(+0x180)`), the
 /// update's words a ride without a player or a race reads (the vehicle state's mode, the stunt speed,
-/// the surface table) and the wreck's `MaxWreckTime` and struck class, every prop of the class.
+/// the surface table) and the wreck's `MaxWreckTime` and struck class, the category a prop of MX vs.
+/// ATV's stadium class is given (MD72a).
 fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
     let rays = |part: u32| -> Vec<[Vf; 2]> {
         let (n, segs) = (pre.u32_at(part + 0x178), pre.u32_at(part + 0x180));
@@ -340,6 +341,7 @@ fn the_quad_jumps_a_free09_lip_strikes_a_prop_wrecks_and_is_put_back() {
         let toward = (prop.0.x() - start.0, prop.0.z() - start.1);
         let yaw = toward.0.atan2(toward.1);
         let mut ride = seeded(&pre, &at, &mut r, world, start, yaw);
+        let mut plain = ride.clone();
         let rec = &ride.recorded.as_ref().unwrap().record;
         eprintln!(
             "MD123a prop {} {:?} r {} from {start:?} yaw {yaw}; record part {} rays {} world rays {} hf {} terrain {} body {} mask {:#x}, \
@@ -348,32 +350,17 @@ fn the_quad_jumps_a_free09_lip_strikes_a_prop_wrecks_and_is_put_back() {
             ride.recorded.as_ref().unwrap().riding.len(), ride.recorded.as_ref().unwrap().wreck.len(), ride.wrecked
         );
 
-        let (mut wrecked_at, mut put_at, mut aloft, mut touched) = (None, None, 0usize, 0usize);
-        let mut handed = std::collections::BTreeSet::new();
-        let mut back_at = Vf::ZERO;
-        for k in 0..FRAMES {
-            ride.rest.clear();
-            // On after the put-back, the stick hard over: the spot kept faces the prop.
-            let stick = if put_at.is_some() { (F::ONE, F::ZERO) } else { (F::ZERO, F::ZERO) };
-            ride.step(&Controls { gas: F::ONE, stick, ..Controls::default() }, dt, world, segments);
-            let p = ride.body.position;
-            assert!(p.0.iter().all(|v| v.is_finite()), "frame {k}: the body is at {p:?}");
-            handed.extend(ride.rest.iter().map(call_name));
-            aloft += usize::from(ride.q.airborne);
-            touched += usize::from(ride.recorded.as_ref().unwrap().record.on_object);
-            if let Some(why) = ride.wreck() {
-                eprintln!("MD123a frame {k}: wreck {why} at {p:?}, speed {}", ride.q.speed_len.0);
-                wrecked_at.get_or_insert((k, why));
-            }
-            if ride.rest.iter().any(|c| matches!(c, Call::VehiclePutBack { .. })) && put_at.is_none() {
-                eprintln!("MD123a frame {k}: put back to {p:?}");
-                put_at = Some(k);
-                back_at = p;
-            }
-            if put_at.is_some_and(|f| k > f + RIDE_ON) {
-                break;
-            }
-        }
+        // MD72a: no prop of MX Unleashed's is of MX vs. ATV's stadium class, so the strike is no
+        // reason 15 ...
+        assert!(world.props.props.iter().all(|p| !p.stadium), "a free09 prop of the stadium class");
+        let run = strike(world, &mut plain, dt, segments);
+        eprintln!("MD72a free09, the prop of no class: wreck {:?}, the record on a prop {}", run.wrecked_at, run.touched);
+        assert!(run.touched > 0, "the record never touched the prop of no class");
+        assert!(run.wrecked_at.is_none_or(|(_, why)| why != 15), "the strike on a prop of no class wrecked the quad for reason 15");
+        // ... and the same prop given the class is.
+        world.props.props[prop.2].stadium = true;
+        let Strike { wrecked_at, put_at, aloft, touched, handed, back_at } = strike(world, &mut ride, dt, segments);
+        world.props.props[prop.2].stadium = false;
         let gone = ride.body.position.sub(back_at);
         let gone = (gone.x() * gone.x() + gone.z() * gone.z()).sqrt();
         eprintln!(
@@ -394,6 +381,49 @@ fn the_quad_jumps_a_free09_lip_strikes_a_prop_wrecks_and_is_put_back() {
 const RUN_UP: f32 = 60.0;
 const FRAMES: usize = 900;
 const RIDE_ON: usize = 120;
+
+/// What [`strike`] saw: the first wreck (frame, reason), the put-back's frame, the frames aloft and
+/// with the record on a prop, the calls handed on, and where the quad was put back.
+struct Strike {
+    wrecked_at: Option<(usize, u8)>,
+    put_at: Option<usize>,
+    aloft: usize,
+    touched: usize,
+    handed: std::collections::BTreeSet<String>,
+    back_at: Vf,
+}
+
+/// The seeded quad on the gas at the prop, put back after its wreck and ridden on [`RIDE_ON`]
+/// frames with the stick hard over, or [`FRAMES`] frames.
+fn strike(world: &mut Place<'_>, ride: &mut quad::Ride, dt: F, segments: [[Vf; 2]; 4]) -> Strike {
+    let (mut wrecked_at, mut put_at, mut aloft, mut touched) = (None, None, 0usize, 0usize);
+    let mut handed = std::collections::BTreeSet::new();
+    let mut back_at = Vf::ZERO;
+    for k in 0..FRAMES {
+        ride.rest.clear();
+        // On after the put-back, the stick hard over: the spot kept faces the prop.
+        let stick = if put_at.is_some() { (F::ONE, F::ZERO) } else { (F::ZERO, F::ZERO) };
+        ride.step(&Controls { gas: F::ONE, stick, ..Controls::default() }, dt, world, segments);
+        let p = ride.body.position;
+        assert!(p.0.iter().all(|v| v.is_finite()), "frame {k}: the body is at {p:?}");
+        handed.extend(ride.rest.iter().map(call_name));
+        aloft += usize::from(ride.q.airborne);
+        touched += usize::from(ride.recorded.as_ref().unwrap().record.on_object);
+        if let Some(why) = ride.wreck() {
+            eprintln!("MD123a frame {k}: wreck {why} at {p:?}, speed {}", ride.q.speed_len.0);
+            wrecked_at.get_or_insert((k, why));
+        }
+        if ride.rest.iter().any(|c| matches!(c, Call::VehiclePutBack { .. })) && put_at.is_none() {
+            eprintln!("MD123a frame {k}: put back to {p:?}");
+            put_at = Some(k);
+            back_at = p;
+        }
+        if put_at.is_some_and(|f| k > f + RIDE_ON) {
+            break;
+        }
+    }
+    Strike { wrecked_at, put_at, aloft, touched, handed, back_at }
+}
 
 /// MD123 — the quad made from its files alone ([`quad::Ride::spawn`]): the R quad's `atv_race250p.phy`
 /// (MD122's) and its chassis `250r_atv_chasis.psg` (MD129's), or why they are not there.
@@ -727,6 +757,9 @@ fn the_quad_from_its_files_wrecks_on_a_free09_prop_and_is_put_back() {
         ride.rig(&load, &cols.0, &cols.1);
         let segments = quad::trigger_segments(&load.tires, true).expect("the trigger probe's segments");
         eprintln!("MD123 files prop {prop} {centre:?} from {start:?} yaw {yaw}");
+        // MD72a: the prop given MX vs. ATV's stadium class, which reason 15 asks of it (no prop of
+        // MX Unleashed's has it).
+        world.props.props[prop].stadium = true;
         let (mut wrecked_at, mut put_at, mut touched) = (None, None, 0usize);
         let mut handed = std::collections::BTreeSet::new();
         let (mut back_at, mut far) = (Vf::ZERO, 0.0f32);
