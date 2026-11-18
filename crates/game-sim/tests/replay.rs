@@ -11268,12 +11268,57 @@ fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
         assert!(worst < 0.3 * t as f32 + 0.7, "tick {t}: a bone {worst} ft off the csv");
         gap.push(dv);
     }
-    // The gap is set on the throw's tick and the entry, (-0.45, -2.8, +4.5) ft/s, and then holds: these
-    // bones rose at ~30 ft/s with the bike stopped under them (the teleport stops the bike, not the
-    // bones), which R14's bike at rest never shows. Pinned so a fix shows here.
+    // The gap is set on the throw's tick and the entry, (-0.45, -2.8, +4.5) ft/s, and then holds. It is
+    // the test's, not the port's (S466): the ride above keeps the drawn bike's root and holds at the
+    // image's, and the original's moves.
     for dv in &gap[throw + 1..] {
         assert!(dv[1] < -2.5 && dv[2] > 3.0, "the entry's velocity gap {dv:?}");
     }
+
+    // S466: the same ride with the request's root and holds handed in each tick as the shell hands
+    // them, read off the original's request on each row (context/capture/s466/south3-req.csv, the same
+    // run with research/r14_windmill_bones.py's `req`: every column of its 61 rows is this capture's).
+    // The image's root is rolled ~30 degrees off the chassis node (the drawn bike's air lean) and stays
+    // near it on tick 1; on the throw's tick the original's is back within a few degrees of the
+    // chassis. The spin the riding pose carries the bones round by is the bike's rates about the
+    // root's third axis: -20.48 rad/s about the image's, -22.30 about the original's (its request's
+    // own rates word). That 9% is the whole of the throw's tick's gap.
+    let Some(req) = columns_capture("s466", "south3-req") else { return };
+    for (got, want) in req.iter().zip(&rows) {
+        assert!(want.iter().all(|(k, v)| k == "same" || got.get(k).is_some_and(|g| g.to_bits() == v.to_bits())), "the req run is C37's on frame {}", want["frame"]);
+    }
+    let rates_z = req[w]["rates_z"];
+    assert!((rates_z + 22.298).abs() < 1e-3, "the original's spin on the throw's tick: {rates_z}");
+    let Some((_, bones, force)) = r24_ride_held("b15", "south3-bones", 23, 56, &s466_holds(&req)) else { return };
+    let force = force.expect("the wreck entered");
+    assert_eq!(force.to_bits()[..3], drawn.to_bits()[..3], "the port drew {force:?}, the original {drawn:?}");
+    let mut seen = Vec::new();
+    for (i, b) in bones.iter().enumerate() {
+        let t = i + 1;
+        let row = &rows[t + 1];
+        let (mut worst, mut dv) = (0.0f32, [0.0f32; 3]);
+        for (j, (p, v)) in b.bones.iter().enumerate() {
+            let (want, want_v) = (bone(row, j), bone_vel(row, j));
+            worst = worst.max(speed([p.x() - want[0], p.y() - want[1], p.z() - want[2]]));
+            for c in 0..3 {
+                dv[c] += (v[c] - want_v[c]) / b.bones.len() as f32;
+            }
+        }
+        seen.push(format!("s466 t{t:2}: down {} worst {worst:.3} mean dv ({:+.2},{:+.2},{:+.2}) touch {}", b.down, dv[0], dv[1], dv[2], row["touch"]));
+        assert_eq!(b.down, row["riding"] == 0.0, "tick {t}: the port's bones down against the original's riding word");
+        // Measured: 0.010, 0.038 and 0.053 ft to the entry, the mean velocity under 0.6 ft/s off.
+        if t <= throw + 1 {
+            assert!(worst < 0.1 && dv.iter().all(|d| d.abs() < 1.0), "tick {t}: the bones apart:\n{}", seen.join("\n"));
+        }
+        // From the tick after the entry: the original's collisions 7 and 8 touch (row 5's touch word,
+        // 384), the port's do not, and the bones are 1.4 ft/s low in y from there (S473). Measured
+        // 0.21 ft that tick, 1.31 on tick 10, 1.99 by tick 23.
+        if t > throw + 1 {
+            assert!(worst < (0.25 * (t - throw) as f32).min(2.5), "tick {t}: the bones apart:\n{}", seen.join("\n"));
+            assert!(dv[1] < -1.0, "tick {t}: the touch's y gap closed (S473?):\n{}", seen.join("\n"));
+        }
+    }
+    println!("{}", seen.join("\n"));
 }
 
 // B19: R14's south-bones image once more, the port's riding body seeded from the original's actor.
@@ -13691,6 +13736,12 @@ fn r24_posed(st: &SaveState, body: &mut game_render::rider::Body, doll: &game_re
 /// shell would, held at the image's pose) and the game's generator taken from the image's
 /// word and stepped `draws` times. Also hands back the throw force the wreck drew.
 fn r24_ride(dir: &str, name: &str, ticks: usize, draws: u32) -> Option<(Vec<S211Tick>, Vec<B19Bones>, Option<Vf>)> {
+    r24_ride_held(dir, name, ticks, draws, &[])
+}
+
+/// [`r24_ride`] with the drawn bike's root and the four holds handed in each tick as a shell would
+/// (`held[t - 1]` for tick `t`, [`s466_holds`]) rather than kept at the image's.
+fn r24_ride_held(dir: &str, name: &str, ticks: usize, draws: u32, held: &[game_sim::ragdoll_riding::Holds]) -> Option<(Vec<S211Tick>, Vec<B19Bones>, Option<Vf>)> {
     let image = private_dir("capture").join(dir).join(format!("{name}-before.ram"));
     let mut bones = Vec::new();
     let mut force = None;
@@ -13707,7 +13758,7 @@ fn r24_ride(dir: &str, name: &str, ticks: usize, draws: u32) -> Option<(Vec<S211
             let (riding, holds) = b19_riding(st, &kit, &m);
             sim.rider.body.veh.state = riding.actor.clip;
             sim.rider.riding = Some(Box::new(riding));
-            sim.rider.holds = Some(Arc::new(holds));
+            sim.rider.holds = Some(Arc::new(held.first().copied().unwrap_or(holds)));
             let state = u64::from(st.word(0x0042_3b30).unwrap()) | u64::from(st.word(0x0042_3b34).unwrap()) << 32;
             let mut rng = game_sim::rng::Rng::from_state(state);
             for _ in 0..draws {
@@ -13730,10 +13781,31 @@ fn r24_ride(dir: &str, name: &str, ticks: usize, draws: u32) -> Option<(Vec<S211
             if let Some(d) = &r.ragdoll {
                 force.get_or_insert(d.ragdoll.launch.force);
             }
+            if let Some(h) = held.get(bones.len()) {
+                sim.rider.holds = Some(Arc::new(*h));
+            }
             sim.rider.skeleton = skeleton.borrow().clone();
         },
     )?;
     Some((ride, bones, force))
+}
+
+/// **The riding request's root and holds on each row of an r14_windmill_bones.py `req` capture**
+/// (S466): the request's frame (the bike model's "Bike" root node) and its hands and feet, each
+/// carried into the frame of the request's rows (the chassis node), as [`b19_riding`] reads them off
+/// an image. Tick `t`'s is row `t + 1`'s.
+fn s466_holds(rows: &[std::collections::HashMap<String, f32>]) -> Vec<game_sim::ragdoll_riding::Holds> {
+    let quad = |r: &std::collections::HashMap<String, f32>, k: &str| Vf::new(r[&format!("{k}x")], r[&format!("{k}y")], r[&format!("{k}z")], r[&format!("{k}w")]);
+    rows[2..]
+        .iter()
+        .map(|r| {
+            let m = Mat4([0, 1, 2, 3].map(|i| quad(r, &format!("rows{i}"))));
+            let frame = Mat4([0, 1, 2, 3].map(|i| quad(r, &format!("frame{i}"))));
+            let inv = math::inverse(&m).expect("the request's rows");
+            let local = |k: &str| math::transform_point(&inv, quad(r, &format!("{k}_")));
+            game_sim::ragdoll_riding::Holds { root: math::mul(&frame, &inv), hands: [local("hand0"), local("hand1")], feet: [local("foot0"), local("foot1")] }
+        })
+        .collect()
 }
 
 /// **R24: the bones follow the original through the windmill's throw.** R14's south-bones, ridden as
