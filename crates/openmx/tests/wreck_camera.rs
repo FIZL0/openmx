@@ -129,7 +129,7 @@ fn the_wreck_camera_frames_the_rider_at_the_original_distance() {
     assert!(cam.switch(Some(&targets), c.reason.0, &mut race.cam), "a wreck switches the screen to the wreck camera");
     let mut view = None;
     for _ in 0..60 * 20 {
-        view = Some(cam.update(DT, &targets, false, 2.4, &curve, &mut Flat));
+        view = Some(cam.update(DT, &targets, false, 2.4, &mut Flat));
     }
     let view = view.unwrap();
     let want = WreckCamera::fitting_distance(13.0 * 1.5, 80.0);
@@ -160,7 +160,7 @@ fn a_near_bike_widens_the_shot() {
     let mut cam = WreckCamera::new(false);
     cam.switch(Some(&targets), 7, &mut race.cam);
     for _ in 0..60 * 30 {
-        cam.update(DT, &targets, false, 2.4, &curve, &mut Flat);
+        cam.update(DT, &targets, false, 2.4, &mut Flat);
     }
     let (point, _, active) = cam.target(DT, &targets);
     assert_eq!(active, 2);
@@ -185,7 +185,7 @@ fn back_on_the_follow_camera_has_the_bike() {
         riding = race.update(F(DT), &ridden(v(0.0, 3.0, -5.0)), F(2.4), &curve, Switches::default(), &mut Flat);
     }
     assert!(cam.switch(Some(&targets), 7, &mut race.cam));
-    let first = cam.update(DT, &targets, false, 2.4, &curve, &mut Flat);
+    let first = cam.update(DT, &targets, false, 2.4, &mut Flat);
     assert!(
         dist(first.position, riding.position) < 1.5,
         "the wreck camera starts where the follow camera was: {:?} against {:?}",
@@ -194,7 +194,7 @@ fn back_on_the_follow_camera_has_the_bike() {
     );
     for _ in 0..120 {
         assert!(cam.switch(Some(&targets), 7, &mut race.cam));
-        cam.update(DT, &targets, false, 2.4, &curve, &mut Flat);
+        cam.update(DT, &targets, false, 2.4, &mut Flat);
     }
     // The rider respawns at the start line, far from the wreck.
     let start = v(500.0, 3.0, 500.0);
@@ -206,8 +206,8 @@ fn back_on_the_follow_camera_has_the_bike() {
     assert!(!cam.on);
     // The next wreck switches again.
     assert!(cam.switch(Some(&targets), 13, &mut race.cam));
-    assert!((cam.eye[0].tau.0 - 0.2).abs() < 1e-6, "a cannonball's eye lags 0.2 s");
-    assert!((cam.look[1].tau.0 - 0.23 * 0.75 * 0.9).abs() < 1e-6, "and its look-at's height 0.155 s");
+    assert!((cam.eye[0].tau - 0.2).abs() < 1e-6, "a cannonball's eye lags 0.2 s");
+    assert!((cam.look[1].tau - 0.23 * 0.75 * 0.9).abs() < 1e-6, "and its look-at's height 0.155 s");
 }
 
 /// Per player: two screens' wreck cameras are two cameras, each switched by its own rider.
@@ -220,7 +220,7 @@ fn each_player_has_their_own_wreck_camera() {
     fb.cam.snap = false;
     assert!(a.switch(Some(&targets), 7, &mut fa.cam));
     assert!(!b.switch(None, 0, &mut fb.cam));
-    a.update(DT, &targets, true, 2.4, &curve, &mut Flat);
+    a.update(DT, &targets, true, 2.4, &mut Flat);
     assert!(a.on && !b.on);
     assert!(!fb.cam.snap, "the riding player's camera is left alone");
 }
@@ -241,10 +241,67 @@ fn the_field_of_view_starts_from_the_screens() {
     let mut cam = WreckCamera::new(false);
     assert!(cam.switch(Some(&targets), 7, &mut race.cam));
     assert!((cam.base_fov - 85.0).abs() < 0.01, "the base is the follow camera's {}", cam.base_fov);
-    let first = cam.update(DT, &targets, false, 2.4, &curve, &mut Flat).fov.0;
+    let first = cam.update(DT, &targets, false, 2.4, &mut Flat).fov.0;
     assert!(first > 80.0 && first < 80.2, "the lag eases from its 80 towards the clamped 82: {first}");
     for _ in 0..60 * 20 {
-        let fov = cam.update(DT, &targets, false, 2.4, &curve, &mut Flat).fov.0;
+        let fov = cam.update(DT, &targets, false, 2.4, &mut Flat).fov.0;
         assert!(fov <= 82.0 + 1e-4, "the field of view went past the widest: {fov}");
+    }
+}
+
+// --- V124: the wreck camera in the host's arithmetic ---------------------------------------------------
+
+/// A generator for the cases: the low 24 bits of a 64-bit LCG as a number in `0..1`.
+fn unit_draws(seed: u64) -> impl FnMut() -> f32 {
+    let mut s = seed;
+    move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (s >> 40) as f32 / (1u64 << 24) as f32
+    }
+}
+
+/// The wreck camera's aim turns as the original's rotation through the engine's sine table does, over
+/// 10,000 generated angles, unit axes and vectors: within 1e-5 of the vector's size.
+#[test]
+fn the_wreck_aim_turns_as_the_originals_rotation() {
+    let curve = CurveTable::build();
+    let mut u = unit_draws(124);
+    let mut worst = 0.0f32;
+    for _ in 0..10_000 {
+        let angle = (u() * 2.0 - 1.0) * std::f32::consts::PI;
+        let axis = loop {
+            let a = [u() * 2.0 - 1.0, u() * 2.0 - 1.0, u() * 2.0 - 1.0];
+            let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            if l > 0.1 && l <= 1.0 {
+                break a.map(|c| c / l);
+            }
+        };
+        let w = [(u() * 2.0 - 1.0) * 50.0, (u() * 2.0 - 1.0) * 50.0, (u() * 2.0 - 1.0) * 50.0];
+        let ours = chase::rotate(angle, axis, w);
+        let theirs = game_sim::camera::rotate(F(angle), Vf::new(axis[0], axis[1], axis[2], 0.0), v(w[0], w[1], w[2]), &curve);
+        let size = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt().max(1.0);
+        let off = dist(v(ours[0], ours[1], ours[2]), theirs) / size;
+        worst = worst.max(off);
+        assert!(off < 1e-5, "{angle} about {axis:?} of {w:?}: ours {ours:?}, the original's {theirs:?}");
+    }
+    eprintln!("worst {worst:e}");
+}
+
+/// The wreck camera's lags step as the original's camera lag does, over 100 generated lags of 100
+/// frames each, with frames shorter and longer than the time constant, values and targets within ±500 ft:
+/// within 1e-5 of that range. The PS2's adds round toward zero, a few of the range's ULPs a step.
+#[test]
+fn the_wreck_lags_step_as_the_originals() {
+    let mut u = unit_draws(31);
+    for _ in 0..100 {
+        let (value, tau) = ((u() * 2.0 - 1.0) * 500.0, 0.05 + u() * 0.8);
+        let mut ours = chase::WreckLag { value, tau };
+        let mut theirs = game_sim::camera::Lag::new(F(tau));
+        theirs.set_value(F(value));
+        for _ in 0..100 {
+            let (target, dt) = ((u() * 2.0 - 1.0) * 500.0, u() * 0.1);
+            let (a, b) = (ours.step(target, dt), theirs.step(F(target), F(dt)).0);
+            assert!((a - b).abs() <= 1e-5 * 500.0, "{a} against the original's {b}");
+        }
     }
 }

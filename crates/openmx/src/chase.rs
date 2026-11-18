@@ -565,9 +565,9 @@ pub struct WreckCamera {
     pub on: bool,
     /// The 16:9 tuning: a nearer radius for the second target, a lower look-at lag ratio.
     pub wide: bool,
-    pub eye: [game_sim::camera::Lag; 3],
-    pub look: [game_sim::camera::Lag; 3],
-    pub fov: game_sim::camera::Lag,
+    pub eye: [WreckLag; 3],
+    pub look: [WreckLag; 3],
+    pub fov: WreckLag,
     /// The look-at before the lags, which the deadband holds.
     pub look_at: [f32; 3],
     pub distance: f32,
@@ -630,6 +630,17 @@ fn vf(v: [f32; 3]) -> Vf {
     Vf::new(v[0], v[1], v[2], 1.0)
 }
 
+/// `v` turned by `angle` radians about the unit `axis`, right-handed (Rodrigues): the wreck camera's
+/// aim (V124), in the host's arithmetic. The original turns it through the engine's sine table in the
+/// PS2's (`game_sim::camera::rotate`); nothing reads the wreck camera back, so the picture needs only
+/// the same turn.
+pub fn rotate(angle: f32, axis: [f32; 3], v: [f32; 3]) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    let along = mul(axis, dot(axis, v));
+    let perp = sub(v, along);
+    add(along, add(mul(cross(axis, perp), sin), mul(perp, cos)))
+}
+
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -656,13 +667,30 @@ fn ease(k: f32, dt: f32) -> f32 {
     1.0 - (1.0 - k).powf(dt / WRECK_FRAME)
 }
 
+/// One of the wreck camera's lags (V124): the original's camera lag
+/// ([`game_sim::camera::Lag`]) in the host's arithmetic, as the wreck camera is the shell's alone
+/// and nothing reads it back. Each frame it moves `min(dt, tau) / tau` of the way to its target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WreckLag {
+    pub value: f32,
+    /// The time constant, seconds; never 0 here.
+    pub tau: f32,
+}
+
+impl WreckLag {
+    pub fn step(&mut self, target: f32, dt: f32) -> f32 {
+        self.value += dt.min(self.tau) / self.tau * (target - self.value);
+        self.value
+    }
+}
+
 impl WreckCamera {
     /// The camera as its constructor and setup leave it: off, aimed straight along the way the
     /// targets go, at its base field of view.
     pub fn new(wide: bool) -> WreckCamera {
-        let lag = |tau: f32| game_sim::camera::Lag::new(F(tau));
+        let lag = |tau: f32| WreckLag { value: 0.0, tau };
         let mut fov = lag(WRECK_FOV_TAU);
-        fov.value = F(WRECK_BASE_FOV);
+        fov.value = WRECK_BASE_FOV;
         WreckCamera {
             on: false,
             wide,
@@ -732,12 +760,10 @@ impl WreckCamera {
         let ratio = Self::look_y_ratio(self.wide);
         let look_y_tau = if cannonball { look_tau * ratio * 0.9 } else { look_tau * ratio };
         for (lag, (value, tau)) in self.eye.iter_mut().zip(v3(eye).into_iter().zip([eye_tau; 3])) {
-            lag.set_value(F(value));
-            lag.set_tau(F(tau));
+            *lag = WreckLag { value, tau };
         }
         for (lag, (value, tau)) in self.look.iter_mut().zip(v3(look_at).into_iter().zip([look_tau, look_y_tau, look_tau])) {
-            lag.set_value(F(value));
-            lag.set_tau(F(tau));
+            *lag = WreckLag { value, tau };
         }
         // The activation: the distance and direction are the eye's from the targets' centre, the
         // look-at is where the lags hold it, the spread is measured afresh and the field of view's
@@ -824,7 +850,6 @@ impl WreckCamera {
         targets: &WreckTargets,
         short_view: bool,
         near: f32,
-        curve: &game_sim::camera::CurveTable,
         ground: &mut impl game_sim::camera::Surface,
     ) -> game_sim::camera::View {
         // The spread first: how far apart the targets are (with one, one and a half minimum
@@ -865,13 +890,12 @@ impl WreckCamera {
             let h = self.heading.unwrap_or([0.0, 0.0, 1.0]);
             [h[0], 0.0, h[2]]
         };
-        let along = vf(unit(from));
-        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let along = unit(from);
+        let up = [0.0, 1.0, 0.0];
         // `along × up`: the axis the pitch lifts the direction about.
-        let side = Vf::new(-along.z(), 0.0, along.x(), 0.0);
-        let turned = game_sim::camera::rotate(F(self.yaw), up, game_sim::camera::rotate(F(self.pitch), side, along, curve), curve);
+        let side = [-along[2], 0.0, along[0]];
+        let turned = rotate(self.yaw, up, rotate(self.pitch, side, along));
         // Not an ease: the new aim, a tenth of the turn past it.
-        let turned = v3(turned);
         self.direction = unit(add(turned, mul(sub(turned, self.direction), WRECK_DIRECTION_OVERSHOOT)));
 
         // The look-at: the point led by its velocity, held while it moves less than a foot.
@@ -885,18 +909,17 @@ impl WreckCamera {
         self.distance_offset = self.distance - self.min_distance();
         let eye = add(point, mul(self.direction, self.distance));
 
-        let dt = F(dt);
-        let look = [0, 1, 2].map(|i| self.look[i].step(F(self.look_at[i]), dt).0);
-        let mut eye = [0, 1, 2].map(|i| self.eye[i].step(F(eye[i]), dt).0);
-        let fov = self.fov.step(F(fov), dt);
+        let look = [0, 1, 2].map(|i| self.look[i].step(self.look_at[i], dt));
+        let mut eye = [0, 1, 2].map(|i| self.eye[i].step(eye[i], dt));
+        let fov = self.fov.step(fov, dt);
         // The eye's floor: never nearer the ground than the floor height.
         let height = WRECK_FLOOR.max(near * 3.0);
         let ground_y = ground.on_surface(vf(eye)).y();
         if eye[1] - ground_y < height {
             eye[1] = ground_y + height;
-            self.eye[1].set_value(F(eye[1]));
+            self.eye[1].value = eye[1];
         }
-        game_sim::camera::View { position: vf(eye), look_at: vf(look), fov }
+        game_sim::camera::View { position: vf(eye), look_at: vf(look), fov: F(fov) }
     }
 
     /// The field of view this frame, and its offset's walk: a spread that moved by a tenth of a foot
