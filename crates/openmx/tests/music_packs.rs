@@ -247,10 +247,36 @@ fn the_settings_choose_which_games_music_plays() {
     assert_eq!(row(&m, Key::MusicGame(2)).label, "MX vs. ATV Untamed \u{b7} 1 song");
     assert!((0..4).all(|i| row(&m, Key::MusicGame(i)).value == "On"));
     assert!(page.iter().all(|r| r.label != "Music From" && r.value != "A Mix"), "no Music From row any more");
-    // The Song row's list under game headings: each game's name beside its first song.
+    // The Song row's list under game headings: a heading line naming each game over its first song (P317a).
     let song = row(&m, Key::Song);
-    assert_eq!(song.tips, ["MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed", "Music Folder"]);
+    assert_eq!(song.heads, ["MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed", "Music Folder"]);
     assert_eq!(song.choices[0], "Breakdown - Disc Band", "the heading names the game, not the song");
+    // Open on One Song, the list's headings are lines the cursor and a click pass by.
+    m.settings.music = "disc:breakdown".into();
+    m.point_at_row("Song");
+    m.open_list();
+    let size = (1280, 720);
+    let at = m.cursor(Screen::Settings);
+    assert_eq!(m.listing(), Some((at, 0)));
+    let heads: Vec<usize> = (0..4).filter(|&k| m.list_head_point(k, size).is_some()).collect();
+    assert_eq!(heads, [0, 1, 2, 3], "a heading line over each game's first song");
+    assert!(m.list_head_point(0, size).unwrap()[1] < m.list_point(0, size).unwrap()[1], "the heading is over its song");
+    {
+        use game_sim::input::{Control, Report};
+        let mut r = menu::Reader::new();
+        m.step(r.read(&Report::idle()));
+        for want in [1, 2, 3, 0] {
+            for report in [Report::from_buttons(Control::Down.mask()), Report::idle(), Report::idle(), Report::idle()] {
+                m.step(r.read(&report));
+            }
+            assert_eq!(m.listing(), Some((at, want)), "Down steps song to song, over the headings");
+        }
+    }
+    assert!(m.click(m.list_head_point(2, size).unwrap(), size));
+    assert_eq!(m.listing(), Some((at, 0)), "a click on a heading picks nothing and keeps the list open");
+    assert!(m.click(m.list_point(2, size).unwrap(), size));
+    assert_eq!((m.listing(), m.settings.music.as_str()), (None, "mod:untamed_music/b"), "a click on a song picks it");
+    m.settings.music = String::new();
 
     // Only MX vs. ATV Unleashed's songs.
     for i in [0, 2, 3] {
