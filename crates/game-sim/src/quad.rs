@@ -4189,6 +4189,14 @@ impl<R: Moto + Default> Ride<R> {
             if let Some(h) = self.bike.contacts.take() {
                 r.held = h;
             }
+            // MD246: the knockable bodies as the resolution pushed them, back to their owners (in the
+            // order the refill took them), and out of the held list.
+            let mut pushed = std::mem::take(&mut r.held.bodies).into_iter();
+            for k in knocked.iter_mut().filter(|k| k.body.is_some()) {
+                if let Some(b) = pushed.next() {
+                    k.body = Some(b);
+                }
+            }
             // The bikes it met are this frame's (MD173): off the wire, and out of the hash with them,
             // so a seat's state hashes alike on a machine that decoded it.
             r.held.bikes.clear();
@@ -4441,7 +4449,10 @@ impl crate::handling::record::Collides for RecordOn<'_> {
 /// quad's pass files a hit on it with `id` as the other record, and the mirror of that hit on
 /// `record` ([`crate::handling::record::pass`]).
 ///
-/// The body is not moved here: nothing yet runs the body's own pass, its resolution or its step.
+/// MD246: with its `body` (its record's resolution fields and rigid body), the quad's resolution
+/// pushes it as it pushes the quad ([`crate::atv_contact::Held::refill_among`]); without one, a hit
+/// on it is not resolved. The body is not stepped here: nothing yet runs the body's own pass, its
+/// resolution or its step (its `frame` stays where it stood).
 #[derive(Clone, Debug)]
 pub struct Knockable {
     pub id: u32,
@@ -4449,13 +4460,19 @@ pub struct Knockable {
     pub facets: Vec<crate::ray_probe::Facet>,
     pub frame: [Vf; 4],
     pub record: crate::handling::record::Record,
+    pub body: Option<crate::atv_contact::Knocked>,
 }
 
 impl Knockable {
-    /// `mesh` standing at `frame`, its record `record` (named `id`).
+    /// `mesh` standing at `frame`, its record `record` (named `id`), with no body.
     pub fn new(id: u32, mesh: crate::track::Mesh, frame: [Vf; 4], record: crate::handling::record::Record) -> Knockable {
         let facets = crate::flight_search::facets(&mesh);
-        Knockable { id, mesh, facets, frame, record }
+        Knockable { id, mesh, facets, frame, record, body: None }
+    }
+
+    /// The same with its body (MD246).
+    pub fn with_body(self, body: crate::atv_contact::Knocked) -> Knockable {
+        Knockable { body: Some(body), ..self }
     }
 }
 
@@ -4958,8 +4975,10 @@ impl<R: Moto + Default> Ride<R> {
     /// [`Ride::record_on`] among knockable bodies (MD224, [`RecordAmong`]): the quad's hits on them
     /// filed naming their records, and the mirrors on those. Each body's list is emptied first (in
     /// the original each body's own pass clears it before the quad's runs; that pass is not run here).
-    /// With such a hit in the list the refill does not hold ([`crate::atv_contact::Held::refill`]):
-    /// the held list is empty and the gravity resolves nothing.
+    /// MD246: the held list holds the hits with the bodies struck as their other sides
+    /// ([`crate::atv_contact::Held::refill_among`]), which the gravity's call pushes every substep;
+    /// [`Ride::frame_among`] hands the pushed bodies back. A hit on a body without one
+    /// ([`Knockable::body`]) does not hold: the held list is empty and the gravity resolves nothing.
     pub fn record_among(&mut self, dt: F, world: &mut dyn crate::world::World, knocked: &mut [Knockable]) {
         let Some(r) = self.recorded.as_mut() else { return };
         for k in knocked.iter_mut() {
@@ -4977,7 +4996,8 @@ impl<R: Moto + Default> Ride<R> {
             (self.body.damping, self.body.ang_damping) = (linear, angular);
         }
         self.body.set_view(&view);
-        r.held.refill(&r.record.contacts);
+        let (bodies, ids): (Vec<_>, Vec<u32>) = knocked.iter().filter_map(|k| Some((k.body?, k.id))).unzip();
+        r.held.refill_among(&r.record.contacts, bodies, &ids);
         self.bike.contacts = Some(r.held.clone());
         self.bike.touching = r.record.touching;
         self.bike.struck_class = r.record.touching && r.record.struck != 0 && category & class != 0;

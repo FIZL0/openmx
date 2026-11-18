@@ -13652,3 +13652,15 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   through vt +0x98 from 0x004fe1e4 in the Linked effects item step 0x004fe010 (post-wreck; the in-frame
 #   calls come from 0x00128b68). Before the wreck's first frame these sum to 22 (race-jump, row 66) and 50
 #   (race-wheelie-launch, row 80), the lags R37/R41 found by inverting the spin.
+# MD246 — Untamed's (SLUS-21701) quad record resolution against a knockable bale's body (game_sim::atv_contact::
+# Held::bodies/refill_among, quad::Knockable::body; tests/untamed_race_quad.rs untamed_quad_resolves_its_hits_on_
+# the_bale_as_the_original, 10,000 cases + steer tick 197 in the interpreter on MD147's spawn image). Comment rows
+# only, as # MD81a. Journal: research/journal/2026-11-18-md246-quad-bale-resolve.
+#   Record vt 0x003db860 +0x88 = 0x00206170 (twin of 0x00205730); callees by call order, not diffed: relative 0x00206310 (0x002058d0), spring
+#   0x00206920 (0x00205f00), impulse 0x00206d40 (0x00206320), friction 0x00207690 (0x00206c70), damp 0x00207880
+#   (0x00206e60). Instruction diff: only the entry's other record +0x84 -> +0x80, mover +0x88 -> +0x84, kind lw ->
+#   lh +0, surface lw +0x80 -> lh +2, collidable flags +0x94 -> +0xc0, the other's node rows (no-body branch) +0x70
+#   -> +0xa0, the (0,0,0,1) constant 0x00396fc0 -> 0x003b5f60, and register allocation.
+#   Bale TripleBale02: record 0x00aac3d0 (collidable 0x00aab4c0 flags 0x3000), body 0x00aaa6c0 (mass 7.857, at
+#   rest until row 197, +0x0 flips then); quad record 0x01c326b0 (collidable flags 0x3012), both collide with
+#   0xffffffff, actors 0x1000: the contact is mutual.

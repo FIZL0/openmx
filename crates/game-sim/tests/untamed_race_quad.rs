@@ -883,7 +883,234 @@ fn bale(kit: &Kit, ee: &Ee) -> Option<game_sim::quad::Knockable> {
     let node = ee.u32_at(BALE + 0xe8);
     let rows: [Vf; 4] = std::array::from_fn(|k| v(ee, node + 0x60 + 0x10 * k as u32));
     let record = game_sim::handling::record::read(&|a| ee.u32_at(a), BALE);
-    Some(game_sim::quad::Knockable::new(BALE, mesh, rows, record))
+    Some(game_sim::quad::Knockable::new(BALE, mesh, rows, record).with_body(knocked(ee, BALE)))
+}
+
+/// MD246: Untamed's quad record's resolution, its vt `+0x88` (SLUS-21104's, the entry's fields moved:
+/// [`ENTRY_OTHER`]; research/oracle.txt `# MD246`).
+const RESOLVE: u32 = 0x0020_6170;
+/// Untamed's record list entry (`0x90` bytes): the kind a half-word at `+0`, the surface a signed
+/// half-word at `+2`, the other record at `+0x80`, the mover at `+0x84`. The ray, normal, point, arms
+/// and relative velocity sit where SLUS-21104's do.
+const ENTRY_OTHER: u32 = 0x80;
+const ENTRY_MOVER: u32 = 0x84;
+/// The collidable's flags (the record's `+0x208`), SLUS-21104's `+0x94`.
+const COLLIDABLE_FLAGS: u32 = 0xc0;
+
+/// The record at `rec` as [`game_sim::handling::record::held`] reads SLUS-21104's, at Untamed's
+/// collidable flags, its list left out.
+fn untamed_held(ee: &Ee, rec: u32) -> game_sim::atv_contact::Held {
+    let c = ee.u32_at(rec + 0x208);
+    let w = |a: u32| match a {
+        _ if a == rec + 0xf0 => 0,
+        _ if c != 0 && a == c + 0x94 => ee.u32_at(c + COLLIDABLE_FLAGS),
+        _ => ee.u32_at(a),
+    };
+    game_sim::handling::record::held(&w, rec).expect("a list left out")
+}
+
+/// A knockable body as the quad's resolution pushes it: the record at `rec` and its body (`+0xe4`),
+/// the body's mass and its centre of mass (`+0x1a0`).
+fn knocked(ee: &Ee, rec: u32) -> game_sim::atv_contact::Knocked {
+    let h = untamed_held(ee, rec);
+    let body = ee.u32_at(rec + 0xe4);
+    game_sim::atv_contact::Knocked { collider: h.record.collider, body: h.body.expect("a body"), mass: h.mass, cofg: v(ee, body + 0x1a0) }
+}
+
+/// The quad's record at `rec` as the gravity's call holds it: [`untamed_held`] with its list read at
+/// Untamed's layout, each entry's other one of `others` (as [`game_sim::atv_contact::Held::bodies`]),
+/// and those records' bodies.
+fn untamed_quad_held(ee: &Ee, rec: u32, others: &[u32]) -> game_sim::atv_contact::Held {
+    let mut h = untamed_held(ee, rec);
+    let list = ee.u32_at(rec + 0xf8);
+    h.entries = (0..ee.u32_at(rec + 0xf0))
+        .map(|k| {
+            let e = list + 0x90 * k;
+            assert_eq!(ee.u32_at(e + ENTRY_MOVER), 0, "a contact with a mover");
+            let other = ee.u32_at(e + ENTRY_OTHER);
+            let contact = game_sim::contact::Contact {
+                kind: u32::from(ee.u16_at(e)),
+                from: v(ee, e + 0x10),
+                on_body: v(ee, e + 0x20),
+                normal: v(ee, e + 0x30),
+                point: v(ee, e + 0x40),
+                arm: v(ee, e + 0x50),
+                other_arm: v(ee, e + 0x60),
+                surface: i32::from(ee.u16_at(e + 2) as i16),
+                other: (other != 0).then(|| others.iter().position(|&o| o == other).expect("an other record held")),
+                mover: None,
+            };
+            game_sim::atv_contact::Entry { contact, relative: v(ee, e + 0x70) }
+        })
+        .collect();
+    h.bodies = others.iter().map(|&o| knocked(ee, o)).collect();
+    h
+}
+
+/// `h`'s list written at Untamed's layout over the record at `rec`'s, naming `others`' records.
+fn put_entries(ee: &mut Ee, rec: u32, h: &game_sim::atv_contact::Held, others: &[u32]) {
+    let list = ee.u32_at(rec + 0xf8);
+    ee.set_u32(rec + 0xf0, h.entries.len() as u32);
+    for (k, en) in h.entries.iter().enumerate() {
+        let (e, c) = (list + 0x90 * k as u32, &en.contact);
+        ee.set_u32(e, (c.kind & 0xffff) | ((c.surface as u32) << 16));
+        for (at, q) in [(0x10, c.from), (0x20, c.on_body), (0x30, c.normal), (0x40, c.point), (0x50, c.arm), (0x60, c.other_arm), (0x70, en.relative)] {
+            put_v(ee, e + at, q);
+        }
+        ee.set_u32(e + ENTRY_OTHER, c.other.map_or(0, |k| others[k]));
+        ee.set_u32(e + ENTRY_MOVER, 0);
+    }
+}
+
+/// A deterministic generator for the cases (tests/atv_contact.rs's).
+struct Pick(u64);
+
+impl Pick {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * ((self.next() >> 40) as f32 / (1u64 << 24) as f32)
+    }
+    fn one_in(&mut self, n: u64) -> bool {
+        self.next() % n == 0
+    }
+    /// `x` with each lane moved by up to `by`, `w` kept.
+    fn near(&mut self, x: Vf, by: f32) -> Vf {
+        Vf::new(x.0[0] + self.range(-by, by), x.0[1] + self.range(-by, by), x.0[2] + self.range(-by, by), x.0[3])
+    }
+    /// A unit direction near `n`, `w` kept.
+    fn aim(&mut self, n: Vf, by: f32) -> Vf {
+        let r = self.near(n, by);
+        let l = (0..3).map(|k| r.0[k] * r.0[k]).sum::<f32>().sqrt();
+        Vf::new(r.0[0] / l, r.0[1] / l, r.0[2] / l, n.0[3])
+    }
+    /// A unit quaternion near `q`.
+    fn turn(&mut self, q: Vf, by: f32) -> Vf {
+        let r = Vf::new(q.0[0] + self.range(-by, by), q.0[1] + self.range(-by, by), q.0[2] + self.range(-by, by), q.0[3] + self.range(-by, by));
+        let n = (0..4).map(|k| r.0[k] * r.0[k]).sum::<f32>().sqrt();
+        Vf::new(r.0[0] / n, r.0[1] / n, r.0[2] / n, r.0[3] / n)
+    }
+}
+
+/// MD246: the quad's resolution of its hits on the bale ([`game_sim::atv_contact::Held::resolve`]
+/// among [`game_sim::atv_contact::Held::bodies`]) against Untamed's own ([`RESOLVE`]) in the
+/// interpreter. Case 0 is steer's tick 197 as its gravity's first call meets it: the port's pass's two
+/// hits on the still bale (MD224's, the original's row 197 bit for bit), the quad's body after tick 196
+/// (row 196's) and the bale's record and body from the spawn image. The other cases move both bodies
+/// (place, speed, spin, turn), the contacts' normals and points, their kinds and how many: the
+/// impulse and the spring both run. Every word the port writes (both bodies, each entry's arms and
+/// relative velocity, the records' centres in the world, the quad record's normal speed and relative
+/// velocity) is the original's, and the original writes nothing else.
+#[test]
+fn untamed_quad_resolves_its_hits_on_the_bale_as_the_original() {
+    use game_sim::atv_contact::Held;
+    let Some(kit) = kit() else { return };
+    let Some(rows) = rows_in(&kit, "md224", "steer") else { return };
+    let Some(mut s) = setup(&kit, "spawn") else { return };
+    let Some(bale) = bale(&kit, &s.world.ee) else { return };
+    let Some(mut ee) = image(&kit, "spawn") else { return };
+    let mut knocked = [bale];
+    let dt = F(f32::from_bits(DT));
+    for r in rows.iter().take(197) {
+        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked);
+    }
+    assert_eq!(knocked[0].body, Some(self::knocked(&ee, BALE)), "the bale's body moved before the quad struck it");
+    // Tick 197's pass: two hits on the bale, held with the bale's body.
+    let before = (s.ride.clone(), knocked.clone());
+    let Some(ee0) = image(&kit, "spawn") else { return };
+    s.ride.record_among(dt, &mut s.world, &mut knocked);
+    let held = s.ride.recorded.as_ref().expect("the quad's record").held.clone();
+    assert_eq!(held.entries.len(), 2, "the hits held on tick 197");
+    assert!(held.entries.iter().all(|e| e.contact.other == Some(0)) && held.bodies.len() == 1, "each hit's other side is the bale's body");
+
+    let rec = ee.u32_at(QUAD + 0xf8);
+    let (quad_body, bale_body) = (ee.u32_at(rec + 0xe4), ee.u32_at(BALE + 0xe4));
+    assert_eq!(ee.u32_at(ee.u32_at(rec + 4) + 0x88), RESOLVE, "the quad record's vt +0x88");
+    // The quad's record from its files is the image's, but for what the resolution writes first and
+    // the inverse inertia: the part reader's box is read at the start spot (MD134), and this test makes
+    // the quad at the settled one, heading +z, so it is some 36 ulps off (MD250). The cases below read
+    // the image's.
+    let fresh = |c: &game_sim::contact::Collider| game_sim::contact::Collider { cofg_world: Vf::ZERO, normal_speed: F::ZERO, relative: Vf::ZERO, inv_inertia: Vf::ZERO, ..*c };
+    let image_record = untamed_held(&ee, rec).record;
+    assert_eq!(fresh(&held.record.collider), fresh(&image_record.collider), "the quad's record is not the image's");
+    assert_eq!(held.record.impulse_mask.to_bits(), image_record.impulse_mask.to_bits(), "the quad's impulse mask");
+
+    let mut p = Pick(0x4d32_4624_6b61_6c65);
+    let (mut impulses, mut springs) = (0, 0);
+    for case in 0..10_000 {
+        // The case written into the image: the quad's list, its body (and centre of mass), the bale's body.
+        let mut quad = s.ride.body;
+        let mut bale = held.bodies[0].body;
+        let mut h = held.clone();
+        let cofg = s.ride.bike.cofg;
+        if case > 0 {
+            quad.position = p.near(quad.position, 1.0);
+            quad.velocity = p.near(quad.velocity, 30.0);
+            quad.rates = p.near(quad.rates, 4.0);
+            quad.quat = p.turn(quad.quat, 0.3);
+            bale.position = p.near(bale.position, 1.0);
+            bale.velocity = p.near(bale.velocity, 20.0);
+            bale.rates = p.near(bale.rates, 3.0);
+            bale.quat = p.turn(bale.quat, 0.3);
+            for e in &mut h.entries {
+                e.contact.normal = p.aim(e.contact.normal, 0.2);
+                e.contact.point = p.near(e.contact.point, 0.5);
+                e.contact.kind = u32::from(p.one_in(4));
+            }
+            if p.one_in(3) {
+                h.entries.truncate(1);
+            }
+        }
+        for (a, w) in seed::body_words(&quad, quad_body).into_iter().chain(seed::body_words(&bale, bale_body)) {
+            ee.set_u32(a, w);
+        }
+        put_v(&mut ee, quad_body + 0x1a0, cofg);
+        put_entries(&mut ee, rec, &h, &[BALE]);
+
+        // The port on what the image now holds, then the original.
+        let mut port = untamed_quad_held(&ee, rec, &[BALE]);
+        assert!(port.resolve(v(&ee, quad_body + 0x1a0)), "case {case}: the port did not resolve");
+        ee.written.clear();
+        ee.call(RESOLVE, &[u64::from(rec), 1], &[], 400_000);
+
+        let mut compared = std::collections::BTreeSet::new();
+        let bale_held = Held { record: game_sim::atv_contact::Record { collider: port.bodies[0].collider, ..Default::default() }, body: Some(port.bodies[0].body), ..Default::default() };
+        let words = |a: u32| ee.u32_at(a);
+        let mine = game_sim::handling::record::held_words(&port, rec, &words).into_iter().chain(game_sim::handling::record::held_words(&bale_held, BALE, &words));
+        for (a, w) in mine {
+            assert_eq!(w, ee.u32_at(a), "case {case}: the port wrote {w:#010x} at {a:#x}, the original {:#010x}", ee.u32_at(a));
+            compared.extend(a..a + 4);
+        }
+        let stray: Vec<u32> = ee.written.iter().copied().filter(|&a| !(ee.stack - 0x4000..ee.stack).contains(&a) && !compared.contains(&a)).collect();
+        assert!(stray.is_empty(), "case {case}: the original wrote what the port does not: {:x?}", &stray[..stray.len().min(16)]);
+        // The last contact's normal speed says which way it was resolved.
+        if port.record.collider.normal_speed < F(-10.0) {
+            impulses += 1;
+        } else {
+            springs += 1;
+        }
+        if case == 0 {
+            // The quad leaves the bale's top at some 22 ft/s along the normal: past the spring's reach,
+            // so neither body is pushed (the bale's shove is its own resolution's, MD247).
+            assert!(port.record.collider.normal_speed > F::ZERO, "tick 197: the quad is not leaving the bale");
+            assert_eq!(port.body.map(|b| (b.velocity, b.force)), Some((quad.velocity, quad.force)), "tick 197: the quad was pushed");
+            assert_eq!(port.bodies[0].body, bale, "tick 197: the bale was pushed");
+        }
+    }
+    assert!(impulses > 500 && springs > 500, "the cases ran {impulses} impulses and {springs} springs");
+
+    // The whole tick: the gravity's call resolves the two hits every substep with the bale held, and
+    // the bale's body comes back to it as it went (still), out of the quad's held list.
+    let (mut ride, mut knocked) = before;
+    let calls = ride.rest.len();
+    ride.step_among(&controls(&rows[197]), dt, &mut s.world, s.segments, &mut knocked);
+    assert!(!ride.rest[calls..].contains(&Call::GravityRecord), "the gravity's call was not answered on tick 197");
+    assert_eq!(knocked[0].body, Some(self::knocked(&ee0, BALE)), "the bale's body after tick 197");
+    assert!(ride.recorded.as_ref().is_some_and(|r| r.held.bodies.is_empty() && r.held.entries.len() == 2), "the held list after tick 197");
 }
 
 /// One entry of a captured record list (Untamed's layout, research/journal/*md224*): the kind (a
