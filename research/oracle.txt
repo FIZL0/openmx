@@ -1349,8 +1349,18 @@ prop_bound_rebuild          boot 0x001a17e0 the prop node class's (vt 0x0044f870
 #                                           node_bounds_merge 0x001b42a0 with its last argument 0 (the
 #                                           children's own children are not walked), centre +0xe0,
 #                                           half +0xf0, radius +0x118 = sqrt(mula/madda/madd of half
-#                                           xyz), bit 6 set when > 0. Sphere branch (bit 4): unported.
-#                                           S297: race::PropBound::query
+#                                           xyz), bit 6 set when > 0. Sphere branch (bit 4, S324):
+#                                           own sphere (0x001b3060 of +0xc0, radius +0x114) when bit 2,
+#                                           else radius 0 and the centre an unwritten stack word; each
+#                                           array child through prop_sphere_merge with last argument 0;
+#                                           +0xe0 = 0x001b3180 of the centre, +0xf0..+0xf8 = radius
+#                                           (+0xfc kept), +0x118 = radius, bit 6 when > 0.
+#                                           S297/S324: race::PropBound::query
+prop_sphere_merge           boot 0x001b4110 (node, &centre, &radius, walk) a node's sphere into a running
+#                                           one, only when the node's bit 2 is set: radius <= 0 -> take
+#                                           its sphere (0x001b3060 of +0xc0, +0x114); else radius =
+#                                           max(radius, max|centre' - centre|.xyz + +0x114), centre kept.
+#                                           walk != 0 also walks +0x104/+0x108 children. S324
 toy_list                    boot 0x004e18c0 -> the track's toy list (count +0x30, array +0x38; toy +0x30
 #                                           its name, +0xb0 -> +0x30 its model node). sx01's FinishGate
 #                                           is a toy (tracks\sx01\anim\thq_finishgatenarrow.psg)

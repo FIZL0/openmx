@@ -4025,14 +4025,16 @@ impl PropBound {
     /// `sqrt(hx² + hy² + hz²)` by the FPU's accumulator, and [`bound_flags::SIZED`] is set when that is
     /// above zero (never cleared).
     ///
-    /// `None` for a stale sphere-bounded node ([`bound_flags::SPHERE`]): that rebuild (each child's
-    /// sphere carried into the node) is not ported, and no gate prop seen has one.
-    pub fn query(&mut self, node: &crate::prop_world::BoundsNode) -> Option<(Vf, Vf)> {
+    /// A sphere-bounded node ([`bound_flags::SPHERE`]) rebuilds as a sphere instead, from its own
+    /// sphere and its children's (`radii`, see [`PropBound::sphere`]); the box rebuild does not read
+    /// `radii`.
+    pub fn query(&mut self, node: &crate::prop_world::BoundsNode, radii: SphereRadii) -> (Vf, Vf) {
         use bound_flags::*;
         let f = self.flags;
         if f & STALE != 0 && (f & REBUILD != 0 || f & SIZED == 0) {
             if f & SPHERE != 0 {
-                return None;
+                self.sphere(node, radii);
+                return (self.centre, self.half);
             }
             use crate::prop_world::BoundsNode;
             let alone = |c: &BoundsNode| BoundsNode { own: c.own, world: c.world, children: Vec::new() };
@@ -4048,8 +4050,82 @@ impl PropBound {
             }
             self.flags &= !STALE;
         }
-        Some((self.centre, self.half))
+        (self.centre, self.half)
     }
+
+    /// **The sphere rebuild** of a stale sphere-bounded node, as [`PropBound::query`] runs it. The
+    /// sphere starts as the node's own (its own box's centre, `+0xc0`, through its world rows, and
+    /// `radii.own`) when it has a box ([`bound_flags::BOXED`]), else at radius 0. Then each child of
+    /// the node's child array that has a box, in order, and not their children:
+    /// - while the radius is not above zero, the child's sphere replaces it (centre and radius);
+    /// - else the radius grows to the child's radius plus the longest of `|dx|`, `|dy|`, `|dz|` from
+    ///   the kept centre to the child's, when that is more; the centre stays where it is.
+    ///
+    /// The node keeps the centre taken back into its own frame, the radius in the half extent's
+    /// `x`, `y` and `z` (its `w` kept) and as the radius, [`bound_flags::SIZED`] set when it is above
+    /// zero (never cleared), and the stale bit cleared.
+    ///
+    /// With no box on the node or any child the original's centre is a stack word nothing wrote; the
+    /// port starts it at `(0, 0, 0, 1)`.
+    fn sphere(&mut self, node: &crate::prop_world::BoundsNode, radii: SphereRadii) {
+        use crate::prop_world::BoundsNode;
+        assert_eq!(radii.children.len(), node.children.len(), "a radius for each child");
+        let at = |n: &BoundsNode| n.own.map(|b| orientation_point(&n.world, b.centre));
+        let (mut centre, mut radius) = (Vf::VF0, F::ZERO);
+        if let Some(c) = at(node) {
+            (centre, radius) = (c, radii.own);
+        }
+        for (child, &r) in node.children.iter().zip(radii.children) {
+            let Some(c) = at(child) else { continue };
+            if le(radius, F::ZERO) {
+                (centre, radius) = (c, r);
+                continue;
+            }
+            let grown = F(fpu::add(ps2_float::vu::max_abs3(c.sub(centre).0), r.0));
+            if !le(grown, radius) {
+                radius = grown;
+            }
+        }
+        self.centre = unpoint(&node.world, centre);
+        self.half = self.half.merge(Dest::XYZ, Vf::splat(radius.0));
+        self.radius = radius;
+        if !le(radius, F::ZERO) {
+            self.flags |= bound_flags::SIZED;
+        }
+        self.flags &= !bound_flags::STALE;
+    }
+}
+
+/// What the sphere rebuild ([`PropBound::query`] on a [`bound_flags::SPHERE`] node) reads beside the
+/// node's tree: the node's own sphere radius (`+0x114`) and each array child's, in the child array's
+/// order. The box rebuild reads neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SphereRadii<'a> {
+    pub own: F,
+    pub children: &'a [F],
+}
+
+/// A node's point into the world, as the transform's point call does it: the origin into the
+/// accumulator (`vaddax` of `vf0`'s zero `x`), then rows 0, 1 and 2 times the point's `x`, `y` and
+/// `z`; `w` the point's.
+fn orientation_point(m: &crate::math::Mat4, v: Vf) -> Vf {
+    use ps2_float::Field;
+    let acc = m.0[3].add(Vf::VF0.bc(Field::X));
+    let acc = Vf::madd(acc, m.0[0], v.bc(Field::X));
+    let acc = Vf::madd(acc, m.0[1], v.bc(Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m.0[2], v.bc(Field::Z)))
+}
+
+/// A world point back into a node's frame, as the transform's unpoint call does it: the origin taken
+/// off (`w` the point's), then the rotation's transpose (lanes moved, not added), `vmulax` first.
+fn unpoint(m: &crate::math::Mat4, p: Vf) -> Vf {
+    use ps2_float::Field;
+    let [r0, r1, r2, r3] = m.0;
+    let d = p.merge(Dest::XYZ, p.sub(r3));
+    let (a, b, c) = (Vf::new(r0.x(), r1.x(), r2.x(), 0.0), Vf::new(r0.y(), r1.y(), r2.y(), 0.0), Vf::new(r0.z(), r1.z(), r2.z(), 0.0));
+    let acc = a.mul(d.bc(Field::X));
+    let acc = Vf::madd(acc, b, d.bc(Field::Y));
+    d.merge(Dest::XYZ, Vf::madd(acc, c, d.bc(Field::Z)))
 }
 
 impl Prop {
