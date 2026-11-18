@@ -8,10 +8,10 @@ const U_BAJA_VTABLE: u32 = 0x003f_09d0;
 /// The player's sandrail in MD81f's spawn image (Free Ride, Rocksbury).
 const SANDRAIL: u32 = 0x01be_46c0;
 
-const S_THROTTLE: UDrive = UDrive { set: "md81f", name: "throttle", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE };
-const S_THROTTLE_2: UDrive = UDrive { set: "md81f", name: "throttle-2", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE };
-const S_STEER: UDrive = UDrive { set: "md81f", name: "steer", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE };
-const S_JUMP: UDrive = UDrive { set: "md81f", name: "jump", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE };
+const S_THROTTLE: UDrive = UDrive { set: "md81f", name: "throttle", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE, before: true };
+const S_THROTTLE_2: UDrive = UDrive { set: "md81f", name: "throttle-2", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE, before: true };
+const S_STEER: UDrive = UDrive { set: "md81f", name: "steer", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE, before: true };
+const S_JUMP: UDrive = UDrive { set: "md81f", name: "jump", image: "spawn", car: SANDRAIL, vtable: U_BAJA_VTABLE, before: true };
 
 /// The interpreter's frames against MD81f's capture. This recorder reads each row before its frame
 /// (row 0 is the spawn image), so every row is the interpreter's after the frames before it, bit for
