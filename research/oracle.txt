@@ -1735,6 +1735,19 @@ player_construct            boot 0x00369b00 the player constructor spawn_racers 
 #                                           AI identity entry 0, +0x6bc skill 1, +0x6c0 0. The spawn then
 #                                           calls vt+0xb8 (player, kind 1 human/2 AI/3 ghost) and the
 #                                           manager's vt+0x74 add (S12a)
+spawn_racers_career         boot 0x002081d0 spawn_racers with event +0x116 set (S12f, ai::spawn_career_roster):
+#                                           round = *( *(app+0x3f4) +0xb0 ) +0x5c (0x0036c0b0 = the
+#                                           career's +0x5c getter; app+0x3f4 is the per-player profile
+#                                           pointer array, [0] at +0x3f4 itself). Round +0 == 0: saved
+#                                           roster, count = byte +0x68 -> NumberOfRacers (humans not
+#                                           added); for i in 1..count AI rider i: entry *(round+0x48+4i)
+#                                           -> +0x6b8 = entry+0x74, +0x6bc = entry+0x78; no draws.
+#                                           Round +0 != 0: champ = *(round+4) (0x00369cb0, a0 = round);
+#                                           skill range as the default path; NumberOfRacers = humans +
+#                                           champ+0x38; AI rider i: +0x6b8 = champ+0x2c+4i, +0x6bc drawn.
+#                                           Room: 7 saved entries (+0x4c..+0x64), 3 champ (+0x2c..+0x34).
+#                                           Standings screen 0x0029ea60 reads round+0x6c+4i records whose
+#                                           +0x74 names a rider (0x00373340) when record+0 != 0
 ai_update_mx                boot 0x00386d30 MXVehicleAI.cpp per-tick update, and
 ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look-ahead feeler fan and
 #                                           run the per-rider avoidance scan when
@@ -4749,7 +4762,7 @@ plane_refresh_search boot 0x0015b210 the plane collision owner's (plane+0x50) vt
 # Pointers: app = *(0x0041f770). app+0x3d4 settings: +0 NumberOfRacers, +8 the viewport-mode object
 # (+4 split mode 0 single / 1 horizontal / 2 vertical, +0x10 a flag forcing a 16:9 aspect), +0xc the
 # event (+0 league, +4 activity type, +0x10c bike class (R7), +0x114 human players, +0x116 (0: the AI made
-# by difficulty; else spawn_racers takes them from a list off app+0x3f4, not read), +0x117 AI difficulty, +0x134+i*4 player i's camera choice), +0x10 the per-player profiles.
+# by difficulty; else spawn_racers takes them from the career's current round: S12f, under spawn_racers_career), +0x117 AI difficulty, +0x134+i*4 player i's camera choice), +0x10 the per-player profiles.
 # app+0x3cc the scene, app+0x104 the input manager, app+0x108 the terrain query.
 #
 # The display: two globals, both set by display_mode_set.
