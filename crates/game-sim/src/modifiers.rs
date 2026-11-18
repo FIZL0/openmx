@@ -1037,6 +1037,10 @@ impl Mods {
     /// Player `seat`'s car, any of the three, on its loaded `.phy` before it is taken (P272).
     pub fn car(&self, seat: usize, car: &mut car::Car) {
         self.car_knobs(seat, [Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension], car);
+        // Over 100% the driven tires keep the file's grip, though the baja spins its rear tires on the
+        // extra torque and is slower a second in than at 100% (P370b): the car's tire has one
+        // FrictionPeak for both directions, and a forward-only raise with k tipped the monster truck,
+        // already rearing on the torque alone from 240%, onto its tail and off the floor from 280%.
         // The world's (P290): the gravity the car is taken with, and every wing's drag, read off the
         // file each substep (lift and downforce left alone).
         if let Some(k) = self.factor(seat, Knob::Gravity) {
