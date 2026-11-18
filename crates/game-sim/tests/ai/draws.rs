@@ -18,7 +18,7 @@ const TIMER_COUNT: u32 = 0;
 const IOP_RPC_SEND_LEN: u32 = 344;
 
 /// Run the hooked function itself from inside its hook, and come back to the hook's caller.
-fn through(ee: &mut Ee) {
+pub(crate) fn through(ee: &mut Ee) {
     let (pc, ra, sp, steps, stack) = (ee.pc, ee.r(31), ee.r(29), ee.steps, ee.stack);
     let args: Vec<u64> = (4..12).map(|k| ee.r(k)).collect();
     ee.stack = (sp as u32 - 0x800) & !0xf;
@@ -62,7 +62,7 @@ fn unstub_hardware(ee: &mut Ee, stubs: [u32; 6]) {
 
 /// One whole frame of the original, as the engine tick runs it after the pad read: the frame marker,
 /// the counter's step, the simulation, the second marker. The render after it is [`render`].
-fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
+pub(crate) fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
     let dt = dt.0;
     let stubs = stub_hardware(ee);
     *clock += f64::from(dt) * 1000.0;
@@ -121,7 +121,7 @@ const SITES: [(&str, u32, Site); 12] = [
 
 /// The original's human holds a neutral analog pad in C33; the image's buffers still hold an old
 /// digital report, which the human's stick reads as (0, -1). Lay a fresh neutral report in both halves.
-fn neutral_pad(ee: &mut Ee) {
+pub(crate) fn neutral_pad(ee: &mut Ee) {
     const PAD: u32 = 0x0047_a980;
     for half in [0u32, 0x80] {
         let report = [0x00u8, 0x73, 0xff, 0xff, 0x80, 0x80, 0x80, 0x80];
@@ -561,7 +561,7 @@ const RENDER_WAITS: [&str; 3] = ["dma_channel_sync", "dma_vif1_drain", "vblank_w
 
 /// Make the render runnable in the interpreter: the hardware registers as storage (DMA over at
 /// once), the kernel's calls returning 0, and the render's waits stubbed.
-fn render_setup(ee: &mut Ee) {
+pub(crate) fn render_setup(ee: &mut Ee) {
     ee.io = Some(Default::default());
     for at in (0x0010_0000..0x0041_0000).step_by(4) {
         let (li, sys) = (ee.u32_at(at), ee.u32_at(at + 4));
@@ -575,7 +575,7 @@ fn render_setup(ee: &mut Ee) {
 }
 
 /// The frame's render (the application's vt+0x38 after the second marker).
-fn render(ee: &mut Ee) {
+pub(crate) fn render(ee: &mut Ee) {
     let stubs = stub_hardware(ee);
     let app = ee.u32_at(addr("app_pointer").unwrap());
     let at = ee.u32_at(ee.u32_at(app + 0x3c4) + 0x38);

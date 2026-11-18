@@ -6605,6 +6605,28 @@ vehicle_fx_generic_zone boot 0x003d7000 the Generic/Exhaust entries' zone change
 vehicle_fx_pcc_init   boot 0x003d7830 ParticleCollisionConstraint: the hex sphere mask, the emitter
 vehicle_fx_pcc_update boot 0x003d7a30 each masked ragdoll sphere touching: emit from contact - velocity dt,
 #                                    skipped in a zone-off zone; Rider Dust/Chunks 0x1fc, Foot Dust 0x3
+# S422 — the collision entries' draws (game_sim::dust Kind::Collision / Kind::Spheres; journal
+# 2026-11-18-s422-collision-entries-draw). Vtables: CollisionModel 0x0045e690 (update 0x003d75d0),
+# ParticleCollisionConstraint 0x0045e660 (update 0x003d7a30); their on/off are the generic pair. No
+# tyre: the manager gates them on the wreck flag only. Each rider: CM 0x15 x2 (MES 3, 15), PCC 0x15 x2
+# (mask 0x1fc), Foot Dust PCC 0xd (mask 0x3, MES 30). Both call emit (emitter vt +0x8c) from inside
+# the update, once per contact (ra 0x003d776c / 0x003d7c08); nothing else emits on these emitters.
+#   CM: obj = **(entry+0x28); flags = feed wreck | ground obj+0x48 | object +0x4c | none; Disable lets
+#   them -> on (vt +0x98), v = obj+0x1e0 vmulx.xyz dt; per contact (obj+0x100 from *(obj+0x108), 0x80
+#   each) zone = byte entry + surface(+0x70) + 0x18; != 0xff -> group (0x0014e330 if +0x214 differs),
+#   prev +0x60 = point(+0x40) vsub.xyz v, pos +0x40 = point, emit(dt). Else off (vt +0x9c).
+#   PCC: on if Disable & wreck == 0 else off; then spheres (feed+0x10 from feed+0x14; 0 or mask bit
+#   clear -> skip): flags ground +0x18 | scene +0x1c | none; zone = byte entry + sphere +0x3c + 0x1c;
+#   zone != 0xff and Disable lets the flags -> prev = point - (*(+0x80))+0x70 x dt (.xyz), emit.
+#   The manager runs after the wreck bike's node update (0x0026f800) and before rider_body_update.
+emitter_view_test   boot 0x0014d8c0 emitter vt +0x94 (emitter, point or 0 = +0x40): once a frame (frame
+#                                    *(*0x0041f770+0x374) vs +0x258) +0x248 = 1, +0x254 = 0; camera =
+#                                    *(*0x0048a560) (none, or *0x0041f788 == 0 -> +0x248 0, +0x254 1);
+#                                    d = point - cam+0x140, dist = sqrt; dist > FarCull +0x24c -> keeps 1;
+#                                    cam+0x150 . d < 0 (behind): fade, dist <= DirectionalCull +0x250 ->
+#                                    0; in front -> 0. emit_timing's view cull reads +0x248 after the
+#                                    just-on test, so a switched-on emitter's other emits that frame
+#                                    are skipped when its stale point was culled (s325-nose76, 2616).
 vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98) unless zone-off (flag 2)
 # The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
 # nothing that tick: the manager runs before the emitter, which only takes its position (S109's
