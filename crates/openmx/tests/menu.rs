@@ -10760,3 +10760,41 @@ fn the_unlock_shop_spends_player_zeros_points() {
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Race));
 }
+
+/// P363: the race pick's Square opens the statistics page; Left and Right swap miles and
+/// kilometres; Circle goes back to the pick.
+#[test]
+fn the_race_picks_square_opens_the_statistics() {
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Race");
+    tap(&mut m, &mut r, Control::Square);
+    assert_eq!(m.screen(), Some(Screen::Stats));
+    assert!(!m.stats_metric);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.stats_metric);
+    tap(&mut m, &mut r, Control::Left);
+    assert!(!m.stats_metric);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Race));
+    assert!(!m.take_records_changed());
+}
+
+/// P363: the statistics page's rows out of a record: the play and race seconds as hours and
+/// minutes, the feet as miles or kilometres, the counts as they are, and the win percentage the
+/// record keeps (none before a race).
+#[test]
+fn the_statistics_rows_read_the_riders_record() {
+    use menu::results::RiderRecord;
+    use ps2_float::F;
+    let mut rec = RiderRecord { play_time: 3 * 3600 + 5 * 60 + 59, feet: F(52800.0), preloads: 7, clutches: 3, wrecks: 12, race_time: F(754.5), ..RiderRecord::default() };
+    let [(g, global), (r, racing)] = menu::stats_rows(&rec, false);
+    assert_eq!((g, r), ("Global Statistics", "Racing Statistics"));
+    let words = |rows: &[(&str, String)]| rows.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>();
+    assert_eq!(words(&global), ["Gameplay Hours: 3 h 05 min", "Miles Ridden: 10.0 mi", "Preloads: 7", "Clutches: 3", "Wrecks: 12"]);
+    assert_eq!(words(&racing), ["Races: 0", "Wins: 0", "Win Percentage: -", "Hours Racing: 12 min"]);
+    rec.add_races(F(3.0));
+    rec.add_wins(F(1.0));
+    let [(_, global), (_, racing)] = menu::stats_rows(&rec, true);
+    assert_eq!(global[1], ("Kilometres Ridden", "16.1 km".to_string()));
+    assert_eq!(words(&racing)[..3], ["Races: 3", "Wins: 1", "Win Percentage: 33%"]);
+}

@@ -2711,10 +2711,13 @@ pub enum Screen {
     /// P369: the unlock shop, off the race-track pick's Triangle: the store's items a category at a
     /// time, bought with the points the race results bank.
     Shop,
+    /// P363: the rider's statistics, off the race-track pick's Square: player 0's record, its
+    /// global and its racing statistics, after the original's statistics page.
+    Stats,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 27] = [
+    pub const ALL: [Screen; 28] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2742,6 +2745,7 @@ impl Screen {
         Screen::Results,
         Screen::PauseGarage,
         Screen::Shop,
+        Screen::Stats,
     ];
 
     fn index(self) -> usize {
@@ -2778,6 +2782,7 @@ impl Screen {
             Screen::Results => "results",
             Screen::PauseGarage => "pause-garage",
             Screen::Shop => "shop",
+            Screen::Stats => "stats",
         }
     }
 
@@ -2814,6 +2819,7 @@ impl Screen {
             Screen::Results => "Results",
             Screen::PauseGarage => "Garage",
             Screen::Shop => "Unlock Shop",
+            Screen::Stats => "Statistics",
         }
     }
 }
@@ -2853,6 +2859,46 @@ pub const QUIT_ASK: &str = if cfg!(target_arch = "wasm32") { "Back to the launch
 pub fn main_rows() -> &'static [&'static str] {
     if HAS_QUIT { &MAIN } else { &MAIN[..MAIN.len() - 1] }
 }
+/// P363: the statistics page's two panels, `(heading, rows)`, each row `(name, value)`: the
+/// original's Global Statistics (gameplay hours, distance, preloads, clutches, wrecks) and its
+/// Racing Statistics (races, wins, the win percentage, hours racing), out of a rider's record.
+/// Distances in kilometres when `metric`, miles otherwise; no races is no percentage.
+pub fn stats_rows(r: &results::RiderRecord, metric: bool) -> [(&'static str, Vec<(&'static str, String)>); 2] {
+    let distance = if metric {
+        ("Kilometres Ridden", format!("{:.1} km", f64::from(r.feet.0) * 0.3048 / 1000.0))
+    } else {
+        ("Miles Ridden", format!("{:.1} mi", f64::from(r.feet.0) / 5280.0))
+    };
+    let rate = if r.races == 0 { "-".to_string() } else { format!("{:.0}%", r.win_rate.0) };
+    [
+        (
+            "Global Statistics",
+            vec![
+                ("Gameplay Hours", hours_text(f64::from(r.play_time))),
+                distance,
+                ("Preloads", r.preloads.to_string()),
+                ("Clutches", r.clutches.to_string()),
+                ("Wrecks", r.wrecks.to_string()),
+            ],
+        ),
+        (
+            "Racing Statistics",
+            vec![
+                ("Races", r.races.to_string()),
+                ("Wins", r.wins.to_string()),
+                ("Win Percentage", rate),
+                ("Hours Racing", hours_text(f64::from(r.race_time.0))),
+            ],
+        ),
+    ]
+}
+
+/// P363: seconds as the statistics page gives a time: `3 h 05 min`, or `12 min` under an hour.
+pub fn hours_text(seconds: f64) -> String {
+    let minutes = (seconds.max(0.0) / 60.0) as u64;
+    if minutes < 60 { format!("{minutes} min") } else { format!("{} h {:02} min", minutes / 60, minutes % 60) }
+}
+
 const MAIN_FREE: usize = 0;
 /// P327's Race, beside Free Ride ([`race`]).
 const MAIN_RACE: usize = 1;
@@ -3288,6 +3334,8 @@ pub struct Menu {
     ride_stack: Vec<Screen>,
     /// P327's race: the pick's kind, the setup, the race under way and its results.
     pub race: race::RaceMenu,
+    /// P363: whether the statistics page gives distances in kilometres (miles otherwise).
+    pub stats_metric: bool,
     /// The ride under the menu, as the shell tells it (P41): how many players ride, the machine each
     /// one is on now, and which of them have a machine to switch to.
     pub riders: usize,
@@ -3684,6 +3732,7 @@ impl Menu {
             party: None,
             free_riders: 1,
             race: race::RaceMenu::default(),
+            stats_metric: false,
             music_choices: Vec::new(),
             music_games: Vec::new(),
             mod_preset: 0,
@@ -4842,6 +4891,7 @@ impl Menu {
                 self.walk_join(0, Press { start: true, ..Press::default() });
             }
             Screen::Shop => self.stack = vec![Screen::Main, Screen::Race, Screen::Shop],
+            Screen::Stats => self.stack = vec![Screen::Main, Screen::Race, Screen::Stats],
             s => self.stack = vec![Screen::Main, s],
         }
     }
@@ -4885,6 +4935,7 @@ impl Menu {
             Screen::Tricks => self.trick_rows.len().max(1),
             Screen::Split => layouts(self.riders).len(),
             Screen::Race | Screen::RaceSetup | Screen::Results | Screen::Shop => self.race_rows(screen),
+            Screen::Stats => 1,
             Screen::PauseGarage => self.pause_garage_rows().len().max(1),
         }
     }
@@ -5226,7 +5277,16 @@ impl Menu {
                     self.pop();
                 }
             }
+            // P363: Square on the race-track pick opens the statistics page.
+            Screen::Race if p.delete => self.push(Screen::Stats),
             Screen::Race | Screen::RaceSetup | Screen::Results | Screen::Shop => return self.race_press(screen, at, p),
+            Screen::Stats => {
+                if p.left || p.right || p.l1 || p.r1 {
+                    self.stats_metric = !self.stats_metric;
+                } else if p.back || p.ok {
+                    self.pop();
+                }
+            }
             Screen::Pause => {
                 // P341: Triangle, which is Back too, swaps to the last machine ridden.
                 if p.triangle {
