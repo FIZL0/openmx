@@ -57,6 +57,10 @@ mod audio;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;
+// The race's hand-over to the results menu at its Over (S318).
+#[path = "../src/race_start.rs"]
+#[allow(dead_code)]
+mod race_start;
 
 use game_sim::input::{AXIS_CENTRE, Control, Report};
 use menu::{Act, CLAIMED_FRAMES, Controls, Dev, Gas, Layout, Machine, Menu, FrameLimit, Overlay, Press, Reader, Readers, RenderScale, Screen, Settings, Speedometer};
@@ -10523,6 +10527,135 @@ fn a_race_end_shows_its_tips_board_and_hall_of_fame_and_counts_the_win() {
     // A race end with no race under way is dropped.
     m.race_ended(HandOver { overs: vec![RaceOver { win: Some(0), ..RaceOver::default() }], ..HandOver::default() });
     assert!(!m.take_records_changed());
+}
+
+/// S318: a race ridden to its Over ends on the real results board. Two riders walked round sx01's
+/// paths from the grid gate's path, the human faster, through three laps of the lap line; each bike's
+/// frame feeds its tracker (the human pulls the clutch twice and never preloads, the computer's rider
+/// preloads three times and wrecks twice); each finish is answered by `race_over` and the Over hands
+/// the cards in list order to the menu, which counts the human's win, shows no tip (the winner never
+/// gets one, though they never preloaded) and puts the trackers' words, jumps and hang times on the
+/// board's pages.
+#[test]
+fn a_race_ridden_to_its_over_ends_on_its_trackers_board() {
+    use game_sim::archive::{Psr, Res};
+    use game_sim::race::{self, BikeCounts, CardFeed, Course, HallOfFame, LineNotice, RaceNotice, ResultEvent, ResultSeat, Supercross, TrackFile, TrackPaths};
+    use ps2_float::{F, Vf};
+    use std::io::{Read, Seek, SeekFrom};
+    let iso = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("iso"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso"),
+    };
+    let disc = || -> Option<Vec<u8>> {
+        let mut f = std::fs::File::open(iso.join("MX.PSR")).ok()?;
+        let mut front = vec![0u8; 64 << 10];
+        f.read_exact(&mut front).ok()?;
+        let e = Psr::parse(&front).ok()?.find("Tracks\\sx01_2.res")?.clone();
+        f.seek(SeekFrom::Start(e.at)).ok()?;
+        let mut bytes = vec![0u8; e.size as usize];
+        f.read_exact(&mut bytes).ok()?;
+        let res = Res::parse(&bytes).ok()?;
+        res.read(&bytes, res.find("tracks\\sx01\\sx01.tdf")?).ok()
+    };
+    let Some(file) = disc() else {
+        eprintln!("skip: no sx01 race file under {}", iso.display());
+        return;
+    };
+    let mut t = TrackFile::parse(&file).expect("sx01's race file reads");
+    t.snap_to_ground(None);
+    let (paths, spots) = TrackPaths::load(&t).expect("sx01's track loads");
+    let course = Course { line: t.line.clone().expect("a line"), line_spot: spots[1].expect("a line spot"), lap_length: paths.lap_length };
+    let grid = spots[0].expect("a grid spot").path as usize;
+    // Points `step` feet apart along the paths from `from`, following each path's first link.
+    let walk = |step: f32, count: usize| {
+        let (mut points, mut path) = (Vec::new(), grid);
+        while points.len() < count * 64 {
+            let Some(p) = paths.paths.get(path) else { break };
+            points.extend(p.nodes.iter().map(|n| n.points[0]));
+            let Some(&next) = p.links.first() else { break };
+            path = next;
+        }
+        let mut out: Vec<Vf> = vec![points[0]];
+        let mut left = step;
+        for w in points.windows(2) {
+            let (a, b): (Vf, Vf) = (w[0], w[1]);
+            let d = ((b.x() - a.x()).powi(2) + (b.z() - a.z()).powi(2)).sqrt();
+            let mut at = 0.0;
+            while d > 0.0 && at + left <= d && out.len() < count {
+                at += left;
+                left = step;
+                let k = at / d;
+                out.push(Vf::new(a.x() + (b.x() - a.x()) * k, a.y() + (b.y() - a.y()) * k, a.z() + (b.z() - a.z()) * k, 1.0));
+            }
+            left -= d - at;
+        }
+        out
+    };
+    let walks = [walk(4.0, 6000), walk(3.0, 6000)];
+    let mut laps = race::Laps::new(race::supercross_rules(3), course, paths.clone(), &[(walks[0][0], race::HUMAN_CARD), (walks[1][0], race::COMPUTER_CARD)]);
+    laps.start();
+    let mut rng = game_sim::rng::Rng::from_state(0x1234_5678);
+    let mut watch = race_start::Watch::default();
+    let mut ended = None;
+    let pulse = |tick: usize, at: &[usize]| if at.iter().any(|&a| (a..a + 10).contains(&tick)) { F(1.0) } else { F::ZERO };
+    for tick in 1..6000 {
+        let feeds: Vec<CardFeed> = walks.iter().map(|w| CardFeed::standing(w[tick.min(w.len() - 1)], Vf::new(0.0, 0.0, 1.0, 0.0))).collect();
+        let frame = laps.tick(F(1.0 / 30.0), &feeds, &mut rng);
+        laps.bike(0, BikeCounts { clutch: pulse(tick, &[100, 900]), ..BikeCounts::default() });
+        laps.bike(1, BikeCounts { preload_timer: pulse(tick, &[200, 700, 1500]), wreck_entries: (tick >= 300) as i32 + (tick >= 1200) as i32, ..BikeCounts::default() });
+        for (player, n) in &frame.cards {
+            if *n == RaceNotice::Line(LineNotice::Finished) {
+                let card = laps.card(*player).unwrap();
+                let event = ResultEvent { activity: 2, laps: 3, ..ResultEvent::default() };
+                let seat = (*player == 0).then_some(ResultSeat { seat: 0, keeps_records: true, profile: true });
+                let card = race::LapCard { flags: card.flags | if *player == 0 { race::card_flags::PLAYER } else { 0 }, ..card.clone() };
+                let over = Supercross::new().race_over(&card, seat, &event, -1, &HallOfFame::default(), None, &race::FlashLevels::default());
+                watch.overs.push(over);
+            }
+        }
+        if watch.look(&laps).contains(&race_start::Change::Over) {
+            ended = Some(race_start::hand_over(&laps, 3, "Me", &watch.overs));
+            break;
+        }
+    }
+    let hand = ended.expect("the race reaches its Over");
+    let (human, ai) = (laps.stats(0).unwrap().clone(), laps.stats(1).unwrap().clone());
+    eprintln!("human {human:?}\nai {ai:?}");
+    assert_eq!((human.preloads, human.clutches, human.wrecks), (0, 2, 0));
+    assert_eq!((ai.preloads, ai.clutches, ai.wrecks), (3, 0, 2));
+    assert!(human.laps_led > 0, "the faster rider leads laps");
+    assert_eq!(hand.overs.len(), 1, "the human's finish is answered; the computer's made-up one is not");
+    assert_eq!(hand.overs[0].win, Some(0));
+    assert!(hand.end.results && hand.end.tips.is_empty(), "a winner gets no tip: {:?}", hand.end);
+
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Race");
+    tap(&mut m, &mut r, Control::Cross);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    m.race_ended(hand);
+    assert!(m.take_records_changed(), "the human's win is counted");
+    m.main();
+    assert!(m.race_left());
+    let results = m.results();
+    assert_ne!(results.stage, menu::race::Stage::Tips);
+    assert!(results.tips.is_empty());
+    let board = results.board.as_ref().unwrap();
+    let row = |page: usize, name: &str| board.pages[page].iter().find(|r| r[1] == name).unwrap_or_else(|| panic!("{name} on page {page}: {:?}", board.pages[page])).clone();
+    assert_eq!(board.pages[0][0][..2], ["1", "Me"]);
+    assert_eq!(board.pages[0][1][..2], ["2", "Rider 2"]);
+    // Every tracker page's cell is the rider's own count; the jump and hang pages read the cards'.
+    let words: [(usize, fn(&race::Tracker) -> i32); 7] = [(2, |s| s.laps_led), (3, |s| s.times_in_lead), (6, |s| s.passes), (7, |s| s.times_passed), (8, |s| s.wrecks), (9, |s| s.preloads), (10, |s| s.clutches)];
+    for (page, word) in words {
+        assert_eq!(row(page, "Me")[2], word(&human).to_string(), "page {page}");
+        assert_eq!(row(page, "Rider 2")[2], word(&ai).to_string(), "page {page}");
+    }
+    assert_eq!(hand_words(&board.cards, "Me")[6..8], [laps.cards.iter().find(|e| e.player == 0).unwrap().card.jumps.best_length, laps.cards.iter().find(|e| e.player == 0).unwrap().card.jumps.best_air_time]);
+}
+
+/// The record words of `name`'s card on the board.
+fn hand_words(cards: &[menu::results::ResultCard], name: &str) -> [ps2_float::F; 13] {
+    cards.iter().find(|c| c.who == menu::results::Who::Player(name.into()) || c.who == menu::results::Who::Ai(name.into())).unwrap().words
 }
 
 /// P333: the results menu's own buttons and the tip popup's pages. The popup shows the preload page
