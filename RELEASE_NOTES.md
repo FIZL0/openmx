@@ -1,17 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- AI riders race the way the original's do: they follow the track's own racing lines and jump plans, keep laps with the race cards, and draw on the race's one random generator, so a race plays out as the original's
-- Unlock Shop: spend the trick points you have banked on the disc's unlockables, as in the original; bought items are kept with your riders
-- The results screen saves your stats (riding time, distance, preloads, clutches, wrecks) and adds your trick score to your profile's points, and its Restart, Quit and Next buttons work as the original's
-- MX vs. ATV Untamed's quad rides with its own model, materials, rider, engine sounds, dust and camera, and Untamed's sandrail comes as an off-by-default car
-- MX vs. ATV's plane is built with its own weight and balance and hits the ground and props the way that game does; the helicopter's put-back sets it down on the ground
-- MX vs. ATV stunts are timed and scored that game's way on trick-pack rides
-- The baja, buggy and monster truck move their wheels, axles and suspension as in the original, land whole when thrown back from the map's edge, and park at their own track in a world
-- Car acceleration over 100% no longer holds a car in place at its launch, and taken cars no longer stand a tire too high
-- Game Modifiers' gravity and air drag now apply to the helicopter and cars too
-- Props knocked by a plane, bike or car knock into each other, also across a world's wrap-around edge
-- Drop gates lower out of the way once riders pass, on the nature tracks that have them
-- With Air Wrecks off, landing upside down or on your back still wrecks you
-- The stock bike no longer speeds up while coasting or gets flung to top speed when its back wheel spins in the air
-- The bikes' dust comes off the back wheel where the swingarm puts it
-- The Song list groups songs under a heading for each game
-- iPhone: maps draw fully again after you come back to the app
