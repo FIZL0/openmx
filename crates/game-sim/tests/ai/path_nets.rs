@@ -6,7 +6,7 @@ use super::*;
 
 /// sx01's files out of `archive` (`Tracks\sx01_2.res`, `Tracks\sx01.res`), inside MX.PSR, by their
 /// names in the archive or, failing that, the member whose name ends with it (case ignored).
-fn sx01_files(archive: &str, names: &[&str]) -> Option<Vec<Vec<u8>>> {
+pub(crate) fn sx01_files(archive: &str, names: &[&str]) -> Option<Vec<Vec<u8>>> {
     let kit = ps2_oracle::Kit::load().map_err(|why| skip(&why)).ok()?;
     let at = kit.ctx("iso").join("MX.PSR");
     let Ok(mut f) = std::fs::File::open(&at) else {
