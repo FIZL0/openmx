@@ -813,7 +813,8 @@ impl Score {
         // The backflip: started over the top, ended round; a watch forgotten part way ends it too.
         let was = self.flip;
         self.watch_flip(s);
-        if was == 0 && self.flip == 1 {
+        // Not inside a front flip, whose back half passes the backflip's first step.
+        if was == 0 && self.flip == 1 && *front_flip == 0 {
             self.atv_start(atv, BACKFLIP, rows.backflip, true);
         } else if was != 0 && was != 3 && (self.flip == 3 || self.flip == 0) {
             self.atv_end(BACKFLIP);

@@ -5795,7 +5795,10 @@ fn md16_front_flip_goes_round_and_lands() {
     assert!(last.on_ground && last.up_y > 0.95, "on its wheels: {}", last.up_y);
     assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::FRONTFLIP)), "scored as a front flip");
     assert!(ride.iter().any(|t| t.frame.started == Some(Trick::FRONTFLIP)), "and told as a start, for the shell's name");
-    assert_eq!(r.score.total, F(10000.0), "worth the pack's backflip");
+    // S358: a pack ride scores MX vs. ATV's way, so the front flip's node grows on the backflip's
+    // row (2000 + 10000 a second) from its start to its end and banks alone, ×1.
+    assert!(ride.iter().all(|t| !t.nodes.contains(&game_sim::score::BACKFLIP)), "a front flip only");
+    assert_eq!(r.score.total, F(14166.0), "worth the pack's backflip, held");
 }
 
 /// MD16: MX vs. ATV's 360. R1 held, stick left then right on the lip: armed one way and fired the
@@ -6056,7 +6059,9 @@ fn md20_one_short_of_either_wrecks() {
     assert!(ride[w].seat.on_ground && ride[w - 1].spin.clip == 0, "on landing, the 360 home");
     assert_eq!(ride[w].frame.wreck, Some(trick::Wreck::from(air::Wreck::Front)), "on its nose");
     assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "the 360 still scored");
-    assert!(!ride.iter().any(|t| t.nodes.contains(&game_sim::score::BACKFLIP)), "the backflip did not");
+    // S358: MX vs. ATV's way, the stopped backflip's node opens at its start, and the wreck loses
+    // the whole combo — the 360's with it, unbanked.
+    assert!(ride[w].nodes.is_empty() && ride[w].total == 0.0, "the backflip did not: the wreck banks nothing");
 
     for back in [true, false] {
         let (ride, _) = ride_md16(&q, wheels, &tables, set.clone(), &md20_hands(back, back, (200, 60), (220, 40)), 400);
@@ -6082,7 +6087,8 @@ fn md20_one_short_of_either_wrecks() {
 /// with S118's crossup measured from the heading the substeps left (the auto-level's yaw a tick sooner), and
 /// with S140's speed measured again after the substeps (the same walk's measure; the ride does not move),
 /// and the gesture's with S230's wreck entry, which zeroes both wheels' compression (hashed, and the
-/// gesture's 360 ends in a wreck; the ride up to it does not move).
+/// gesture's 360 ends in a wreck; the ride up to it does not move), and with S358's MX vs. ATV score
+/// on pack rides (hashed: its nodes open at a stunt's start, and the pack's repeat scales and bank clock).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -6094,8 +6100,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0xe4d29850faf9e8b9;
-const MD25_DIAGONAL_FOLD: u64 = 0xd10571ecd9dc0e29;
+const MD25_GESTURE_FOLD: u64 = 0xa92183ff70b0f05c;
+const MD25_DIAGONAL_FOLD: u64 = 0x5adca4da8d3affd4;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's
@@ -6162,7 +6168,7 @@ fn md30_m21_spin_lands_part_way_round_and_wrecks() {
     let tables = rider::Tables::build();
     let Some((p, wheels)) = the_disc_125(&tables) else { return };
     let (q, set) = md16_pack(&p, true);
-    let (ride, _) = ride_md16_off(M21_LIP, &q, wheels, &tables, set, &m21_hands(false), 400);
+    let (ride, r) = ride_md16_off(M21_LIP, &q, wheels, &tables, set, &m21_hands(false), 400);
     let fired = ride.iter().position(|t| t.spin.active).expect("the 360 fires");
     assert!(ride[fired].seat.lip, "on the lip");
     assert_eq!((ride[fired].spin.torque.x(), ride[fired].spin.torque.y()), (-1100.0, 1100.0), "the full flick's torques");
@@ -6174,7 +6180,8 @@ fn md30_m21_spin_lands_part_way_round_and_wrecks() {
     assert!(m.off > 35.0, "short of round at the landing: {}", m.off);
     let w = ride.iter().position(|t| t.frame.wreck.is_some()).expect("landing mid-clip wrecks");
     assert!(ride[w].seat.on_ground && ride[w - 1].spin.clip == 2, "on landing, the clip part way round");
-    assert!(!ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "and it does not score");
+    // S358: MX vs. ATV's way, the 360's node opens with its clip, and the wreck loses it.
+    assert!(ride.last().unwrap().nodes.is_empty() && r.score.total == F::ZERO, "and it does not score");
 }
 
 /// MD30: M21's `spinpull`, reproduced: the same, with the stick held back from take-off and R1 still
