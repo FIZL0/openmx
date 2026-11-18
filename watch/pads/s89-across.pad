@@ -6,6 +6,11 @@
 # a second and a half on the brake (square), and the pad let go.
 #
 #   ./kit record watch/s89-rails.toml --state 9 --pad watch/pads/s89-across.pad -n 300
+#
+# The state itself (lost by 2026-11-17) is rebuilt by research/r32/make.sh with S89's across spot (C39:
+# `make.sh PID 9 3900 136.7 4560 34.8`), and with no uinput pad the ride is recorded from it by
+# research/r32/ride.sh, which plays this script as a tape; copies of the RAM image and .p2s are in
+# kept-context/r32.
 sleep 2000
 down cross
 sleep 16000
