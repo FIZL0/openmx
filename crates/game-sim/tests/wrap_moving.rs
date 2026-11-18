@@ -547,8 +547,13 @@ fn a_rolling_ball_wraps_over_a_seam() {
 // MD254: the flown plane's strike on the knockable props across a seam.
 
 /// The biplane as the port builds it off `machine.res` in MX.PSR (tests/prop_plane.rs's), without its
-/// hull: the props' rays on it are not this test's (they stay at the props' own places).
+/// hull: the props' rays on it are not this test's (MD254a's are).
 fn the_plane() -> Option<game_sim::flight::Flight> {
+    the_plane_and_hull().map(|(p, _)| p)
+}
+
+/// [`the_plane`] and its hull (`biplanef.col`).
+fn the_plane_and_hull() -> Option<(game_sim::flight::Flight, Mesh)> {
     use game_sim::archive::{Psr, Res};
     use std::io::{Read, Seek, SeekFrom};
     let kit = ps2_oracle::Kit::load().map_err(|why| ps2_oracle::skip(&why)).ok()?;
@@ -572,7 +577,8 @@ fn the_plane() -> Option<game_sim::flight::Flight> {
     };
     let plane = game_sim::phy::Plane::read_bytes(&member(game_sim::phy::BIPLANE_PHY));
     let rays = game_sim::track::Rays::parse(&member(game_sim::flight_search::BIPLANE_RAYS)).expect("biplanem.col");
-    Some(game_sim::flight::Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)))
+    let hull = Mesh::parse(&member(game_sim::flight::HULL)).expect("biplanef.col");
+    Some((game_sim::flight::Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)), hull))
 }
 
 /// `plane` with its body (and where it was a substep ago) at `at`, rolling at 10 ft/s along -x.
@@ -697,4 +703,236 @@ fn a_plane_by_the_near_seam_strikes_a_ball_by_the_far_one() {
     // On a world that does not wrap the plane by the near seam flies through: the ball sleeps on.
     let alone = tick(near, &mut plain);
     assert!(!alone.traffic.props.collections[c].bones[0].body.enabled || alone.traffic.props.collections[c].bones[0].body.velocity == set.collections[c].bones[0].body.velocity);
+}
+
+// MD254a: planes flown together strike the props across a seam; the props' rays meet a hull a width
+// over.
+
+/// A spot by some ball (its collection) where `plane`'s rays strike it, `ahead` of it along `dir`
+/// (x, z) and a little up or down, on a world that does not wrap; none past `beyond` along x.
+fn ball_spot(set: &game_sim::prop_set::PropSet, plane: &game_sim::flight::Flight, dir: [f32; 2], only: Option<usize>, beyond: f32) -> Option<(usize, Vf)> {
+    let mut roomy = Strip { flat: game_sim::world::Flat::default(), width: F(40_000.0), wraps: false };
+    for (c, coll) in set.collections.iter().enumerate().filter(|(c, _)| only.is_none_or(|o| o == *c)) {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        for ahead in (4..80).map(|k| k as f32 * 0.25) {
+            for up in [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, -0.5, -1.0] {
+                let at = Vf::new(ball.x() + dir[0] * ahead, ball.y() + up, ball.z() + dir[1] * ahead, 1.0);
+                if at.x() >= beyond {
+                    continue;
+                }
+                let mut p = flying_at(plane, at);
+                if p.search_props(DT, &mut roomy, set).iter().any(|s| s.0 == c && !s.2.is_empty()) {
+                    return Some((c, at));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Two planes flown together (split screen's, [`game_sim::flight::frames_together_props`]): one by
+/// the near seam strikes a ball by the far one, the other at the ball's own side; the ball's list,
+/// its body, the planes and the props' step after go as with the first plane at the ball's own place.
+/// With the hulls on, so the balls' rays on them run too, shared as the fleet's one list has them.
+#[test]
+fn planes_flown_together_strike_a_ball_by_the_far_seam() {
+    use game_sim::contact::{Other, Side, Weighed};
+    use game_sim::flight::{self, Fly};
+    let Some((set, _)) = knock_disc() else { return };
+    let Some((plane, hull)) = the_plane_and_hull() else { return };
+    let plane = plane.with_hull(hull);
+    let (c, at) = ball_spot(&set, &plane, [1.0, 0.0], None, f32::MAX).expect("a spot on +x where the plane's rays strike a ball");
+    let width = at.x().floor();
+    let near = Vf::new(at.x() - width, at.y(), at.z(), 1.0);
+    // The other plane on the ball's other side, inside the wrapped world.
+    let other = [[-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]
+        .into_iter()
+        .find_map(|dir| ball_spot(&set, &plane, dir, Some(c), width - 1.0))
+        .map(|(_, at)| at)
+        .expect("a second spot by the ball");
+    let roomy = || Strip { flat: game_sim::world::Flat::default(), width: F(40_000.0), wraps: false };
+    let wrapped = || Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true };
+    let tables = game_sim::ride::Tables::build();
+    const SEATS: [usize; 2] = [0, 1];
+    let movers = game_sim::prop_set::PropMovers::default();
+    // One frame together, then the props' step with both planes as its strikers, by seat.
+    let fly = |places: [Vf; 2], mut world: Strip| {
+        let mut set = set.clone();
+        let mut planes = places.map(|at| flying_at(&plane, at));
+        let [a, b] = &mut planes;
+        let mut fleet = [Fly { flight: a, pad: Default::default(), met: None, bikes: &[] }, Fly { flight: b, pad: Default::default(), met: None, bikes: &[] }];
+        let _ = flight::frames_together_props(DT, &mut fleet, &mut world, &tables, Some((&mut set, &SEATS)));
+        let framed = (set.clone(), planes.clone());
+        let [a, b] = &mut planes;
+        let (moved, rest) = game_sim::prop_contact::across_flown(std::mem::take(&mut set.across), &mut [Some(&mut a.body), Some(&mut b.body)]);
+        assert!(rest.is_empty());
+        let (mut wa, mut wb) = (Weighed { body: &mut a.body, mass: a.mass }, Weighed { body: &mut b.body, mass: b.mass });
+        let mut strikers = [Other { collider: &mut a.collider, side: Side::Body(&mut wa) }, Other { collider: &mut b.collider, side: Side::Body(&mut wb) }];
+        set.step_with(DT, &movers, &mut strikers);
+        drop(strikers);
+        game_sim::prop_contact::across_flown_back(moved, &mut [Some(&mut a.body), Some(&mut b.body)]);
+        (framed, (set, planes))
+    };
+    let ball = |set: &game_sim::prop_set::PropSet| set.collections[c].bones[0].body;
+    let list = |set: &game_sim::prop_set::PropSet| set.collections[c].objects[0].collision.as_ref().unwrap().record.contacts.clone();
+    for (order, by) in [([0, 1], 0usize), ([1, 0], 1)] {
+        let pick = |a: Vf, b: Vf| if order[0] == 0 { [a, b] } else { [b, a] };
+        let ((wset, wplanes), (wstep, wflown)) = fly(pick(at, other), roomy());
+        let ((gset, gplanes), (gstep, gflown)) = fly(pick(near, other), wrapped());
+        let (wl, gl) = (list(&wset), list(&gset));
+        // The later plane's mirrors go at the head of the ball's list, which may keep none of the
+        // earlier's; both planes' lists name it.
+        assert!(!wl.is_empty());
+        for k in 0..2 {
+            assert!(wplanes[k].record.contacts.iter().any(|e| e.kind == 0 && e.other.is_some()), "plane {k} struck the ball");
+            assert!(gplanes[k].record.contacts.iter().any(|e| e.kind == 0 && e.other.is_some()), "plane {k} struck the ball, wrapped");
+        }
+        assert_eq!(gl.len(), wl.len(), "the ball's list\ngot {gl:?}\nwant {wl:?}");
+        for (g, w) in gl.iter().zip(&wl) {
+            assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+            assert!(close(g.normal, w.normal), "normal {:?} vs {:?}", g.normal, w.normal);
+            assert!(close(g.point, w.point), "point at the ball's own place {:?} vs {:?}", g.point, w.point);
+        }
+        assert!(gset.across.iter().any(|a| (a.collection, a.object, a.player, a.by) == (c, 0, SEATS[by], [F(width), F::ZERO])), "{:?}", gset.across);
+        assert!(gset.across.iter().all(|a| a.player == SEATS[by]), "the other plane struck it at its place: {:?}", gset.across);
+        assert!(wset.across.is_empty());
+        let (g, w) = (ball(&gset), ball(&wset));
+        assert!(g.enabled);
+        assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+        assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+        assert!(close(g.rates, w.rates), "ball rates {:?} vs {:?}", g.rates, w.rates);
+        for k in 0..2 {
+            let shift = if k == by { width } else { 0.0 };
+            assert!(close_by(gplanes[k].body.position, wplanes[k].body.position, shift), "plane {k} {:?} vs {:?}", gplanes[k].body.position, wplanes[k].body.position);
+            assert!(close(gplanes[k].body.velocity, wplanes[k].body.velocity), "plane {k} velocity {:?} vs {:?}", gplanes[k].body.velocity, wplanes[k].body.velocity);
+            assert!(close(gflown[k].body.velocity, wflown[k].body.velocity), "plane {k} after the props' step {:?} vs {:?}", gflown[k].body.velocity, wflown[k].body.velocity);
+            assert!(close_by(gflown[k].body.position, wflown[k].body.position, shift), "the props' step puts plane {k} back {:?} vs {:?}", gflown[k].body.position, wflown[k].body.position);
+        }
+        let (g, w) = (ball(&gstep), ball(&wstep));
+        assert!(close(g.position, w.position), "ball after the step {:?} vs {:?}", g.position, w.position);
+        assert!(close(g.velocity, w.velocity), "ball velocity after the step {:?} vs {:?}", g.velocity, w.velocity);
+        assert!(close(g.rates, w.rates), "ball rates after the step {:?} vs {:?}", g.rates, w.rates);
+    }
+    // The plane at x 0.1 flying -x on a world 0.1 ft narrower: its frame carries it back over the
+    // near seam, onto the ball's side, and the props' step sees it where it now is.
+    let over = at.x() - 0.1;
+    let ((wset, wplanes), (wstep, wflown)) = fly([at, other], roomy());
+    let ((gset, gplanes), (gstep, gflown)) = fly([Vf::new(0.1, at.y(), at.z(), 1.0), other], Strip { flat: game_sim::world::Flat::default(), width: F(over), wraps: true });
+    assert!(gplanes[0].body.position.x() > over - 1.0, "the plane went over the seam: {:?}", gplanes[0].body.position);
+    assert!(gset.across.iter().all(|a| a.player != SEATS[0]), "no note left for it: {:?}", gset.across);
+    assert!(gset.collections[c].bones[0].body.enabled);
+    for (g, w) in [(ball(&gset), ball(&wset)), (ball(&gstep), ball(&wstep))] {
+        assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+        assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    }
+    for k in 0..2 {
+        assert!(close(gplanes[k].body.velocity, wplanes[k].body.velocity), "plane {k} velocity {:?} vs {:?}", gplanes[k].body.velocity, wplanes[k].body.velocity);
+        assert!(close(gflown[k].body.velocity, wflown[k].body.velocity), "plane {k} after the step {:?} vs {:?}", gflown[k].body.velocity, wflown[k].body.velocity);
+    }
+    // On a world that does not wrap the plane by the near seam strikes nothing: only the other's
+    // mirrors are on the ball's list.
+    let ((plain, _), _) = fly([near, other], Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: false });
+    assert!(list(&plain).iter().all(|e| e.other != Some(SEATS[0])), "{:?}", list(&plain));
+}
+
+/// **The balls' rays meet a hull by the far seam** ([`game_sim::prop_wreck::struck_on_in`]): a filed
+/// ball whose rays strike the plane's hull at its own place strikes it the same with the hull a
+/// width back, by the near seam: its entries at its own place, the mirrors at the hull's, the body
+/// noted with the shift. On a world that does not wrap, nothing. Then a lone plane's frame among
+/// the props with its hull ([`game_sim::flight::Flight::frame_props`]) goes as at the ball's place.
+#[test]
+fn the_balls_rays_meet_a_hull_by_the_far_seam() {
+    use game_sim::flight;
+    use game_sim::prop_wreck::struck_on_in;
+    let Some((mut set, _)) = knock_disc() else { return };
+    let Some((plane, hull)) = the_plane_and_hull() else { return };
+    // Every ball filed, as a strike leaves one.
+    for c in 0..set.collections.len() {
+        if set.collections[c].objects.first().is_some_and(|o| o.collision.is_some()) {
+            set.struck(c, 0);
+        }
+    }
+    let mut roomy = Strip { flat: game_sim::world::Flat::default(), width: F(40_000.0), wraps: false };
+    let node = |at: Vf| {
+        let n = game_sim::wreck_bike::node_of(&flying_at(&plane, at).body);
+        [n.rows[0], n.rows[1], n.rows[2], n.origin]
+    };
+    let strike = |set: &game_sim::prop_set::PropSet, at: Vf, world: &Strip| {
+        let mut set = set.clone();
+        let out = struck_on_in(&mut set, &hull, node(at), flight::COLLIDABLE, flight::COLLIDES_WITH, 0, world);
+        (set, out)
+    };
+    let mut found = None;
+    'find: for (c, coll) in set.collections.iter().enumerate() {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        for ahead in (0..60).map(|k| k as f32 * 0.25) {
+            for up in [0.0, 0.5, 1.0, 1.5, 2.0, -0.5, -1.0, -2.0] {
+                let at = Vf::new(ball.x() + ahead, ball.y() + up, ball.z(), 1.0);
+                let (_, (on, _)) = strike(&set, at, &roomy);
+                if on.struck.iter().any(|p| p.collection == c) {
+                    found = Some((c, at));
+                    break 'find;
+                }
+            }
+        }
+    }
+    let (c, at) = found.expect("some spot by some ball whose rays strike the hull there");
+    let width = at.x().floor();
+    let near = Vf::new(at.x() - width, at.y(), at.z(), 1.0);
+    let wrapped = Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true };
+    let plain = Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: false };
+    let (wset, (want, wacross)) = strike(&set, at, &roomy);
+    let (gset, (got, gacross)) = strike(&set, near, &wrapped);
+    assert!(wacross.is_empty());
+    let i = want.struck.iter().position(|p| p.collection == c).unwrap();
+    let j = got.struck.iter().position(|p| p.collection == c).expect("the ball struck the hull a width over");
+    assert!(gacross.contains(&(j, [F(width), F::ZERO])), "{gacross:?}");
+    let (wl, gl) = (&wset.collections[c].objects[0].collision.as_ref().unwrap().record.contacts, &gset.collections[c].objects[0].collision.as_ref().unwrap().record.contacts);
+    assert_eq!(gl.len(), wl.len(), "the ball's entries\ngot {gl:?}\nwant {wl:?}");
+    for (g, w) in gl.iter().zip(wl) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close(g.point, w.point), "entry at the ball's own place {:?} vs {:?}", g.point, w.point);
+    }
+    let (wm, gm): (Vec<_>, Vec<_>) = (want.mirrors.iter().filter(|e| e.other == Some(i)).collect(), got.mirrors.iter().filter(|e| e.other == Some(j)).collect());
+    assert!(!wm.is_empty() && wm.len() == gm.len(), "the hull's mirrors: {} vs {}", gm.len(), wm.len());
+    for (g, w) in gm.iter().zip(&wm) {
+        assert!(close(g.normal, w.normal), "mirror normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close_by(g.point, w.point, width), "mirror at the hull's place {:?} vs {:?}", g.point, w.point);
+    }
+    assert!(bits(got.struck[j].body.position) == bits(want.struck[i].body.position), "the body as it stands");
+    let (_, (none, _)) = strike(&set, near, &plain);
+    assert!(none.struck.iter().all(|p| p.collection != c), "a world that does not wrap");
+    // A ball the hull's own place meets is met there alone, word for word as struck_on.
+    let mut own = set.clone();
+    let alone = game_sim::prop_wreck::struck_on(&mut own, &hull, node(at), flight::COLLIDABLE, flight::COLLIDES_WITH, 0);
+    let (_, (wide, wide_across)) = strike(&set, at, &Strip { flat: game_sim::world::Flat::default(), width: F(40_000.0), wraps: true });
+    assert_eq!(alone, wide);
+    assert!(wide_across.is_empty());
+
+    // The lone plane's frame with its hull, by the near seam and at the ball's own place.
+    let plane = plane.with_hull(hull.clone());
+    let tables = game_sim::ride::Tables::build();
+    let frame = |at: Vf, world: &mut Strip| {
+        let mut set = set.clone();
+        let mut p = flying_at(&plane, at);
+        p.frame_props(DT, Default::default(), world, &tables, &[], None, &mut set, 0);
+        (set, p)
+    };
+    let (want, wp) = frame(at, &mut roomy);
+    let (got, gp) = frame(near, &mut Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true });
+    let (wl, gl) = (&want.collections[c].objects[0].collision.as_ref().unwrap().record.contacts, &got.collections[c].objects[0].collision.as_ref().unwrap().record.contacts);
+    assert_eq!(gl.len(), wl.len(), "the ball's list\ngot {gl:?}\nwant {wl:?}");
+    for (g, w) in gl.iter().zip(wl) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.point, w.point), "point {:?} vs {:?}", g.point, w.point);
+    }
+    assert!(got.across.iter().any(|a| (a.collection, a.object, a.by) == (c, 0, [F(width), F::ZERO])), "{:?}", got.across);
+    let (g, w) = (got.collections[c].bones[0].body, want.collections[c].bones[0].body);
+    assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    assert_eq!(gp.record.contacts.len(), wp.record.contacts.len(), "the plane's list");
+    assert!(close(gp.body.velocity, wp.body.velocity), "plane velocity {:?} vs {:?}", gp.body.velocity, wp.body.velocity);
 }

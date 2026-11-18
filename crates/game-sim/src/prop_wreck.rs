@@ -184,9 +184,44 @@ pub fn struck_by_props(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usi
 /// collidable's `category` and `collides_with` mask: the wreck bike's, and the plane's hull (S241,
 /// [`crate::flight::Flight::frame_props`]).
 pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32, collides_with: u32, me: usize) -> WreckStrike {
+    struck_on_by(set, mesh, bike_at, category, collides_with, me, None).0
+}
+
+/// **[`struck_on`] on a world that wraps** (MD254a, MD29: the port's own): a prop by the far side of
+/// a seam from the mesh, whose rays reach the mesh's copy one width over, strikes it there — the mesh
+/// moved by the seam's shift for that prop's search, as the riding bike's strike has the props
+/// ([`crate::prop_contact::strike_wrapped`]): its entries at its own place, the mirrors moved back to
+/// the mesh's. A prop the mesh's own place gives a hit is struck there alone. Also answers each
+/// struck body met at a copy, by its place in [`WreckStrike::struck`], and the shift that brings
+/// the mesh to it (as [`Strike::across`] has them); on a world that does not wrap, none, and the
+/// strike is [`struck_on`]'s.
+#[allow(clippy::too_many_arguments)]
+pub fn struck_on_in(
+    set: &mut PropSet,
+    mesh: &Mesh,
+    bike_at: [Vf; 4],
+    category: u32,
+    collides_with: u32,
+    me: usize,
+    world: &dyn crate::world::World,
+) -> (WreckStrike, Vec<(usize, [F; 2])>) {
+    struck_on_by(set, mesh, bike_at, category, collides_with, me, Some(world))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn struck_on_by(
+    set: &mut PropSet,
+    mesh: &Mesh,
+    bike_at: [Vf; 4],
+    category: u32,
+    collides_with: u32,
+    me: usize,
+    world: Option<&dyn crate::world::World>,
+) -> (WreckStrike, Vec<(usize, [F; 2])>) {
     let mut out = WreckStrike::default();
+    let mut across = Vec::new();
     if set.tables.is_none() || mesh.nodes.is_empty() {
-        return out;
+        return (out, across);
     }
     let (bike_centre, bike_radius) = sphere(mesh, &bike_at);
     let facets = flight_search::facets(mesh);
@@ -201,41 +236,63 @@ pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32
         let (true, Some(col)) = (o.filed, o.collision.as_ref()) else { continue };
         let at = frame(&o.node);
         let (centre, radius) = flight_search::reach(tree, &at);
-        let mut objects = vec![
-            Collidable {
-                class: Class::Object,
-                flags: flags::ENABLED,
-                nearby: true,
-                radius,
-                category: flight_search::PROBE,
-                collides_with: flight_search::PROBE_COLLIDES_WITH,
-                categories: col.categories.clone(),
-                ..Collidable::default()
-            },
-            Collidable {
-                class: Class::Object,
-                flags: flags::ENABLED,
-                nearby: true,
-                radius: bike_radius,
-                category,
-                collides_with,
-                categories: Categories { mode: 1, list: Vec::new() },
-                ..Collidable::default()
-            },
-        ];
-        let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
-        let mut narrow = OnTheBike { rays: tree, at, mesh, bike_at, facets: &facets, ray };
-        let found = vec![Candidate { object: BIKE, distance: distance(centre, bike_centre) - bike_radius }];
-        world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
-        if narrow.ray.contacts.is_empty() {
-            continue;
+        // The mesh's own place, then on a world that wraps its copies by the seams the prop's
+        // sphere reaches over, where the prop's rays can reach them (MD254a).
+        let mut places = vec![[F::ZERO; 2]];
+        if let Some(world) = world {
+            for s in crate::tiles::seam_shifts(world, centre, radius + bike_radius) {
+                let by = [F::ZERO - s[0], F::ZERO - s[1]];
+                if distance(centre, crate::seam::moved(bike_centre, by)) - bike_radius <= radius {
+                    places.push(by);
+                }
+            }
         }
+        let mut met = None;
+        for by in places {
+            let (bike_at, bike_centre) = if by == [F::ZERO; 2] {
+                (bike_at, bike_centre)
+            } else {
+                ([bike_at[0], bike_at[1], bike_at[2], crate::seam::moved(bike_at[3], by)], crate::seam::moved(bike_centre, by))
+            };
+            let mut objects = vec![
+                Collidable {
+                    class: Class::Object,
+                    flags: flags::ENABLED,
+                    nearby: true,
+                    radius,
+                    category: flight_search::PROBE,
+                    collides_with: flight_search::PROBE_COLLIDES_WITH,
+                    categories: col.categories.clone(),
+                    ..Collidable::default()
+                },
+                Collidable {
+                    class: Class::Object,
+                    flags: flags::ENABLED,
+                    nearby: true,
+                    radius: bike_radius,
+                    category,
+                    collides_with,
+                    categories: Categories { mode: 1, list: Vec::new() },
+                    ..Collidable::default()
+                },
+            ];
+            let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
+            let mut narrow = OnTheBike { rays: tree, at, mesh, bike_at, facets: &facets, ray };
+            let found = vec![Candidate { object: BIKE, distance: distance(centre, bike_centre) - bike_radius }];
+            world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
+            if !narrow.ray.contacts.is_empty() {
+                met = Some((narrow.ray.contacts, by));
+                break;
+            }
+        }
+        let Some((contacts, by)) = met else { continue };
+        let back = [F::ZERO - by[0], F::ZERO - by[1]];
         let asleep = !coll.bones[k].body.enabled;
         let index = out.struck.len();
         let col = coll.objects[k].collision.as_mut().expect("checked above");
         let r = &mut col.record;
         let mut at = own_end;
-        for h in &narrow.ray.contacts {
+        for h in &contacts {
             r.touching = true;
             r.on_object = true;
             r.touching_other = true;
@@ -252,7 +309,7 @@ pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32
                 from: h.from,
                 on_body: h.to,
                 normal: crate::contact::negated(h.normal),
-                point: h.point,
+                point: if by == [F::ZERO; 2] { h.point } else { crate::seam::moved(h.point, back) },
                 arm: Vf::VF0,
                 other_arm: Vf::VF0,
                 surface: NO_SURFACE,
@@ -267,9 +324,12 @@ pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32
         }
         coll.activate();
         let bone = &coll.bones[k];
+        if by != [F::ZERO; 2] {
+            across.push((index, by));
+        }
         out.struck.push(Pushed { collection: c, object: k, collider, body: bone.body, mass: bone.mass });
     }
-    out
+    (out, across)
 }
 
 /// Where prop `(c, k)`'s own search's entries end on its list: before the mirrors at its end that
