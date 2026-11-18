@@ -167,3 +167,137 @@ fn the_bike_crosses_into_a_360_in_a_third_of_a_second() {
         assert_eq!(ticks, 11, "{what}: a third of a second at 30 Hz");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// MD248: the port's 360 cross against the original's, tick by tick
+// ---------------------------------------------------------------------------------------------------
+
+use game_sim::motion::ClipId;
+use game_sim::vehicle_anim::{self as va, Blend, Driver, Library, Params, Request};
+
+/// The stunt clock's bike-side step (`+0x14d8 += dt`, then `min(clock / row Duration, 1)` into
+/// `+0x14e4`), and those two fields.
+const STUNT_CLOCK: u32 = 0x004e_4900;
+const CLOCK: u32 = BIKE + 0x14d8;
+const CLOCK_PHASE: u32 = BIKE + 0x14e4;
+/// The 360 clips' length on state04, as R43 read it.
+const SPIN_CLIP: F = F(1.4666667);
+
+/// A table with the airborne row and the right 360 bound, a rider's or a bike's.
+fn spin_lib(bike: bool) -> Library {
+    let mut lib = Library { bike, ..Library::default() };
+    for s in va::AIR..va::AIR + 3 {
+        lib.clip[s as usize] = Some(ClipId(s as u32));
+    }
+    lib.pack[(va::SPIN_RIGHT - va::PACK_EXTRA) as usize] = Some(ClipId(99));
+    lib
+}
+
+/// The body's measured rates (game_render::vehicle::params), which the 360 must not use.
+fn body_params() -> Params {
+    Params {
+        rate_stunt: F(4.0),
+        rate_default: F(4.0),
+        rate_pose: F(3.25),
+        rate_hold: F(0.25),
+        rate_ready: F(0.25),
+        cross_cap: F(1.0),
+        start_phase: F::ZERO,
+        band: [F(7.3333), F(14.6666), F(21.9999)],
+    }
+}
+
+fn airborne() -> Driver {
+    Driver { want: va::AIR, state: va::AIR, prev: va::AIR, extra: -1, ..Driver::default() }
+}
+
+/// One port frame asking for `want`: the ramp it leaves, and the 360 clip's phase when it plays one.
+fn port_tick(d: &mut Driver, lib: &Library, want: i32) -> (F, Option<F>) {
+    d.want = want;
+    let frame = d.frame(F::from_bits(DT), &body_params(), &Request::default(), lib, true, |_| SPIN_CLIP);
+    let phase = match frame.blend {
+        Blend::One { phase, ramp, clip: Some(ClipId(99)) } => {
+            assert_eq!(ramp, d.ramp, "the 360 is drawn at the ramp");
+            Some(phase)
+        }
+        _ => None,
+    };
+    (d.ramp, phase)
+}
+
+/// **The port's rider crosses into a 360 and out as the original's does**: every tick's saved-pose
+/// weight bit for bit against SLUS-21104's rider layer, 16 ticks in at 2 a second and 16 out into the
+/// airborne row (the original's still: both take the plain 2), not the body's 3.25. And the clip's
+/// phase each tick against the original's own stunt clock over the 360 row's Duration.
+#[test]
+fn the_ports_rider_crosses_a_360_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    let lib = spin_lib(false);
+    let mut d = airborne();
+    set_byte(&mut ee, STUNT_BYTE, SPIN_RIGHT);
+    ee.set_u32(STUNT, SPIN_RIGHT);
+    ee.set_u32(CLOCK, 0);
+    // 45 ticks are 1.49985 s; on the 46th the clock's phase would reach 1, and the original's stunt
+    // clock ends the stunt instead (the clock zeroed, the phase left at the 45th's).
+    for k in 1..=46 {
+        rider_tick(&mut ee);
+        ee.call(STUNT_CLOCK, &[u64::from(BIKE)], &[f32::from_bits(DT)], 2_000_000);
+        let (ramp, phase) = port_tick(&mut d, &lib, va::SPIN_RIGHT);
+        assert_eq!(ramp, f(&ee, RIDER_FADE), "in, tick {k}");
+        if k <= 45 {
+            assert_eq!(phase, Some(f(&ee, CLOCK_PHASE)), "in, tick {k}: the clip's phase (clock {:?})", f(&ee, CLOCK));
+        } else {
+            assert_eq!((f(&ee, CLOCK), phase), (F::ZERO, Some(F::ONE)), "tick 46: the original's stunt ends, the port's clip holds its end");
+        }
+    }
+    set_byte(&mut ee, STUNT_BYTE, 0xff);
+    for k in 1..=20 {
+        rider_tick(&mut ee);
+        let (ramp, phase) = port_tick(&mut d, &lib, va::AIR);
+        assert_eq!(phase, None);
+        assert_eq!(ramp, f(&ee, RIDER_FADE), "out, tick {k}");
+    }
+    assert_eq!(d.ramp, F::ZERO);
+}
+
+/// **The port's bike crosses into a 360 and out as the original's does**: its own 3 a second, the
+/// fade held at 1 on the change tick, every tick bit for bit against SLUS-21104's bike animate; the
+/// clip at the stunt clock over its own length.
+#[test]
+fn the_ports_bike_crosses_a_360_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    let lib = spin_lib(true);
+    let mut d = airborne();
+    let mut clock = F::ZERO;
+    for (id, want, what) in [(SPIN_RIGHT, va::SPIN_RIGHT, "in"), (0xff, va::AIR, "out")] {
+        ee.set_u32(STUNT, id);
+        for k in 1..=20 {
+            bike_tick(&mut ee);
+            let (ramp, phase) = port_tick(&mut d, &lib, want);
+            assert_eq!(ramp, f(&ee, BIKE_FADE), "{what}, tick {k}");
+            if id == SPIN_RIGHT {
+                clock = clock + F::from_bits(DT);
+                assert_eq!(phase, Some((clock / SPIN_CLIP).min(F::ONE)), "{what}, tick {k}: clock over the clip");
+            }
+        }
+        assert_eq!(d.ramp, F::ZERO, "{what}: a third of a second");
+    }
+}
+
+/// Without a 360 nothing moves: a pack extra still takes the body's gesture rate, and the airborne
+/// row out of anything but a 360 its own.
+#[test]
+fn only_the_360_takes_the_originals_fade() {
+    let mut lib = spin_lib(false);
+    lib.pack[0] = Some(ClipId(98));
+    let mut d = airborne();
+    port_tick(&mut d, &lib, va::PACK_EXTRA);
+    assert_eq!(d.rate, F(4.0));
+    port_tick(&mut d, &lib, va::AIR);
+    assert_eq!(d.rate, F(3.25));
+    port_tick(&mut d, &lib, va::SPIN_RIGHT);
+    assert_eq!(d.rate, F(2.0));
+    port_tick(&mut d, &lib, va::SPIN_RIGHT);
+    port_tick(&mut d, &lib, va::HOLD);
+    assert_eq!(d.rate, F(0.25), "a wreck pose out of a 360 keeps its own");
+}

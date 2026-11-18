@@ -355,7 +355,8 @@ fn a_whipped_trick_keeps_the_rider_on_the_bike() {
 
 /// **V69:** a 360 and its fade back to the airborne row, with MX vs. ATV's gesture (MD30: R1 held
 /// into the lip, the stick left then right on it, centred). The clips alone part the hands from the
-/// grips — 0.3 to 0.4 ft while the 360's clips play and up to 0.82 on the exit's fade, because each
+/// grips — 0.3 to 0.4 ft while the 360's clips play and about 0.44 on the exit's fade (MD248: the
+/// original's half second, linear; 0.82 on MD78's quarter-second smooth step), because each
 /// skeleton blends its own two poses and a blend of two poses with the hands on the bars is not a
 /// pose with the hands on the bars — and the drawn rider is held on: the body is riding through
 /// all of it ([`game_sim::rider_anim::Mode::Riding`], the 360 is no pose off the clip table), so
@@ -390,7 +391,8 @@ fn a_360_keeps_the_hands_on_the_bars() {
     println!("the 360: {} frames of threesixtyR from {from}, the exit's fade from {:?}, landing at {down}; the clips take a hand {:.2} ft off its grip at {}, the drawn rider {:.3} at {}",
              turning.len(), exit, clips.0, clips.1, drawn.0, drawn.1);
     // What the hold is holding against: the exit's blend parts the clips' hands from the bars.
-    assert!(clips.0 > 0.5 && exit.iter().any(|&e| (e..e + 15).contains(&clips.1)),
+    // MD248: the exit's fade is the original's half second, 30 frames here.
+    assert!(clips.0 > 0.4 && exit.iter().any(|&e| (e..e + 30).contains(&clips.1)),
             "the clips' worst is no longer the exit's fade: {:.2} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the 360 drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
 }
