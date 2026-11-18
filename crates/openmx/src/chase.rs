@@ -212,12 +212,22 @@ pub fn atv_presets(
     viewport: game_sim::camera::Viewport,
 ) -> (Vec<game_sim::camera::Preset>, &'static str) {
     for (bytes, file) in [(pb, mod_presets(ModMachine::Atv)), (ini, ATV_CAMERA_INI)] {
-        let presets = bytes.map(|b| flier_presets(b, aspect, viewport)).unwrap_or_default();
+        let presets = bytes.filter(|b| !slow_fast_layout(b)).map(|b| flier_presets(b, aspect, viewport)).unwrap_or_default();
         if !presets.is_empty() {
             return (presets, file);
         }
     }
     (Vec::new(), "")
+}
+
+/// Whether a camera file is in MX vs. ATV Untamed's follow-camera layout (MD206): each preset a slow
+/// and a fast pair (`SlowFollowDistance`, `FastFov`, …) and follow/look-ahead tightnesses, which is all
+/// SLUS-21701's reader names, in place of the distances, FOVs and filters SLUS-21104's camera reads
+/// ([`game_sim::camera::Preset::read_layout`] would make them zero). Untamed's quad keeps its
+/// `Cam\FC_ATVDefault.pb` so; its `Cam\FC_ATV.ini` is in SLUS-21104's layout.
+pub fn slow_fast_layout(bytes: &[u8]) -> bool {
+    let ini = game_sim::phy::Ini::parse_bytes(bytes);
+    ini.names().iter().any(|n| ini.section(n).float("SlowFollowDistance").is_some())
 }
 
 /// Which of [`mod_presets`]' files one of MX vs. ATV's five cars reads (MD82d): its kind's.

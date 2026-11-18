@@ -286,6 +286,16 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
     }))
 }
 
+/// A file's bytes as an INI reader takes them: a BPB written back as the text of its sections and pairs
+/// ([`ini::text_of`], one byte a character as [`ini::text`] reads it), anything else as it is.
+fn as_text(name: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if !game_sim::bpb::is_bpb(&bytes) {
+        return Ok(bytes);
+    }
+    game_sim::bpb::parse(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    Ok(ini::text_of(&bytes).chars().map(|c| c as u8).collect())
+}
+
 /// A `/`-separated `mod.json` name as the archive's `\` one.
 fn member(name: &str) -> String {
     name.replace('/', "\\")
@@ -301,6 +311,23 @@ impl Pack {
         }
         game_sim::bpb::parse(&bytes).map_err(|e| format!("{name}: {e}"))?;
         Ok(ini::text_of(&bytes))
+    }
+
+    /// One of the pack's INI files as text bytes, for the readers that take bytes (MD206): `name`, or
+    /// where the pack has none, its compiled twin `name.bpb` (Untamed keeps its quad's cameras, `.aud`
+    /// and particle files only as BPBs: `Cam\FC_ATVDefault.pb.bpb`). A BPB is written back as its text;
+    /// any other file comes back as it is.
+    pub fn ini_bytes(&self, name: &str) -> Result<Vec<u8>, String> {
+        let name = member(name);
+        let bytes = self.files.read(&name).or_else(|e| self.files.read(&format!("{name}.bpb")).map_err(|_| e))?;
+        as_text(&name, bytes)
+    }
+
+    /// [`Pack::ini_bytes`] for a member by the end of its name (`\exhaust.emt`, as a particle list names
+    /// its emitters): that member, else one ending `\exhaust.emt.bpb`.
+    pub fn ini_suffix(&self, suffix: &str) -> Result<Vec<u8>, String> {
+        let bytes = self.files.read_suffix(suffix).or_else(|e| self.files.read_suffix(&format!("{suffix}.bpb")).map_err(|_| e))?;
+        as_text(suffix, bytes)
     }
 
     /// A model by its name (`ATVS_R_Chasis`, `yfz450_plastic`): `<name>.psg` anywhere in the pack.
@@ -457,7 +484,7 @@ impl Pack {
         Ok(list
             .into_iter()
             .map(|e| {
-                let emt = self.files.read_suffix(&e.emitter).ok().map(|b| Emt::parse(&ini::text(&b)));
+                let emt = self.ini_suffix(&e.emitter).ok().map(|b| Emt::parse(&ini::text(&b)));
                 (e, emt)
             })
             .collect())
@@ -589,7 +616,7 @@ impl Pack {
         Ok(list
             .into_iter()
             .map(|e| {
-                let emt = self.files.read_suffix(&e.emitter).ok().map(|b| Emt::parse(&ini::text(&b)));
+                let emt = self.ini_suffix(&e.emitter).ok().map(|b| Emt::parse(&ini::text(&b)));
                 (e, emt)
             })
             .collect())
