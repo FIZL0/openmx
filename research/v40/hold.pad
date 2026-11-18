@@ -1,0 +1,14 @@
+# V120: research/v40/tape.py's ride for the original (research/c15/tape.py makes the .p2m2 from it):
+# gas 75 ticks with the bars at 200, the brake 60, idle 60, then the brake held 90 so the bike stands
+# still for the shot (tape.py OUT 75 200 90 is the shell's side)
+down cross
+stick l 0.5703125 0
+sleep 75t
+up cross
+stick l 0 0
+down square
+sleep 60t
+up square
+sleep 60t
+down square
+sleep 90t
