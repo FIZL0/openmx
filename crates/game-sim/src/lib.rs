@@ -171,6 +171,10 @@ pub struct Sim {
     /// generator. `None` — a ride whose shell runs its own particles — draws nothing for them, as every
     /// state did before. Not on the wire yet, like the notes.
     pub dust: Option<Box<dust::Dust>>,
+    /// The bikes' tyre tracks (S448, [`tire_track`]): their render-pass updates draw on the race's
+    /// generator, one a row handed to a strip. `None` draws nothing for them, as before. Not on the
+    /// wire yet, like the dust.
+    pub tracks: Option<Box<tire_track::Tracks>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -284,6 +288,7 @@ impl Sim {
             seek: None,
             notes: None,
             dust: None,
+            tracks: None,
         }
     }
 
@@ -473,6 +478,8 @@ impl Sim {
         self.race_bike(0, controls.clutch);
         // The bike's particle emitters, after the bike (S328c).
         self.dust_frame(0, dt);
+        // Its tyre tracks' manager pass, beside the emitters (S448).
+        self.tracks_switch(0);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
         // The body's look-around clock, after the bike (S328a).
@@ -485,6 +492,8 @@ impl Sim {
         self.traffic.frame_late(dt, world);
         let mut said = said;
         said.seam = self.rider.wrap_round(&*world);
+        // The tyre tracks' rows, in the render pass after the sim half (S448).
+        self.tracks_render();
         self.ticks += 1;
         said
     }
@@ -790,6 +799,8 @@ impl Sim {
             self.think(i, dt, world);
             // Its particle emitters, after its brain (S328c).
             self.dust_frame(i, dt);
+            // Its tyre tracks' manager pass, beside the emitters (S448).
+            self.tracks_switch(i);
             self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
@@ -813,6 +824,8 @@ impl Sim {
             frame.seam = rider.wrap_round(&*world);
         }
         self.feed_cards();
+        // The tyre tracks' rows, in the render pass after the sim half (S448).
+        self.tracks_render();
         self.ticks += 1;
         frames
     }
@@ -977,6 +990,7 @@ impl Clone for Sim {
             seek: self.seek.clone(),
             notes: self.notes.clone(),
             dust: self.dust.clone(),
+            tracks: self.tracks.clone(),
         }
     }
 }
@@ -1579,6 +1593,9 @@ pub mod engine_note;
 
 /// The bikes' particle emitters' draws on the game's generator (S328c).
 pub mod dust;
+
+/// The tyre tracks' rows and their draws on the game's generator (S448).
+pub mod tire_track;
 
 /// The race activities (S13): the gates a race is counted through — the start gate and its penalty.
 pub mod race;

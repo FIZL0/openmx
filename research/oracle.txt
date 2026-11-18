@@ -14078,6 +14078,15 @@ vehicle_fx_tracks_walk boot 0x003d5a00 the vehicle fx manager's render walk (vta
 #                                   entry with +8 == 1 (a tyre track; C33's entries 12 front, 13 rear) through
 #                                   its +0x10 object's vt +0xc (vehicle_fx_track_update), then the node's own
 #                                   (0x001333e0). So tyre tracks lay rows in the render, not in the sim half
+# S448 — the tyre tracks' row decision ported (crates/game-sim/src/tire_track.rs; proof
+#   crates/game-sim/tests/ai/race4.rs: the tracks that draw each tick are draws.rs's C33_TRACKS through 63,
+#   and the generator agrees through 84, was 16). Journal: research/journal/2026-11-18-s448-*.
+#   track_strip_add's rand (0x003d903c) is before every early return: one draw per call, not per row laid
+#   (a call on the anchor, a 0 alpha byte or a short step draws and lays nothing). The alpha byte +0x1d4 is
+#   stored after every laid row that is not a break, as well as at a segment's start.
+#   Track vtable 0x0045e630: +8 zone 0x003d7f60, +0xc update, +0x10 no-op 0x003d8300, +0x14 enable 0x003d5d30
+#   (flag bit 0 set), +0x18 disable 0x003d8310, +0x1c zone off 0x003d7fc0, +0x20 zone on (bit 1 clear).
+#   Strip end 0x003d9600: +0x40 is a word; count +0x3c and u +0xd0 zeroed when count > 0.
 # F31e — the bike's put-back spot kept every frame (crates/game-sim/src/handling/spot.rs; proof
 #   crates/game-sim/tests/mxvatv_bike_ride.rs flip_replays_in_pure_rust, switch "keep spot": the original's
 #   keep and the port's after each frame, each the row's +0xd38..+0xd6c on all 465 rows, no spot poke).

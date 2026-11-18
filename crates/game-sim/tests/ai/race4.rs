@@ -16,7 +16,7 @@
 // has reached, so that a fix shows as a raised mark and a regression as a failure. The human, with no
 // pad but the stick its image was saved holding on the first step, agrees on every row (S329).
 
-use super::draws::{C33_DUST, C33_NOTE_PICKS, C33_NOTES_ON, c33_dust, c33_looks};
+use super::draws::{C33_DUST, C33_NOTE_PICKS, C33_NOTES_ON, c33_dust, c33_looks, c33_tracks};
 use super::lane::s323_free09;
 use super::sim::{s12e_bike, s12e_racer, s12e_seek_world, s12e_u64};
 use super::*;
@@ -25,7 +25,7 @@ use game_sim::Sim;
 use game_sim::ai::{Lane, Pilot, Seat};
 use game_sim::bike_col::{self, BikeCol};
 use game_sim::eco::Wooded;
-use game_sim::{dust, engine_note};
+use game_sim::{dust, engine_note, tire_track};
 use game_sim::phy::Phy;
 use game_sim::ride::{Controls, Ride, Wheel};
 use game_sim::rider::{Rider as Bike, Tables};
@@ -53,7 +53,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [132, 147, 1802, 206, 16];
+const C33_AGREES_THROUGH: [u64; 5] = [132, 147, 1802, 206, 84];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -409,6 +409,9 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     sim.notes = Some(Box::new(c33_notes(&ee)));
     // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
     sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
+    // S448: the tyre tracks, as the image holds them, and each one's entry in its rider's manager.
+    let (tracks, track_entries) = c33_tracks_seed(&ee);
+    sim.tracks = Some(Box::new(tracks));
 
     // The image's RAM already holds the bodies of the first row: it is tick 3's, saved before its
     // frame counter moved on. Each step from it is the next row.
@@ -483,10 +486,28 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
             assert_eq!(drew, want, "tick {}: the emitters that drew", row.frame);
             // From 17 through 28 nothing else draws in the original's sim half (draws.rs), so the
             // Sim's generator steps two a drawing emitter.
+            // S448: and the tyre tracks' rows after the sim half (draws.rs's C33_TRACKS), one a row.
+            let tracks = &sim.tracks.as_ref().unwrap().riders;
+            let mut laid: Vec<(&'static str, usize)> = Vec::new();
+            for (k, name) in C33_NAMES.iter().enumerate() {
+                if row.frame > C33_AGREES_THROUGH[k] {
+                    continue;
+                }
+                let p = c33_player(&ee, k);
+                for (t, track) in tracks[p].tracks.iter().enumerate() {
+                    assert!(track.draws <= 1, "tick {}: {name}'s track {} drew {}", row.frame, track_entries[p][t], track.draws);
+                    if track.draws != 0 {
+                        laid.push((name, track_entries[p][t]));
+                    }
+                }
+            }
+            laid.sort();
+            let want_laid: Vec<(&'static str, usize)> = c33_tracks(row.frame).into_iter().filter(|(n, _)| row.frame <= C33_AGREES_THROUGH[C33_NAMES.iter().position(|m| m == n).unwrap()]).collect();
+            assert_eq!(laid, want_laid, "tick {}: the tracks that laid a row", row.frame);
             if (17..=28).contains(&row.frame) {
                 let mut g = Rng::from_state(gen_was);
                 let steps = (0..=64).find(|_| g.state() == sim.ai.as_ref().unwrap().rng.state() || { g.rand(); false });
-                assert_eq!(steps, Some(2 * want.len()), "tick {}: the Sim's draws", row.frame);
+                assert_eq!(steps, Some(2 * want.len() + want_laid.len()), "tick {}: the Sim's draws", row.frame);
             }
         }
         // S328a: the bodies' look-around clocks re-arm on the generator as the original's do
@@ -729,6 +750,103 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
         .collect();
     riders.sort_by_key(|r| r.0);
     dust::Dust { riders: riders.into_iter().map(|r| r.1).collect(), view: None }
+}
+
+/// S448: every rider's tyre tracks as the image holds them, by player, and each track's entry in its
+/// rider's manager (`+0x1490`). A track entry's vtable is at `+0x10`: its tyre record `+4`, flag byte
+/// `+8`, `Disable` `+0xc`, strip `+0x14`, zones `+0x18`, last tyre point `+0x30`, `FadeOut` `+0x40` and
+/// what is left `+0x44`, `FadeIn` `+0x48` and `+0x4c`, `MinimumSpeedThreshold` `+0x50`, the
+/// compressions `+0x54` / `+0x58`, `BasePercentAlpha` `+0x5c`, `Width` `+0x60`, `BreakAngle` in radians
+/// `+0x64`. The snapshot is read through the manager's feed (`+0x30`): speed `+0x20`, wreck `+0x24`; a
+/// tyre record's point `+0`, normal `+4`, ground `+8`, object `+0xc`, compression `+0x10`, spinning
+/// `+0x14`, zone `+0x24` (pointers), and the zone the manager last saw `+0x29`.
+fn c33_tracks_seed(ee: &Ee) -> (tire_track::Tracks, Vec<Vec<usize>>) {
+    use tire_track::{Params, RiderTracks, Snapshot, Strip, Track, Tyre};
+    const TRACK: u32 = 0x0045_e630;
+    let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+    let f = |a: u32| F(ee.f32_at(a));
+    let byte = |a: u32| ee.read(a, 1) as u8;
+    let mut riders: Vec<(usize, RiderTracks, Vec<usize>)> = C33_RIDERS
+        .iter()
+        .enumerate()
+        .map(|(k, &(r, _, _))| {
+            let m = ee.u32_at(r + 0x1490);
+            let feed = ee.u32_at(m + 0x30);
+            let records = ee.u32_at(feed + 4);
+            let mut tracks = Vec::new();
+            let mut entries = Vec::new();
+            for i in 0..ee.u32_at(m + 0x34) {
+                let e = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
+                if ee.u32_at(e + 0x10) != TRACK {
+                    continue;
+                }
+                let s = ee.u32_at(e + 0x14);
+                let what = format!("{}'s track {i}", C33_NAMES[k]);
+                assert_eq!((f(s + 0xd8), f(s + 0xe0), f(s + 0x1d8)), (F(8.0), tire_track::LAY_DISTANCE, F(1.0)), "{what}: its strip's segment, lay distance and u scale");
+                let params = Params {
+                    tyre: ((ee.u32_at(e + 4) - records) / 0x2c) as usize,
+                    disable: ee.u32_at(e + 0xc) as u8,
+                    zones: core::array::from_fn(|z| byte(e + 0x18 + z as u32)),
+                    width: f(e + 0x60),
+                    break_angle: f(e + 0x64),
+                    min_speed: f(e + 0x50),
+                    min_compression: f(e + 0x54),
+                    max_compression: f(e + 0x58),
+                    base_alpha: f(e + 0x5c),
+                    fade_in: f(e + 0x48),
+                    fade_out: f(e + 0x40),
+                    height: f(s + 0xd4),
+                    segment: f(s + 0xd8),
+                    u_scale: f(s + 0x1d8),
+                };
+                let flag = byte(e + 8);
+                let strip = Strip {
+                    ended: ee.u32_at(s + 0x40) != 0,
+                    count: ee.u32_at(s + 0x3c) as i32,
+                    u: f(s + 0xd0),
+                    anchor: vf(s + 0x50),
+                    anchor_normal: vf(s + 0x60),
+                    at: vf(s + 0x70),
+                    normal: vf(s + 0x80),
+                    edges: [vf(s + 0x90), vf(s + 0xa0)],
+                    dir: vf(s + 0xb0),
+                    start: vf(s + 0xc0),
+                    last_lay: vf(s + 0x1c0),
+                    alpha: byte(s + 0x1d4),
+                };
+                tracks.push(Track {
+                    live: flag & 1 != 0,
+                    zone_off: flag & 2 != 0,
+                    out_left: f(e + 0x44),
+                    in_left: f(e + 0x4c),
+                    last: vf(e + 0x30),
+                    strip,
+                    ..Track::new(params)
+                });
+                entries.push(i as usize);
+            }
+            assert_eq!(entries, [12, 13], "{}'s tyre tracks", C33_NAMES[k]);
+            let at = |p: u32, o: u32| ee.u32_at(p + o);
+            let tyre = |t: u32| {
+                let rec = records + 0x2c * t;
+                Tyre {
+                    at: vf(at(rec, 0)),
+                    normal: vf(at(rec, 4)),
+                    ground: ee.u32_at(at(rec, 8)) != 0,
+                    object: ee.u32_at(at(rec, 0xc)) != 0,
+                    compression: f(at(rec, 0x10)),
+                    spinning: ee.u32_at(at(rec, 0x14)) != 0,
+                    zone: byte(at(rec, 0x24)),
+                }
+            };
+            let snap = Snapshot { tyres: [tyre(0), tyre(1)], speed: f(at(feed, 0x20)), wrecking: ee.u32_at(at(feed, 0x24)) != 0 };
+            let zones = [byte(records + 0x29), byte(records + 0x2c + 0x29)];
+            (c33_player(ee, k), RiderTracks { tracks, snap, zones }, entries)
+        })
+        .collect();
+    riders.sort_by_key(|r| r.0);
+    let entries = riders.iter().map(|r| r.2.clone()).collect();
+    (tire_track::Tracks { riders: riders.into_iter().map(|r| r.1).collect() }, entries)
 }
 
 /// S421: rider `r`'s rear tyre emitter node in its image, and the Sim's chain for it. The vehicle holds
