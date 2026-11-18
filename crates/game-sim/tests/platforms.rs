@@ -464,8 +464,9 @@ const RIDERS_DIGEST: u64 = 0x448f17a4bb03dd13;
 /// moved both, the length by one byte (the riders end the run in a different state).
 /// 13616 since S467: each rider's body driver carries the 360's clip-start count it last saw (a
 /// byte, four riders).
-const RIDERS_WIRE_DIGEST: u64 = 0x878876b2575cd389;
-const RIDERS_WIRE_LEN: usize = 13616;
+/// 13648 since S478: and its held-360 clocks (two floats, four riders).
+const RIDERS_WIRE_DIGEST: u64 = 0x08627477bb4c84a9;
+const RIDERS_WIRE_LEN: usize = 13648;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

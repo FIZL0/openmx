@@ -1041,6 +1041,7 @@ impl Chassis {
             progress: tricks.progress,
             seq: tricks.seq,
             spin_starts: ride.tricks.as_ref().map_or(0, |t| t.spin.starts),
+            spin_hold: ride.tricks.as_ref().is_some_and(|t| t.spin.held),
             ..Request::default()
         }
     }

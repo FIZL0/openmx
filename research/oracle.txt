@@ -13435,6 +13435,14 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 # id or +0x1650 (0x004dd98c): fade 1, phase 0 that tick. +0x1650 zeroed at 0x004de614, 0x004e1c50,
 # 0x004e23f0; set at 0x004e6444.
 
+# S478 — a turning 360 held under R1 alone (tests/mxvatv_stunt_cross.rs *_holds_a_360_under_r1_*; journal
+# 2026-11-18-s478-*). Trick step 0x004e49c0 zeroes +0x1788 each frame; kind 4 == asked, clock in
+# [0.3, +0x44 + [0x00525370] = 0.04 (0x3d23d70a)] -> stunt mark 0x0046b110; clock >= +0x44 -> hold vt +0x4ec,
+# +0x1788 = 1, no dt. Writers of the hold's clocks (overlay scan): +0x14e0 only the ctor 0x004de5f4 and the
+# hold 0x004e48b0 (never reset in a ride); +0x14dc ctor, hold, remote clocks 0x004e49a4, stunt start
+# 0x004e6440. Bike animate's one-clip play 0x0013eec0 (f12 phase, clamped at 0x004ddbac): phase 0 on the
+# restart tick ($21 set at 0x004dd9b8 skips the divide at 0x004dda20).
+
 # MD161 — MX vs. ATV Untamed's (SLUS-21701) monster-truck changes ported behind atv_car::Load::untamed, proved by
 # crates/game-sim/tests/untamed_truck.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81c.
 # Journal: research/journal/2026-11-14-md161-untamed-monster-pack.

@@ -609,7 +609,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // (`PropSet::seams`), read again from the world every pass, so not walked and not on the wire.
     // 12352 since S467: the body driver's 360 clip-start count (`Driver::spin_starts`), walked with
     // the driver but, as the rider's body is not, not hashed; on the wire.
+    // 12360 since S478: the body driver's held-360 clocks (`Driver::hold`, `Driver::shake`), the same
+    // way. The 360's R1-alone flag (`Spin::held`) sits in the boxed trick state; on the wire, unhashed.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12352, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12360, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

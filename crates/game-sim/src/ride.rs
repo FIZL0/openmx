@@ -2731,6 +2731,8 @@ impl Ride {
                         crate::handling::untamed::ride_spin(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, c.trick, t.side_flick, &tables.acos);
                     } else {
                         air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
+                        // S478: R1 alone, which holds a turning 360's clip (the animations read it).
+                        t.spin.held = astep.modifier;
                     }
                     astep.spinning = t.spin.applied;
                     astep.spin_ramp = t.spin.ramp;

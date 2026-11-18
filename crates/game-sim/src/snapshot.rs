@@ -1088,12 +1088,12 @@ wire!(crate::handling::Flip { clip, wrecked, cut, came_round, struck, stunt, pre
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch, score });
 wire!(crate::score::Atv { scales, bank, held, wheel });
 wire!(crate::score::Scale { id, scale });
-wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut, starts });
+wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut, starts, held });
 wire!(crate::ride::Back { at, facing, up });
 wire!(crate::rider_anim::Body { veh, player, ready, picked, look, looking, settled, machine });
 wire!(crate::state::Ride { wreck, counting, elapsed, kind, pending, fresh, wrecking, wrecks, entries });
 wire!(crate::vehicle_anim::Params { rate_stunt, rate_default, rate_pose, rate_hold, rate_ready, cross_cap, start_phase, band });
-wire!(crate::vehicle_anim::Request { held, at_base, cut, offset, base, rotation, phase_axis, mix_axis, band, progress, seq } skip { spin_starts });
+wire!(crate::vehicle_anim::Request { held, at_base, cut, offset, base, rotation, phase_axis, mix_axis, band, progress, seq } skip { spin_starts, spin_hold });
 wire!(crate::biplane::Area { width, depth });
 wire!(crate::biplane::Attitude { flown, grounded, nose_y, roll, speed, pitch_rate });
 wire!(crate::input::EventQueue { count, events });
@@ -1169,7 +1169,7 @@ wire!(crate::wreck_page::Page { fade, updates });
 wire_enum!(crate::wreck_page::Fade { Off, Out, In });
 wire!(crate::trick::Gesture { group, dir, stick, look, armed });
 wire!(crate::trick::Wreck; f0);
-wire!(crate::vehicle_anim::Driver { want, state, prev, seq, spin_starts, rate, ramp, started, holding, from_table, cross, cross_prev, cross_start, reverse, extra, mix, phase });
+wire!(crate::vehicle_anim::Driver { want, state, prev, seq, spin_starts, hold, shake, rate, ramp, started, holding, from_table, cross, cross_prev, cross_start, reverse, extra, mix, phase });
 wire!(crate::motion::ClipId; f0);
 wire!(crate::input::ControlState { held, strength, since_release_ms, held_ms, prev_since_release_ms, prev_held_ms });
 
