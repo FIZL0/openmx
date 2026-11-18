@@ -3335,6 +3335,7 @@ fn captured_request(c: &Captured) -> game_sim::vehicle_anim::Request {
         progress: F(c.progress),
         seq: c.req_seq,
         spin_starts: 0,
+        spin_hold: false,
     }
 }
 
@@ -3575,6 +3576,8 @@ fn the_ports_machine_steps_to_the_originals_clip_phase_and_pose() {
             prev: before.prev,
             seq: before.seq,
             spin_starts: 0,
+            hold: F::ZERO,
+            shake: F::ZERO,
             rate: F(before.rate),
             ramp: F(before.ramp),
             started: before.started,
@@ -4194,6 +4197,8 @@ fn the_put_back_holds_the_original_pose_joint_by_joint() {
                 prev: before.word("body.8dc", 0x8ec - 0x8dc) as i32,
                 seq: (before.word("body.8dc", 0x8fc - 0x8dc) & 0xff) as u8,
                 spin_starts: 0,
+                hold: F::ZERO,
+                shake: F::ZERO,
                 rate: F(before.float("body.680", 0x690 - 0x680)),
                 ramp: F(before.float("body.680", 0x68c - 0x680)),
                 started: before.word("body.680", 0x688 - 0x680) != 0,
@@ -4247,6 +4252,7 @@ fn the_put_back_holds_the_original_pose_joint_by_joint() {
                 progress: F(now.float("req", 0x1a4)),
                 seq: now.word("req", 0x1a8) as i32,
                 spin_starts: 0,
+                spin_hold: false,
             };
             let dt = F(now.float("dt", 0));
             let mut snapshot = game_sim::motion::Snapshot::default();

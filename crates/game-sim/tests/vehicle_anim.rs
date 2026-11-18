@@ -658,6 +658,8 @@ fn the_state_machine_matches_over_twenty_four_thousand_frames() {
             prev: prev0,
             seq: seq_byte,
             spin_starts: 0,
+            hold: F::ZERO,
+            shake: F::ZERO,
             rate: F(rate0),
             ramp: F(ramp0),
             started: started0,
@@ -694,6 +696,7 @@ fn the_state_machine_matches_over_twenty_four_thousand_frames() {
             progress: F(progress),
             seq,
             spin_starts: 0,
+            spin_hold: false,
         };
         let frame = d.frame(F(dt), &p, &r, &lib, self_a && self_b, |c| {
             F(durations[state_of(c.0)])

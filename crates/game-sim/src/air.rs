@@ -1252,6 +1252,11 @@ pub struct Spin {
     /// what the rider's and bike's animations read both off ([`Spin::shown`]). Animation only, so it is
     /// not hashed.
     pub starts: u8,
+    /// **The port's own (S478):** R1 alone was held on this 360's last step ([`Step::modifier`]),
+    /// MX vs. ATV's asked trick kind 4: the rider's and bike's animations hold a turning 360's clip at
+    /// its stunt row's `+0x44` while it is ([`crate::vehicle_anim::Request::spin_hold`]). Animation
+    /// only, so it is not hashed.
+    pub held: bool,
 }
 
 impl Spin {

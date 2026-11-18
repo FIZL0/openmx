@@ -172,6 +172,14 @@ const SPIN_RATE_BIKE: F = F(3.0);
 /// **MD248 (R43):** the 360 rows' `Duration` in MX vs. ATV's stunt table. The rider's clip plays at the
 /// stunt clock over this, held at its end once the clock is past it.
 const SPIN_ROW: F = F(1.5);
+/// **S478 (R47):** the 360 rows' `+0x44` in MX vs. ATV's stunt table: with R1 alone held
+/// ([`Request::spin_hold`]), the stunt clock stops here and the clip is held.
+const SPIN_HOLD_AT: F = F(0.72);
+/// **S478:** how far past [`SPIN_HOLD_AT`] the clock may be and still be held (0.04, `0x3d23d70a`).
+const SPIN_HOLD_LATE: F = F(f32::from_bits(0x3d23_d70a));
+/// **S478:** the held clip's shake at its widest, 0.07 of a second of clock
+/// ([`crate::handling::update::HOLD_SHAKE`]), reached after half a second held.
+const SPIN_SHAKE: F = F(f32::from_bits(crate::handling::update::HOLD_SHAKE));
 /// How many states [`Library::pack`] holds.
 pub const PACK_STATES: usize = EXTRA_SLOTS + 2;
 /// The last extra state.
@@ -446,6 +454,10 @@ pub struct Request {
     /// vs. ATV's second pass past the clip angle starts the stunt again (its restart ask): the fade
     /// from the saved pose at the 360's rate, the clip from 0.
     pub spin_starts: u8,
+    /// **The port's own (S478):** R1 alone is held ([`crate::air::Spin::held`]), MX vs. ATV's asked
+    /// trick kind 4, which is a turning 360's: once its clock has reached [`SPIN_HOLD_AT`] (and not
+    /// gone more than [`SPIN_HOLD_LATE`] past), the clock stops and the clip is held with a shake.
+    pub spin_hold: bool,
 }
 
 /// The id the gesture field holds when nothing is asked for: the slot count, one past the last
@@ -710,6 +722,12 @@ pub struct Driver {
     pub seq: u8,
     /// **S467:** the request's [`Request::spin_starts`] as the last frame saw it.
     pub spin_starts: u8,
+    /// **S478:** a held 360's clock (MX vs. ATV's bike `+0x14dc`): zeroed when the 360 starts, run on
+    /// only while the clip is held. It ramps the shake in.
+    pub hold: F,
+    /// **S478:** the held clip's shake clock (bike `+0x14e0`): run on only while a clip is held, and
+    /// never zeroed — the original's constructor is its only other writer.
+    pub shake: F,
     /// The rate the cross-fade ramp falls at, picked out of [`Params`] by the asked-for state on every
     /// restart. Also the length of the cross the played-once groups put their clip on with.
     pub rate: F,
@@ -739,6 +757,25 @@ pub struct Driver {
     pub mix: Lag,
     /// The phase axis: how far into the row's clips it is.
     pub phase: Lag,
+}
+
+impl Driver {
+    /// **S478:** MX vs. ATV's trick hold (bike vt `+0x4ec`) on a held 360, one tick: the shake its
+    /// phase takes, and the hold and shake clocks run on by `dt`. The shake ramps from 0 to
+    /// [`SPIN_SHAKE`] over the hold's first half second (the original's lerp from 0 over 0 to 0.5,
+    /// on the accumulator, clamped `max` then `min`), times the smooth noise at twice the shake clock
+    /// as it stood. The noise is the port's ([`crate::ride::noise`], the rider's balance's): the
+    /// original's tables are its session's.
+    fn spin_shake(&mut self, dt: F) -> F {
+        let (lo, hi) = (F::ZERO, SPIN_SHAKE);
+        let at = (self.hold - lo) / (F(0.5) - lo);
+        let ramp = Acc::adda(F::ZERO, lo).madd(at, hi - lo);
+        let ramp = ramp.max(lo.min(hi)).min(lo.max(hi));
+        let shake = ramp * crate::ride::noise(F(2.0) * self.shake);
+        self.shake = self.shake + dt;
+        self.hold = self.hold + dt;
+        shake
+    }
 }
 
 /// The within-row weight: below the middle it is the low half stretched over `0..1`, above it the high
@@ -975,14 +1012,31 @@ impl Driver {
                 // phase is the stunt clock (dt on the first tick, then dt more a tick; kept in the
                 // reverse pair's clock, which nothing else reads while a 360 runs): the rider's over
                 // the 360 rows' Duration, held at 1, the bike's over its own clip (R43).
+                //
+                // S478 (R47): with R1 alone held and the clock at the rows' +0x44, the clock stops and
+                // the clip holds: the rider's phase is the clock plus a shake over the Duration, the
+                // bike's still the clock over its clip. On the tick the 360 (re)starts the bike plays
+                // its clip at 0, not at the clock (its animate skips the divide).
                 s if spinning(lib, s) => {
-                    self.reverse = if restart { F::ZERO } else { self.reverse } + dt;
+                    if restart {
+                        self.reverse = F::ZERO;
+                        self.hold = F::ZERO;
+                    }
+                    let held = r.spin_hold && self.reverse >= SPIN_HOLD_AT && self.reverse <= SPIN_HOLD_AT + SPIN_HOLD_LATE;
                     a = lib.clip(s);
-                    w1 = if lib.bike {
-                        self.reverse / a.map_or(F::ZERO, &length)
+                    if held {
+                        let shake = self.spin_shake(dt);
+                        w1 = if lib.bike { self.reverse / a.map_or(F::ZERO, &length) } else { (self.reverse + shake) / SPIN_ROW };
                     } else {
-                        (self.reverse / SPIN_ROW).min(F::ONE)
-                    };
+                        self.reverse = self.reverse + dt;
+                        w1 = if lib.bike && restart {
+                            F::ZERO
+                        } else if lib.bike {
+                            self.reverse / a.map_or(F::ZERO, &length)
+                        } else {
+                            (self.reverse / SPIN_ROW).min(F::ONE)
+                        };
+                    }
                     mode = 1;
                 }
                 // The two played-once groups: a cross into the clip on the frame the state starts, and
@@ -1239,6 +1293,8 @@ impl hash::State for Driver {
         w.i32("prev", self.prev);
         w.u8("seq", self.seq);
         w.u8("spin_starts", self.spin_starts);
+        w.f("hold", self.hold);
+        w.f("shake", self.shake);
         w.f("rate", self.rate);
         w.f("ramp", self.ramp);
         w.bool("started", self.started);

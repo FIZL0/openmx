@@ -684,6 +684,7 @@ fn resting() -> (vehicle_anim::Request, Ask) {
         progress: F::ZERO,
         seq: 0,
         spin_starts: 0,
+        spin_hold: false,
     };
     let a = Ask { gesture: SLOTS as i32, ..Default::default() };
     (r, a)

@@ -1552,6 +1552,7 @@ impl Rider {
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
         body_request.spin_starts = ride.tricks.as_ref().map_or(0, |t| t.spin.starts);
+        body_request.spin_hold = ride.tricks.as_ref().is_some_and(|t| t.spin.held);
         (ask, front)
     }
 

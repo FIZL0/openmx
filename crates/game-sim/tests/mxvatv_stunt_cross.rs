@@ -183,6 +183,17 @@ const CLOCK_PHASE: u32 = BIKE + 0x14e4;
 /// The 360 clips' length on state04, as R43 read it.
 const SPIN_CLIP: F = F(1.4666667);
 
+/// The bike animate's one-clip play (`f12` the clamped phase), replaced by a recorder:
+/// each call leaves its phase in the cell.
+const BIKE_PLAY_ONE: u32 = 0x0013_eec0;
+
+fn bike_play(ee: &mut Ee) -> std::rc::Rc<std::cell::Cell<Option<F>>> {
+    let played = std::rc::Rc::new(std::cell::Cell::new(None));
+    let cell = played.clone();
+    ee.hooks.insert(BIKE_PLAY_ONE, Box::new(move |ee: &mut Ee| cell.set(Some(F(ee.f(12))))));
+    played
+}
+
 /// A table with the airborne row and the right 360 bound, a rider's or a bike's.
 fn spin_lib(bike: bool) -> Library {
     let mut lib = Library { bike, ..Library::default() };
@@ -218,8 +229,13 @@ fn port_tick(d: &mut Driver, lib: &Library, want: i32) -> (F, Option<F>) {
 
 /// [`port_tick`] with the 360's clip-start count (S467) in the request.
 fn port_tick_at(d: &mut Driver, lib: &Library, want: i32, spin_starts: u8) -> (F, Option<F>) {
+    port_tick_held(d, lib, want, spin_starts, false)
+}
+
+/// [`port_tick_at`] with R1 alone held or not (S478).
+fn port_tick_held(d: &mut Driver, lib: &Library, want: i32, spin_starts: u8, spin_hold: bool) -> (F, Option<F>) {
     d.want = want;
-    let r = Request { spin_starts, ..Request::default() };
+    let r = Request { spin_starts, spin_hold, ..Request::default() };
     let frame = d.frame(F::from_bits(DT), &body_params(), &r, lib, true, |_| SPIN_CLIP);
     let phase = match frame.blend {
         Blend::One { phase, ramp, clip: Some(ClipId(99)) } => {
@@ -273,18 +289,23 @@ fn the_ports_rider_crosses_a_360_as_the_original() {
 #[test]
 fn the_ports_bike_crosses_a_360_as_the_original() {
     let Some(mut ee) = image() else { return };
+    let played = bike_play(&mut ee);
     let lib = spin_lib(true);
     let mut d = airborne();
-    let mut clock = F::ZERO;
     for (id, want, what) in [(SPIN_RIGHT, va::SPIN_RIGHT, "in"), (0xff, va::AIR, "out")] {
         ee.set_u32(STUNT, id);
         for k in 1..=20 {
+            ee.call(STUNT_CLOCK, &[u64::from(BIKE)], &[f32::from_bits(DT)], 2_000_000);
+            played.set(None);
             bike_tick(&mut ee);
             let (ramp, phase) = port_tick(&mut d, &lib, want);
             assert_eq!(ramp, f(&ee, BIKE_FADE), "{what}, tick {k}");
             if id == SPIN_RIGHT {
-                clock = clock + F::from_bits(DT);
-                assert_eq!(phase, Some((clock / SPIN_CLIP).min(F::ONE)), "{what}, tick {k}: clock over the clip");
+                // S478: the original's own phase, 0 on the change tick, then the clock over the clip.
+                assert_eq!(phase, played.get(), "{what}, tick {k}: the clip's phase");
+                if k == 1 {
+                    assert_eq!(phase, Some(F::ZERO), "the change tick plays the clip at 0");
+                }
             }
         }
         assert_eq!(d.ramp, F::ZERO, "{what}: a third of a second");
@@ -379,16 +400,20 @@ fn the_ports_rider_restarts_a_360_as_the_original() {
 #[test]
 fn the_ports_bike_restarts_a_360_as_the_original() {
     let Some(mut ee) = restart_image() else { return };
+    let played = bike_play(&mut ee);
     let lib = spin_lib(true);
     let mut d = airborne();
     for (starts, ticks) in [(1u8, 60), (2, 20)] {
-        let mut clock = F::ZERO;
         for k in 1..=ticks {
+            played.set(None);
             original_tick(&mut ee, k == 1 && starts == 2);
             let (ramp, phase) = port_tick_at(&mut d, &lib, va::SPIN_RIGHT, starts);
             assert_eq!(ramp, f(&ee, BIKE_FADE), "start {starts}, tick {k}: the fade");
-            clock = clock + F::from_bits(DT);
-            assert_eq!(phase, Some((clock / SPIN_CLIP).min(F::ONE)), "start {starts}, tick {k}: clock over the clip");
+            // S478: the original's played phase: 0 on each (re)start tick, then the clock over the clip.
+            assert_eq!(phase, played.get(), "start {starts}, tick {k}: the clip's phase");
+            if k == 1 {
+                assert_eq!(phase, Some(F::ZERO), "start {starts}: the restart tick plays the clip at 0");
+            }
         }
     }
 }
@@ -411,4 +436,110 @@ fn a_360_shows_from_its_clip_start_to_its_end() {
     s.active = false;
     s.clip = 0;
     assert!(!s.shown(), "the 360 over");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S478: R1 alone held stops a turning 360's clock at the row's +0x44 and holds the clip
+// ---------------------------------------------------------------------------------------------------
+
+/// The asked trick byte (the pad reader's: R1 4), the held word the trick step sets, the trick hold's
+/// two clocks (hold, shake) and the shared smooth noise the hold shakes by.
+const ASKED: u32 = BIKE + 0x14ec;
+const HELD: u32 = BIKE + 0x1788;
+const HOLD_CLOCK: u32 = BIKE + 0x14dc;
+const SHAKE_CLOCK: u32 = BIKE + 0x14e0;
+const SMOOTH_NOISE: u32 = 0x0013_4580;
+
+/// [`restart_image`] with the smooth noise answering the port's (`game_sim::ride::noise`, the rider's
+/// balance's stand-in), the hold clock zeroed as the stunt start leaves it, and the shake clock as the
+/// image has it. The driver the port starts from carries the same shake clock.
+fn hold_image() -> Option<(Ee, Driver)> {
+    let mut ee = restart_image()?;
+    ee.hooks.insert(SMOOTH_NOISE, Box::new(|ee: &mut Ee| {
+        let t = F(ee.f(12));
+        ee.set_f(0, game_sim::ride::noise(t).0);
+    }));
+    ee.set_u32(HOLD_CLOCK, 0);
+    let d = Driver { shake: f(&ee, SHAKE_CLOCK), ..airborne() };
+    Some((ee, d))
+}
+
+fn ask_r1(ee: &mut Ee, on: bool) {
+    let asked = ee.u32_at(ASKED) & !0xff;
+    ee.set_u32(ASKED, asked | if on { 4 } else { 0 });
+}
+
+/// The ride the hold tests run: R1 alone held for 60 ticks (the clock stops at 0.7333 on tick 22, the
+/// clip held from tick 23 — past the shake's half-second ramp), let go for 20 (the clock runs on), then
+/// held again for 10 (too late: the clock is past 0.72 + 0.04, nothing holds).
+const HOLD_RIDE: [(bool, u32); 3] = [(true, 60), (false, 20), (true, 10)];
+
+/// **The port's rider holds a turning 360 under R1 as the original's does** (R47's hold, vt
+/// `+0x4ec`): every tick of [`HOLD_RIDE`], the saved-pose weight and the clip's phase bit for bit
+/// against SLUS-21104's trick step and rider layer — the held phase the frozen clock plus the shake,
+/// over the Duration; the hold's word and its two clocks follow the original's.
+#[test]
+fn the_ports_rider_holds_a_360_under_r1_as_the_original() {
+    let Some((mut ee, mut d)) = hold_image() else { return };
+    let lib = spin_lib(false);
+    let (mut held_ticks, mut shaken) = (0, 0);
+    for (n, &(r1, ticks)) in HOLD_RIDE.iter().enumerate() {
+        for k in 1..=ticks {
+            ask_r1(&mut ee, r1);
+            original_tick(&mut ee, false);
+            assert_eq!(ee.u32_at(STUNT), SPIN_RIGHT, "leg {n}, tick {k}: the stunt runs");
+            let (ramp, phase) = port_tick_held(&mut d, &lib, va::SPIN_RIGHT, 1, r1);
+            let held = ee.u32_at(HELD) != 0;
+            assert_eq!(ramp, f(&ee, RIDER_FADE), "leg {n}, tick {k}: the fade");
+            assert_eq!(phase, Some(f(&ee, CLOCK_PHASE).max(F::ZERO).min(F::ONE)), "leg {n}, tick {k}: the phase (held {held})");
+            assert_eq!(d.reverse, f(&ee, CLOCK), "leg {n}, tick {k}: the stunt clock");
+            assert_eq!((d.hold, d.shake), (f(&ee, HOLD_CLOCK), f(&ee, SHAKE_CLOCK)), "leg {n}, tick {k}: the hold's clocks");
+            if held {
+                held_ticks += 1;
+                shaken += usize::from(Some(f(&ee, CLOCK) / F(1.5)) != phase);
+            }
+            assert_eq!(held, n == 0 && k >= 23, "leg {n}, tick {k}: held only from the clock's stop to letting go");
+        }
+    }
+    assert_eq!(held_ticks, 38);
+    assert!(shaken > 30, "the shake moves the phase ({shaken} of {held_ticks} held ticks)");
+}
+
+/// **The port's bike holds a turning 360 under R1 as the original's does**: its clip at the frozen
+/// clock over the clip's length, no shake (the bike reads the clock, not the shaken phase), every
+/// tick of [`HOLD_RIDE`] bit for bit against the phase SLUS-21104's bike animate plays its clip at.
+#[test]
+fn the_ports_bike_holds_a_360_under_r1_as_the_original() {
+    let Some((mut ee, mut d)) = hold_image() else { return };
+    let played = bike_play(&mut ee);
+    let lib = spin_lib(true);
+    for (n, &(r1, ticks)) in HOLD_RIDE.iter().enumerate() {
+        for k in 1..=ticks {
+            ask_r1(&mut ee, r1);
+            played.set(None);
+            original_tick(&mut ee, false);
+            let (ramp, phase) = port_tick_held(&mut d, &lib, va::SPIN_RIGHT, 1, r1);
+            assert_eq!(ramp, f(&ee, BIKE_FADE), "leg {n}, tick {k}: the fade");
+            assert_eq!(phase, played.get(), "leg {n}, tick {k}: the clip's phase");
+            assert_eq!(d.reverse, f(&ee, CLOCK), "leg {n}, tick {k}: the stunt clock");
+        }
+    }
+}
+
+/// **R1 alone reaches the animations**: the 360's step leaves the flag the rider's and bike's
+/// requests read, and a held tick before the clock's stop does not hold.
+#[test]
+fn r1_alone_before_the_clocks_stop_does_not_hold() {
+    let lib = spin_lib(false);
+    let mut d = airborne();
+    for k in 1..=21 {
+        let (_, phase) = port_tick_held(&mut d, &lib, va::SPIN_RIGHT, 1, true);
+        assert_eq!(phase, Some(d.reverse / F(1.5)), "tick {k}");
+        assert_eq!(d.hold, F::ZERO, "tick {k}");
+    }
+    let before = d.reverse;
+    port_tick_held(&mut d, &lib, va::SPIN_RIGHT, 1, true);
+    assert!(d.reverse > before && d.reverse >= F(0.72), "tick 22 still runs the clock, to its stop");
+    port_tick_held(&mut d, &lib, va::SPIN_RIGHT, 1, true);
+    assert_eq!(d.hold, F::from_bits(DT), "tick 23 holds");
 }
