@@ -1664,8 +1664,7 @@ fn ai_ride(rigs: &mut [AiRig], sim: &mut Sim, dt: F, ragdolled: Option<&game_ren
         if i == 0 || i >= sim.players() {
             continue;
         }
-        let pilot = sim.ai.as_deref().and_then(|l| l.pilots.iter().find(|(p, _)| *p == i)).map(|(_, p)| p);
-        let hands = pilot.map_or_else(Controls::default, |p| game_sim::ai::ride_controls(&p.levers, p.racer.habits.clutch));
+        let hands = pilot_hands(sim, i).unwrap_or_default();
         let rider = &mut sim.others[i - 1].rider;
         if let Some(body) = &mut rig.body {
             body.ride(dt, rider, &hands, rider::Gate::default());
@@ -1691,6 +1690,13 @@ fn ai_ride(rigs: &mut [AiRig], sim: &mut Sim, dt: F, ragdolled: Option<&game_ren
             rider.holds = ride_holds_of(rig.chassis.as_ref()).map(Arc::new);
         }
     }
+}
+
+/// The controls player `i`'s brain hands its bike now, when a brain rides it (V133): an AI rider's,
+/// or the first player's under `--race-bot`. Its body machine reads them as a seat's reads the pad.
+fn pilot_hands(sim: &Sim, i: usize) -> Option<Controls> {
+    let pilot = sim.ai.as_deref()?.pilots.iter().find(|(p, _)| *p == i).map(|(_, p)| p)?;
+    Some(game_sim::ai::ride_controls(&pilot.levers, pilot.racer.habits.clutch))
 }
 
 /// What the picture shows of each of the race's AI riders now (V128), in [`AiRig`] order: [`Shown`]
@@ -10774,7 +10780,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // Online the session posed it inside its ticks, so a rollback rolls the body back too.
                 if moving && bike_up && online.is_none() {
                     perf.time(Stage::Animation, || {
-                        body.ride(dt, &mut seat.sim.rider, &seat.hands, rider::Gate::default())
+                        // A rider on a brain (`--race-bot`) holds what the brain hands the bike (V133).
+                        let hands = pilot_hands(&seat.sim, 0).unwrap_or(seat.hands);
+                        body.ride(dt, &mut seat.sim.rider, &hands, rider::Gate::default())
                     });
                     // The pose just drawn is the one the next frame's wreck is thrown from (S65).
                     if let (Some(doll), true) = (&ragdolled, seat.sim.rider.ragdoll_kit.is_some()) {
