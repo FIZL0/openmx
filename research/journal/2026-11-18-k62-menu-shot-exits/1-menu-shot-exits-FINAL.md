@@ -1,4 +1,4 @@
-# 1 — menu shot exits (PART)
+# 1 — menu shot exits (FINAL)
 
 Task K62. 2026-11-18.
 
