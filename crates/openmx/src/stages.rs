@@ -289,11 +289,21 @@ pub fn bytes_read() -> Option<u64> {
     io.lines().find_map(|l| l.strip_prefix("rchar:")).and_then(|n| n.trim().parse().ok())
 }
 
-/// [`bytes_read`] as a mark to count from: less the bytes that the next look at `/proc/self/io`
-/// will itself have read, so a process that reads nothing in between is shown reading nothing.
+/// [`bytes_read`] as a mark to count from: the count the file showed plus the bytes this look at
+/// it read, so a process that reads nothing in between is shown reading nothing (K79). The file's
+/// text is one byte longer whenever any of its counters gains a digit, so the size of one look is no
+/// guide to the next: the old mark took it for one and said "1 bytes read" of a ride that read none
+/// whenever the load's reads ended just short of a power of ten.
 pub fn bytes_read_mark() -> Option<u64> {
-    let (a, b) = (bytes_read()?, bytes_read()?);
-    Some(b + (b - a))
+    let io = std::fs::read_to_string("/proc/self/io").ok()?;
+    mark_after(&io)
+}
+
+/// The mark [`bytes_read_mark`] makes of one read of `/proc/self/io`: its `rchar` is the count
+/// before that read, which then read the whole text.
+fn mark_after(io: &str) -> Option<u64> {
+    let before: u64 = io.lines().find_map(|l| l.strip_prefix("rchar:")).and_then(|n| n.trim().parse().ok())?;
+    Some(before + io.len() as u64)
 }
 
 #[cfg(test)]
@@ -325,5 +335,28 @@ mod tests {
         let line = s.brief();
         assert!(line.starts_with("ms a frame: sim 2.00, all 2.02; worst "), "{line}");
         assert!(s.brief().starts_with("ms a frame: , all 0.00; "));
+    }
+
+    /// K79: the mark is the count the text showed plus the text's own length, even where a counter
+    /// in it is one byte longer than a look before.
+    #[test]
+    fn a_mark_counts_its_own_read_of_the_counters() {
+        let io = "rchar: 999990\nwchar: 0\nsyscr: 99\nsyscw: 0\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n";
+        assert_eq!(mark_after(io), Some(999_990 + io.len() as u64));
+        assert_eq!(mark_after("wchar: 0\n"), None);
+    }
+
+    /// K79: a process that reads nothing between the mark and the next look is shown reading
+    /// nothing, as the shell's ride after its first frame. Linux only; the mark and the look are back
+    /// to back on one thread, but the other tests' threads share the count, so a stray read of theirs
+    /// is let through as a retry.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nothing_read_after_a_mark_reads_as_nothing() {
+        let quiet = (0..20).any(|_| {
+            let mark = bytes_read_mark().unwrap();
+            bytes_read().unwrap() == mark
+        });
+        assert!(quiet, "every look after a mark counted a read");
     }
 }
