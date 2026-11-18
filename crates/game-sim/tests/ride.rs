@@ -6331,6 +6331,15 @@ fn s154_cut_short_moves_ride_down_with_air_wrecks_off() {
                     off.iter().position(|t| t.wreck.is_some()).map(|k| (k, off[k].wreck)));
             // On: tick for tick the same ride until on's wreck, which is the only thing the switch moves.
             let w = on.iter().position(|t| t.wreck.is_some()).unwrap_or(on.len());
+            // But off throws a bike come down upside down on the spot (P347), where on wrecks it a few
+            // ticks on.
+            let thrown = off.iter().position(|t| t.wreck.is_some()).filter(|&k| k < w);
+            if let Some(k) = thrown {
+                let upturned = [game_sim::air::Wreck::NoseDive, game_sim::air::Wreck::Tail].map(|r| Some(game_sim::trick::Wreck::from(r)));
+                assert!(k >= down && off[k].on_ground && upturned.contains(&off[k].wreck),
+                        "{name} let go at {at}, Air Wrecks off: wrecked before on at {k}: {:?}", off[k].wreck);
+            }
+            let w = thrown.unwrap_or(w);
             assert_eq!(on[..w], off[..w], "{name} let go at {at}: the switch moved the ride itself");
             if w < down {
                 assert!(w > lift, "{name} let go at {at}: wrecked before take-off");
