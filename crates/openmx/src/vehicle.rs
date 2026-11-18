@@ -2633,6 +2633,20 @@ impl CarRide {
             Some(c) => m.step_met(&self.car, &mut Through(world), c, met, dt, &tables.acos, &tables.curve, &mut sample),
             None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut sample),
         }
+        throw_at_edge(m, world, &mut self.rng);
+    }
+}
+
+/// **The edge throw** (S337): a car its step found near the map's edge ([`game_sim::car::CarEvent::Thrown`])
+/// is thrown back toward the middle and wrecked ([`game_sim::car::Machine::throw_back`]), drawing on
+/// `rng`, the stand-in for the session's `rand()`. Run straight after the car's step, as the
+/// original's wreck step ends its post.
+fn throw_at_edge(m: &mut game_sim::car::Machine, world: &dyn World, rng: &mut game_sim::rng::Rng) {
+    if m.event != Some(game_sim::car::CarEvent::Thrown) {
+        return;
+    }
+    if let Some(area) = world.area() {
+        m.throw_back(&area, rng);
     }
 }
 
@@ -2661,6 +2675,7 @@ impl CarRide {
         let props = game_sim::car::CarProps { set: &mut set, me: 0, hull: self.hull.as_deref() };
         let tables = &sim.tables.ride;
         m.step_props(&self.car, &mut Through(world), c, met, Some(props), dt, &tables.acos, &tables.curve, &mut sample);
+        throw_at_edge(m, world, &mut self.rng);
         let mut weighed = game_sim::contact::Weighed { body: &mut m.body, mass: c.mass };
         let mut strikers = [game_sim::contact::Other { collider: &mut c.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
         set.step_with(dt, &movers, &mut strikers);
