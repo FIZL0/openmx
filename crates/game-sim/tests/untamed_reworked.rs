@@ -329,7 +329,7 @@ fn poke_preload(ee: &mut Ee, s: &PreloadState) {
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn preload_path(s: &PreloadState) -> &'static str {
     let (a, st) = (&s.air, &s.st);
-    let lip = a.on_ground && s.ch.vel.y() > 5.0 && a.contact_vel.z() > 30.0 && st.brake == 0.0;
+    let lip = a.on_ground && F(s.ch.vel.y()) > 5.0 && F(a.contact_vel.z()) > 30.0 && st.brake == 0.0;
     if a.preload_firing {
         if a.preload_timer - st.dt > F::ZERO { "firing" } else { "fired out" }
     } else if !lip {
@@ -352,6 +352,27 @@ fn preload_path(s: &PreloadState) -> &'static str {
     }
 }
 
+/// Runs `s` through the original's preload and the port's and panics, naming state `k`, where they part.
+/// Returns the state's path and whether the cue's event was posted.
+fn preload_same_as_the_original(ee: &mut Ee, posts: &RefCell<Vec<[u32; 5]>>, s: &PreloadState, k: usize) -> (&'static str, bool) {
+    let path = preload_path(s);
+    reset(ee);
+    poke_preload(ee, s);
+    posts.borrow_mut().clear();
+    ee.call(PRELOAD, &[u64::from(OBJ)], &[s.st.dt.0], 10_000);
+    only_touched_the_regions(ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+    let was = snap(ee);
+
+    let mut t = s.clone();
+    let posted = untamed::preload(&t.p, &mut t.air, &mut t.ch, &t.st, t.axis, &mut t.cue);
+    reset(ee);
+    poke_preload(ee, &t);
+    compare(k, path, &was, &snap(ee), s);
+    let want: Vec<[u32; 5]> = if posted { vec![[OBJ + 0x698, 8, untamed::PRELOAD_EVENT, s.tag, 0]] } else { vec![] };
+    assert_eq!(*posts.borrow(), want, "state {k} ({path}): the cue's event");
+    (path, posted)
+}
+
 /// SLUS-21701's preload, the port's [`untamed::preload`]: 20,000 states over every path, the analogue
 /// preload bound or not, the cue's event post hooked and compared with the port's answer.
 #[test]
@@ -363,22 +384,8 @@ fn untamed_preload_is_the_originals() {
     let mut cues = 0;
     for k in 0..20_000 {
         let s = g.preload();
-        let path = preload_path(&s);
+        let (path, posted) = preload_same_as_the_original(&mut ee, &posts, &s, k);
         *tally.entry(path).or_insert(0u32) += 1;
-        reset(&mut ee);
-        poke_preload(&mut ee, &s);
-        posts.borrow_mut().clear();
-        ee.call(PRELOAD, &[u64::from(OBJ)], &[s.st.dt.0], 10_000);
-        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
-        let was = snap(&ee);
-
-        let mut t = s.clone();
-        let posted = untamed::preload(&t.p, &mut t.air, &mut t.ch, &t.st, t.axis, &mut t.cue);
-        reset(&mut ee);
-        poke_preload(&mut ee, &t);
-        compare(k, path, &was, &snap(&ee), &s);
-        let want: Vec<[u32; 5]> = if posted { vec![[OBJ + 0x698, 8, untamed::PRELOAD_EVENT, s.tag, 0]] } else { vec![] };
-        assert_eq!(*posts.borrow(), want, "state {k} ({path}): the cue's event");
         cues += u32::from(posted);
     }
     enough(
@@ -387,6 +394,52 @@ fn untamed_preload_is_the_originals() {
         100,
     );
     assert!(cues >= 1000, "only {cues} cue(s) posted");
+}
+
+/// The NaN patterns R39's lip tests feed a speed: ±qNaN, ±sNaN, ±inf.
+const ODD_SPEEDS: [u32; 6] = [0x7fc0_0000, 0xffc0_0000, 0x7f80_0001, 0xff80_0001, 0x7f80_0000, 0xff80_0000];
+
+/// Each pair of lip speeds (`vel.y`, `contact_vel.z`) R39's backflip test feeds: either as an
+/// [`ODD_SPEEDS`] pattern or its own value (`None`), not both its own.
+fn odd_lip_speeds() -> impl Iterator<Item = (Option<u32>, Option<u32>)> {
+    let one = || ODD_SPEEDS.iter().copied().map(Some).chain([None]);
+    one().flat_map(move |vy| one().map(move |cz| (vy, cz))).filter(|&(vy, cz)| vy.is_some() || cz.is_some())
+}
+
+/// `ch.vel.y` and `contact_vel.z` set to the patterns given.
+fn with_odd_lip_speeds(ch: &mut Chassis, a: &mut Air, (vy, cz): (Option<u32>, Option<u32>)) {
+    if let Some(b) = vy {
+        ch.vel = Vf::new(ch.vel.x(), f32::from_bits(b), ch.vel.z(), ch.vel.w());
+    }
+    if let Some(b) = cz {
+        let c = a.contact_vel;
+        a.contact_vel = Vf::new(c.x(), c.y(), f32::from_bits(b), c.w());
+    }
+}
+
+/// R42 — the preload's lip speeds as NaN patterns, as R39's backflip test: the original branches on
+/// `c.ole`, which reads an exponent-255 pattern as ±max, so a +NaN is over 5 / 30 and a -NaN under. Lip
+/// states only (on the ground, not firing, no brake), stick pushed, pulled or neither, the axis bound or not.
+#[test]
+fn untamed_preload_lip_takes_nan_speeds_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    let posts = hook_post(&mut ee);
+    let mut g = Gen(0x0d40_0042);
+    let mut tally = BTreeMap::new();
+    let mut k = 0;
+    for _ in 0..200 {
+        let mut s = g.preload();
+        s.air.preload_firing = false;
+        s.air.on_ground = true;
+        s.st.brake = F::ZERO;
+        for speeds in odd_lip_speeds() {
+            let mut t = s.clone();
+            with_odd_lip_speeds(&mut t.ch, &mut t.air, speeds);
+            *tally.entry(preload_same_as_the_original(&mut ee, &posts, &t, k).0).or_insert(0u32) += 1;
+            k += 1;
+        }
+    }
+    enough(&tally, &["off the lip", "axis fired", "armed", "fired", "holding", "waiting"], 20);
 }
 
 // --- the wreck entry ----------------------------------------------------------------------------------
@@ -1345,8 +1398,8 @@ fn spin_path(s: &SpinState) -> &'static str {
         let lip = a.on_ground
             && !a.flip_torque_applied
             && !a.flip_active
-            && !(s.ch.vel.y() <= 5.0)
-            && !(a.contact_vel.z() <= 30.0)
+            && F(s.ch.vel.y()) > 5.0
+            && F(a.contact_vel.z()) > 30.0
             && st.brake == 0.0;
         if !lip {
             "off the lip"
@@ -1380,9 +1433,10 @@ fn spin_path(s: &SpinState) -> &'static str {
     }
 }
 
-#[test]
-fn untamed_spin_is_the_originals() {
-    let Some(mut ee) = image() else { return };
+/// Untamed's 360 with its node, stunt, wreck, steep and binding calls answered from [`SpinCalls`], and
+/// the port's arc cosine table, checked against the one the game built.
+fn spin_harness() -> Option<(Ee, Rc<RefCell<SpinCalls>>, air::AcosTable)> {
+    let mut ee = image()?;
     // The table and scale the original reads are the ones the game built at startup: they must be the port's.
     let table = air::AcosTable::build();
     assert_eq!(ee.f32_at(ACOS_SCALE), 14999.5, "the arc cosine table's scale");
@@ -1431,80 +1485,97 @@ fn untamed_spin_is_the_originals() {
         ee.set(2, u64::from(c.right_answer));
     }));
 
+    Some((ee, calls, table))
+}
+
+/// Runs `s` through the original's 360 and the port's and panics, naming state `k`, where they part.
+/// Returns the state's path, and the clip's when it moved.
+fn spin_same_as_the_original(
+    ee: &mut Ee,
+    calls: &RefCell<SpinCalls>,
+    table: &air::AcosTable,
+    s: &SpinState,
+    k: usize,
+) -> (&'static str, Option<&'static str>) {
+    let path = spin_path(s);
+    flip_reset(ee);
+    poke_spin(ee, s);
+    *calls.borrow_mut() = SpinCalls {
+        forward: s.inp.forward,
+        start_answer: s.start_answer,
+        steep_answer: s.steep_answer,
+        left_answer: s.left,
+        right_answer: s.right,
+        ..SpinCalls::default()
+    };
+    ee.call(SPIN, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+    let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+    for (a, b) in ee.written_ranges() {
+        let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+        assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+    }
+    let was = flip_snap(ee);
+    let orig = std::mem::take(&mut *calls.borrow_mut());
+
+    let mut t = s.clone();
+    let (mut started, mut steeped) = (None, false);
+    let out = untamed::spin(&t.t, &t.p, &mut t.air, &mut t.spin, &mut t.ch, &t.st, &t.inp, table, |dir| {
+        started = Some(dir);
+        s.start_answer
+    }, || {
+        steeped = true;
+        s.steep_answer
+    });
+    if out.stunt_cleared {
+        t.inp.stunt_id = 255;
+    }
+    flip_reset(ee);
+    poke_spin(ee, &t);
+    let now = flip_snap(ee);
+    if was != now {
+        let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+        panic!(
+            "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+            flip_where(i),
+            was[i],
+            f32::from_bits(was[i]),
+            now[i],
+            f32::from_bits(now[i]),
+        );
+    }
+    let word = |dir: i32| s.stunts[usize::from(dir >= 1)];
+    let want_started: Vec<(u32, u32)> = started.map(|d| (word(d), 1)).into_iter().collect();
+    assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
+    assert_eq!(out.stunt_started, started.is_some() && s.start_answer, "state {k}");
+    let want_ended: Vec<u32> = if out.stunt_ended { vec![word(s.spin.dir)] } else { vec![] };
+    assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
+    assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
+    assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
+    // The node is asked on every call with the 360 on; the binding only on a lip with the 360 bound,
+    // right only when left is not pressed.
+    assert_eq!(orig.axes, u32::from(s.spin.active), "state {k} ({path}): the node asked");
+    let bound = path.starts_with("bound");
+    assert_eq!((orig.left, orig.right), (u32::from(bound), u32::from(bound && !s.left)), "state {k} ({path}): the binding asked");
+    let clip = match (s.spin.clip, t.spin.clip, out.stunt_started, out.stunt_ended) {
+        (0, 1, true, _) => Some("clip started"),
+        (1, 2, ..) => Some("clip playing"),
+        (2, 0, _, true) => Some("clip came round"),
+        _ => None,
+    };
+    (path, clip)
+}
+
+#[test]
+fn untamed_spin_is_the_originals() {
+    let Some((mut ee, calls, table)) = spin_harness() else { return };
     let mut g = Gen(0x0d93_b001);
     let mut tally = BTreeMap::new();
     for k in 0..20_000 {
         let s = g.spin();
-        let path = spin_path(&s);
+        let (path, clip) = spin_same_as_the_original(&mut ee, &calls, &table, &s, k);
         *tally.entry(path).or_insert(0u32) += 1;
-        flip_reset(&mut ee);
-        poke_spin(&mut ee, &s);
-        *calls.borrow_mut() = SpinCalls {
-            forward: s.inp.forward,
-            start_answer: s.start_answer,
-            steep_answer: s.steep_answer,
-            left_answer: s.left,
-            right_answer: s.right,
-            ..SpinCalls::default()
-        };
-        ee.call(SPIN, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
-        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
-        for (a, b) in ee.written_ranges() {
-            let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
-            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
-        }
-        let was = flip_snap(&ee);
-        let orig = std::mem::take(&mut *calls.borrow_mut());
-
-        let mut t = s.clone();
-        let (mut started, mut steeped) = (None, false);
-        let out = untamed::spin(&t.t, &t.p, &mut t.air, &mut t.spin, &mut t.ch, &t.st, &t.inp, &table, |dir| {
-            started = Some(dir);
-            s.start_answer
-        }, || {
-            steeped = true;
-            s.steep_answer
-        });
-        if out.stunt_cleared {
-            t.inp.stunt_id = 255;
-        }
-        flip_reset(&mut ee);
-        poke_spin(&mut ee, &t);
-        let now = flip_snap(&ee);
-        if was != now {
-            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
-            panic!(
-                "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
-                flip_where(i),
-                was[i],
-                f32::from_bits(was[i]),
-                now[i],
-                f32::from_bits(now[i]),
-            );
-        }
-        let word = |dir: i32| s.stunts[usize::from(dir >= 1)];
-        let want_started: Vec<(u32, u32)> = started.map(|d| (word(d), 1)).into_iter().collect();
-        assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
-        assert_eq!(out.stunt_started, started.is_some() && s.start_answer, "state {k}");
-        let want_ended: Vec<u32> = if out.stunt_ended { vec![word(s.spin.dir)] } else { vec![] };
-        assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
-        assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
-        assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
-        // The node is asked on every call with the 360 on; the binding only on a lip with the 360 bound,
-        // right only when left is not pressed.
-        assert_eq!(orig.axes, u32::from(s.spin.active), "state {k} ({path}): the node asked");
-        let bound = path.starts_with("bound");
-        assert_eq!((orig.left, orig.right), (u32::from(bound), u32::from(bound && !s.left)), "state {k} ({path}): the binding asked");
-        for clip_path in [(s.spin.clip, t.spin.clip, out.stunt_started, out.stunt_ended)] {
-            let name = match clip_path {
-                (0, 1, true, _) => Some("clip started"),
-                (1, 2, ..) => Some("clip playing"),
-                (2, 0, _, true) => Some("clip came round"),
-                _ => None,
-            };
-            if let Some(n) = name {
-                *tally.entry(n).or_insert(0u32) += 1;
-            }
+        if let Some(n) = clip {
+            *tally.entry(n).or_insert(0u32) += 1;
         }
     }
     enough(
@@ -1531,6 +1602,32 @@ fn untamed_spin_is_the_originals() {
         ],
         100,
     );
+}
+
+/// R42 — the 360's lip speeds as NaN patterns, as R39's backflip test: the original branches on `c.ole`,
+/// which reads an exponent-255 pattern as ±max, so a +NaN is over 5 / 30 and a -NaN under. Lip states only
+/// (on the ground, not on, no flip, no brake), bound and not.
+#[test]
+fn untamed_spin_lip_takes_nan_speeds_as_the_original() {
+    let Some((mut ee, calls, table)) = spin_harness() else { return };
+    let mut g = Gen(0x0d40_1042);
+    let mut tally = BTreeMap::new();
+    let mut k = 0;
+    for _ in 0..200 {
+        let mut s = g.spin();
+        s.spin.active = false;
+        s.air.on_ground = true;
+        s.air.flip_torque_applied = false;
+        s.air.flip_active = false;
+        s.st.brake = F::ZERO;
+        for speeds in odd_lip_speeds() {
+            let mut t = s.clone();
+            with_odd_lip_speeds(&mut t.ch, &mut t.air, speeds);
+            *tally.entry(spin_same_as_the_original(&mut ee, &calls, &table, &t, k).0).or_insert(0u32) += 1;
+            k += 1;
+        }
+    }
+    enough(&tally, &["off the lip", "bound, left", "bound, right", "bound, neither", "fired", "arming left", "arming right", "waiting"], 10);
 }
 
 /// MD93b's wiring: [`untamed::ride_spin`] arms on a lip with R1 and another trick button held, where
