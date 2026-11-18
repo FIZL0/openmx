@@ -414,7 +414,7 @@ impl SinkWords {
         let sections = game_render::ini::parse(toy);
         let s = sections.iter().find(|s| s.name.eq_ignore_ascii_case("DropGate"))?;
         let lower = sections.iter().find(|s| s.name.eq_ignore_ascii_case("LowerGate"));
-        let trigger_at = match lower.and_then(|l| l.numbers("TriggerPosition")).as_deref() {
+        let trigger_at = match lower.and_then(|l| game_numbers(l, "TriggerPosition")).as_deref() {
             Some(&[x, y, z, ..]) => [x, y, z],
             _ => [0.0; 3],
         };
@@ -422,7 +422,7 @@ impl SinkWords {
         Some(SinkWords {
             name: s.get("GateName").unwrap_or("").trim().trim_matches('"').to_string(),
             move_down: s.get("MoveGateDown").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
-            move_time: s.number("MoveTime").unwrap_or(5.0),
+            move_time: game_number(s, "MoveTime").unwrap_or(5.0),
             soultree: count("NumberSoultreePieces"),
             collision: count("NumberCollisionPieces"),
             trigger_at,
@@ -433,6 +433,17 @@ impl SinkWords {
     pub fn soultree_names(&self) -> Vec<String> {
         game_sim::drop_gate::soultree_names(&self.name, self.soultree)
     }
+}
+
+/// S382: a `.toy` number read as the game reads it, strtod and then the truncating double-to-float
+/// ([`game_sim::phy::number`]): sx17's `704.9` is the `f32` below, not the nearest. `None` without the key.
+fn game_number(s: &game_render::ini::Section, key: &str) -> Option<f32> {
+    s.get(key).map(|v| game_sim::phy::number(v).0)
+}
+
+/// S382: a comma-separated `.toy` list, each part read as [`game_number`] reads one.
+fn game_numbers(s: &game_render::ini::Section, key: &str) -> Option<Vec<f32>> {
+    s.get(key).map(|v| v.split(',').map(|p| game_sim::phy::number(p.trim()).0).collect())
 }
 
 /// P313c: the drop gate's sink bound to the race's `laps`, on a track whose `.toy` sets
@@ -477,11 +488,11 @@ impl GateSwing {
         let sections = game_render::ini::parse(toy);
         let s = sections.iter().find(|s| s.name.eq_ignore_ascii_case("DropGate"))?;
         let name = s.get("GateName").unwrap_or("").trim().trim_matches('"').to_string();
-        let axis = match s.numbers("RotationAxisLocal").as_deref() {
+        let axis = match game_numbers(s, "RotationAxisLocal").as_deref() {
             Some(&[x, y, z, ..]) => V3 { x, y, z },
             _ => V3 { x: 1.0, y: 0.0, z: 0.0 },
         };
-        Some((name, axis, s.number("RotationAngleDegrees").unwrap_or(45.0)))
+        Some((name, axis, game_number(s, "RotationAngleDegrees").unwrap_or(45.0)))
     }
 
     /// The gate's prop taken out of `scene`, so the static props drawn from it never show it standing
@@ -757,7 +768,11 @@ mod tests {
         // sx17's trigger is spelled as the reader reads it; nat16 writes `True`.
         let sx17 = SinkWords::read("[DropGate]\nGateName=\"THQsxdropgate01\"\nMoveGateDown=True\n[LowerGate]\nTriggerPosition=604.6,93,704.9\n").unwrap();
         assert!(sx17.move_down);
-        assert_eq!(sx17.trigger_at, [604.6, 93.0, 704.9]);
+        // S382: read as the game reads it; the bits the C40 start image holds
+        // (game-sim's drop_gate test `sx17s_trigger_is_bound_as_the_image_holds_it`).
+        assert_eq!(sx17.trigger_at.map(f32::to_bits), ["604.6", "93", "704.9"].map(|t| game_sim::phy::number(t).0.to_bits()));
+        assert_eq!(sx17.trigger_at[2].to_bits(), 704.89996f32.to_bits());
+        assert_ne!(sx17.trigger_at[2], 704.9, "the rounded read is one bit above the game's");
         assert_eq!((sx17.move_time, sx17.soultree, sx17.collision), (5.0, 0, 0));
         let sx01 = SinkWords::read(SX01_DROP_GATE).unwrap();
         assert!(!sx01.move_down);
