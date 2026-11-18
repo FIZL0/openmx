@@ -16,6 +16,11 @@
 //! * a world that does not wrap mirrors the list alone, as before;
 //! * (MD167) a bike by the near seam strikes a knockable ball by the far one, the record where the
 //!   bike is; on a world that does not wrap the strike is the plain one (skipped without the disc).
+//! * (MD167a) a wreck bike's rays by the near seam strike a ball by the far one as they do at the
+//!   ball's own place, and the strike hands its frame the ball a width back and back again; the
+//!   props' step moves a wreck bike that struck across a seam to the ball and back word for word;
+//!   the ragdoll's bones are offered a ball by the far seam one width over; a rolling ball wraps
+//!   over a seam where a world that does not wrap puts it back (the disc ones skipped without it).
 
 use game_sim::math::{self, Mat4};
 use game_sim::tiles::{generate, Piece, Reach, SEAM_COPIES, Source, Tile, Tiled};
@@ -310,4 +315,225 @@ fn a_bike_by_the_near_seam_strikes_a_ball_by_the_far_one() {
     let mut there = sim.clone();
     there.rider.place(at, facing);
     assert_eq!(there.prop_strike_in(0, DT, &game_sim::world::Flat::default()), want);
+}
+
+// MD167a: the rest of the strikers on the knockable props, and a prop that rolls over a seam.
+
+/// A flat world with an area `width` feet across and 10,000 deep, wrapped on `x` where `wraps`.
+struct Strip {
+    flat: game_sim::world::Flat,
+    width: F,
+    wraps: bool,
+}
+
+impl World for Strip {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.flat.ground(at)
+    }
+
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.flat.solid(bundle, record)
+    }
+
+    fn area(&self) -> Option<game_sim::biplane::Area> {
+        Some(game_sim::biplane::Area { width: self.width, depth: F(10_000.0) })
+    }
+
+    fn wrap(&self) -> [bool; 2] {
+        [self.wraps, false]
+    }
+}
+
+/// A frame standing at `at`, unturned.
+fn standing(at: Vf) -> Mat4 {
+    Mat4([Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), at])
+}
+
+fn bits(v: Vf) -> [u32; 4] {
+    v.0.map(f32::to_bits)
+}
+
+#[test]
+fn a_wreck_bike_by_the_near_seam_strikes_a_ball_by_the_far_one() {
+    use game_sim::prop_wreck::wreck_rays_wrapped;
+    let Some((set, _)) = knock_disc() else { return };
+    let flat = game_sim::world::Flat::default();
+    const ME: usize = 1;
+    // The wreck bike's probe ahead of a ball on +x, where its rays strike it.
+    let mut found = None;
+    'find: for (c, coll) in set.collections.iter().enumerate() {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        for ahead in (4..32).map(|k| k as f32 * 0.25) {
+            for up in [0.0, 0.5, 1.0, -0.5, 1.5, 2.0] {
+                let at = Vf::new(ball.x() + ahead, ball.y() + up, ball.z(), 1.0);
+                let strike = wreck_rays_wrapped(&set, &standing(at), ME, &flat);
+                if strike.struck.iter().any(|s| s.0 == c) && !strike.contacts.is_empty() {
+                    found = Some((c, at, strike));
+                    break 'find;
+                }
+            }
+        }
+    }
+    let (c, at, want) = found.expect("some spot by some ball where the wreck bike's rays strike it");
+    assert!(want.across.is_empty());
+    // A world whose far seam is the whole foot under the probe, the probe a width back.
+    let width = at.x().floor();
+    let wrapped = Strip { flat: flat.clone(), width: F(width), wraps: true };
+    let near = Vf::new(at.x() - width, at.y(), at.z(), 1.0);
+    assert!((0.0..1.0).contains(&near.x()));
+    assert!(wreck_rays_wrapped(&set, &standing(near), ME, &flat).struck.is_empty(), "alone, the ball is a width from the bike");
+    let got = wreck_rays_wrapped(&set, &standing(near), ME, &wrapped);
+    assert_eq!(got.struck.iter().map(|s| (s.0, s.1, s.2.len())).collect::<Vec<_>>(), want.struck.iter().map(|s| (s.0, s.1, s.2.len())).collect::<Vec<_>>());
+    assert_eq!(got.contacts.len(), want.contacts.len(), "one entry a ray, as at the ball's own place");
+    for (g, w) in got.contacts.iter().zip(&want.contacts) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close_by(g.point, w.point, width), "point {:?} vs {:?}", g.point, w.point);
+    }
+    for (g, w) in got.struck.iter().zip(&want.struck).flat_map(|(g, w)| g.2.iter().zip(&w.2)) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "mirror normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close(g.point, w.point), "mirror point at the ball's own place {:?} vs {:?}", g.point, w.point);
+    }
+    let k = got.struck.iter().position(|s| s.0 == c).unwrap();
+    assert!(got.across.contains(&(k, [F(width), F::ZERO])), "struck across the seam: {:?}", got.across);
+    // Put on as the wreck bike's: its frame is handed the ball a width back; written back, it is
+    // where it was, word for word.
+    let mut set = set;
+    let before = set.collections[c].bones[0].body;
+    let pushed = set.strike_as(&got, ME);
+    let p = pushed.iter().find(|p| p.collection == c).expect("the ball pushed");
+    assert!(close_by(p.body.position, before.position, width), "pushed by the bike: {:?} vs {:?}", p.body.position, before.position);
+    assert!(set.across.iter().any(|a| (a.collection, a.object, a.player, a.by) == (c, 0, ME, [F(width), F::ZERO])), "{:?}", set.across);
+    set.pushed(&pushed);
+    let after = set.collections[c].bones[0].body;
+    assert_eq!((bits(after.position), bits(after.last_position)), (bits(before.position), bits(before.last_position)));
+    // On a world that does not wrap, the plain strike word for word, and nothing noted.
+    let mut plain = set.clone();
+    plain.across.clear();
+    assert_eq!(wreck_rays_wrapped(&plain, &standing(at), ME, &flat), want);
+    plain.strike_as(&want, ME);
+    assert!(plain.across.is_empty());
+}
+
+#[test]
+fn the_props_step_moves_a_wreck_bike_that_struck_across_a_seam_and_back() {
+    use game_sim::biplane::Body;
+    use game_sim::contact::Collider;
+    use game_sim::prop_contact::{Across, across_back, across_moved};
+    let width = F(1134.0);
+    let body = Body { position: Vf::new(0.3, 2.0, 40.0, 1.0), last_position: Vf::new(0.2875, 2.0, 40.0, 1.0), ..Body::default() };
+    let mut bodies = vec![(Collider::default(), Body::default(), F(1.0)), (Collider::default(), body, F(1.0))];
+    // Two players' vehicles before the bodies: wreck bike 1 is the step's other side 3.
+    let mut vehicles = vec![game_sim::contact::Vehicle::default(); 2];
+    let across = vec![
+        Across { collection: 0, object: 0, player: 3, by: [width, F::ZERO], pushed: true },
+        Across { collection: 0, object: 1, player: 3, by: [width, F::ZERO], pushed: true },
+    ];
+    let moved = across_moved(across, &mut vehicles, &mut bodies);
+    assert_eq!(moved.len(), 1, "a striker is moved once");
+    assert!(close_by(body.position, bodies[1].1.position, 1134.0), "{:?}", bodies[1].1.position);
+    assert_eq!(bits(bodies[0].1.position), bits(Vf::ZERO), "the other wreck bike stays");
+    assert!(vehicles.iter().all(|v| bits(v.node.origin) == bits(game_sim::contact::Vehicle::default().node.origin)));
+    // A place the step left alone is the one it had, word for word (0.3 + 1134 rounds).
+    let mut same = bodies.clone();
+    across_back(moved.clone(), &mut same);
+    assert_eq!((bits(same[1].1.position), bits(same[1].1.last_position)), (bits(body.position), bits(body.last_position)));
+    // One the step changed is moved back its width.
+    bodies[1].1.position = Vf::new(1134.5, 2.0, 40.0, 1.0);
+    across_back(moved, &mut bodies);
+    assert_eq!(bits(bodies[1].1.position), bits(Vf::new(0.5, 2.0, 40.0, 1.0)));
+    assert_eq!(bits(bodies[1].1.last_position), bits(body.last_position));
+}
+
+#[test]
+fn the_ragdoll_is_offered_a_ball_by_the_far_seam_one_width_over() {
+    use game_sim::ragdoll_scene::KnockedProp;
+    let Some((mut set, _)) = knock_disc() else { return };
+    let (c, ball) = set
+        .collections
+        .iter()
+        .enumerate()
+        .find_map(|(c, coll)| Some((c, coll.objects.first().filter(|o| o.collision.is_some())?.node.origin)))
+        .expect("a ball");
+    // The ball a foot or two short of the far seam; the probe half a foot past the near one.
+    let width = ball.x().floor() + 2.0;
+    let wrapped = Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true };
+    let probe = Vf::new(0.5, ball.y(), ball.z(), 1.0);
+    let reach = F(3.0);
+    let seams = game_sim::tiles::seam_shifts(&wrapped, probe, reach);
+    assert!(seams.contains(&[F(width), F::ZERO]), "{seams:?}");
+    assert!(KnockedProp::near(&set, probe, reach).is_empty() && KnockedProp::across(&set, probe, reach, &[]).is_empty());
+    // Asleep or awake, the copy is the ball stood a width back: what the bones meet where the ball is
+    // met from a width over.
+    for awake in [false, true] {
+        set.collections[c].bones[0].body.enabled = awake;
+        let got = KnockedProp::across(&set, probe, reach, &seams);
+        let g = got.iter().find(|p| (p.pushed.collection, p.pushed.object) == (c, 0)).expect("the ball one width over");
+        assert_eq!(g.place, None);
+        let there = Vf::new(probe.x() + width, probe.y(), probe.z(), 1.0);
+        let want = if awake {
+            KnockedProp::near(&set, there, reach).into_iter().find(|p| (p.pushed.collection, p.pushed.object) == (c, 0)).expect("near at its own place")
+        } else {
+            let mut woken = set.clone();
+            woken.collections[c].bones[0].body.enabled = true;
+            KnockedProp::near(&woken, there, reach).into_iter().find(|p| (p.pushed.collection, p.pushed.object) == (c, 0)).expect("near at its own place")
+        };
+        assert!(close_by(g.frame.origin, want.frame.origin, width), "frame {:?} vs {:?}", g.frame.origin, want.frame.origin);
+        assert_eq!(g.frame.rows.map(bits), want.frame.rows.map(bits));
+        assert!(close_by(g.pushed.body.position, want.pushed.body.position, width));
+        assert!((g.distance - want.distance).0.abs() < 1e-3, "distance {:?} vs {:?}", g.distance, want.distance);
+    }
+}
+
+#[test]
+fn a_rolling_ball_wraps_over_a_seam() {
+    use game_sim::prop_world::Edge;
+    let Some((set, _)) = knock_disc() else { return };
+    let (c, ball) = set
+        .collections
+        .iter()
+        .enumerate()
+        .find_map(|(c, coll)| Some((c, coll.objects.first().filter(|o| o.collision.is_some() && coll.joints.is_empty())?.node.origin)))
+        .expect("a ball pinned to nothing");
+    // The ball a foot short of the far seam, rolled at it at 20 ft/s for a second.
+    let width = ball.x().floor() + 1.0;
+    let ride = |world: &mut Strip, edge: f32| {
+        let mut set = set.clone();
+        for coll in &mut set.collections {
+            coll.edge = Some(Edge { min: [F::ZERO, F::ZERO], max: [F(edge), F(10_000.0)] });
+        }
+        set.collections[c].objects[0].reset_off_edge = true;
+        set.wake(c, 0);
+        set.collections[c].bones[0].body.velocity = Vf::new(20.0, 0.0, 0.0, 0.0);
+        let place = set.collections[c].bones[0].body.position;
+        for _ in 0..30 {
+            let movers = set.search_in(DT, world);
+            set.step_with(DT, &movers, &mut []);
+        }
+        (set, place)
+    };
+    let (wrapped, place) = ride(&mut Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true }, width);
+    let (wide, _) = ride(&mut Strip { flat: game_sim::world::Flat::default(), width: F(2.0 * width), wraps: false }, 2.0 * width);
+    let (edged, _) = ride(&mut Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: false }, width);
+    let (g, w) = (wrapped.collections[c].bones[0].body, wide.collections[c].bones[0].body);
+    assert!(w.position.x() > width + 1.0, "the ball rolled past where the seam is: {:?}", w.position);
+    // Wrapped, it is on the world, where it is on the wider one less a width, moving as it does.
+    assert!((0.0..width).contains(&g.position.x()), "on the world: {:?}", g.position);
+    // Within 0.02 ft: the wider world's ball, 1,700 feet out, rounds to 1.2e-4 a substep where the
+    // wrapped one, back by the near seam, rounds finer.
+    let roughly = |a: Vf, b: Vf| (0..3).all(|i| (a.0[i] + [width, 0.0, 0.0][i] - b.0[i]).abs() < 0.02);
+    assert!(roughly(g.position, w.position), "position {:?} vs {:?}", g.position, w.position);
+    assert!(roughly(g.last_position, w.last_position));
+    assert!(close(g.velocity, w.velocity), "velocity {:?} vs {:?}", g.velocity, w.velocity);
+    let node = wrapped.collections[c].objects[0].node.origin;
+    assert!(roughly(node, wide.collections[c].objects[0].node.origin), "node {:?}", node);
+    // Its edge is the world's again after the step; the put-back place is its own.
+    assert_eq!(wrapped.collections[c].edge, edged.collections[c].edge);
+    assert_eq!(wrapped.collections[c].objects[0].place, set.collections[c].objects[0].place);
+    // A world that does not wrap puts it back over its edge, as before.
+    let e = edged.collections[c].bones[0].body;
+    assert_eq!(bits(e.position), bits(place), "put back over the edge: {:?}", e.position);
+    assert!(!e.enabled);
 }

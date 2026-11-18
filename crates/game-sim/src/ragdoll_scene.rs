@@ -35,6 +35,8 @@
 //! At rest (F7) they stand in the track's tree, filed after the plants, and a regather lists each
 //! one the query's cells reach whatever its distance; met as an awake one is, the strike waking it
 //! ([`Statics::knock_keys`], [`KnockedProp::resting`]).
+//! On a world that wraps (MD167a) a prop by a seam's far side is offered again one width over, by
+//! the bones ([`KnockedProp::across`]).
 //!
 //! **The sweep** (S166): each bone's collision also has a segment probe, one segment from where the
 //! bone was `1/15` s ago to where it is, run through the same search list the spheres are
@@ -852,6 +854,45 @@ impl KnockedProp {
                 struck: false,
                 place: Some(n),
             });
+        }
+        out
+    }
+
+    /// **The knockable props by a wrapped world's seams** (MD167a, MD29): every body with a collision
+    /// object and a mesh, asleep or awake, that stands again one width over, by the bones, within
+    /// `reach` of `probe` — for each of `seams`, the shifts that bring the bones to the world's copy on
+    /// a seam's far side ([`crate::tiles::seam_shifts`]) — in seam, collection and object order, after
+    /// [`KnockedProp::resting`] and [`KnockedProp::near`]. A copy is the prop's mesh and body moved
+    /// back by the shift: the push-out measures the bone against the body where the copy stands, and a
+    /// sphere's record it takes wakes the prop itself. Listed as an awake one is (no place in the
+    /// static list). None on a world that does not wrap.
+    pub fn across(set: &crate::prop_set::PropSet, probe: Vf, reach: F, seams: &[[F; 2]]) -> Vec<KnockedProp> {
+        let mut out = Vec::new();
+        for &by in seams {
+            let back = [F::ZERO - by[0], F::ZERO - by[1]];
+            for (c, (coll, shapes)) in set.collections.iter().zip(set.shapes.iter()).enumerate() {
+                for (o, (object, mesh)) in coll.objects.iter().zip(shapes).enumerate() {
+                    let (Some(mesh), Some(col), Some(bone)) = (mesh, object.collision.as_ref(), coll.bones.get(o)) else { continue };
+                    let mut matrix = crate::prop_set::PropSet::matrix(&object.node);
+                    crate::seam::matrix(&mut matrix, back);
+                    let (to_world, centre, radius) = crate::world::Prop::posed(mesh, &matrix);
+                    let distance = reach_distance((centre, radius), probe);
+                    if !(distance <= reach) {
+                        continue;
+                    }
+                    let mut body = bone.body;
+                    crate::seam::body(&mut body, back);
+                    let [x, y, z, at] = to_world.0;
+                    out.push(KnockedProp {
+                        shapes: set.shapes.clone(),
+                        frame: Node { rows: [x, y, z], origin: at },
+                        distance,
+                        pushed: crate::prop_contact::Pushed { collection: c, object: o, collider: col.collider, body, mass: bone.mass },
+                        struck: false,
+                        place: None,
+                    });
+                }
+            }
         }
         out
     }

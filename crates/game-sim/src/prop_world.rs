@@ -1031,6 +1031,81 @@ impl Collection {
         let (x, z) = (F(at.x()), F(at.z()));
         x < e.max[0] && x > e.min[0] && z < e.max[1] && z > e.min[1]
     }
+
+    /// **A world that wraps opens its seams for a step** (MD167a, MD29): the edge check
+    /// ([`Collection::inside`]) left off on each wrapped axis of `wrap`, so a body rolling over a seam
+    /// is not put back as one over the world's edge is. Answers the edge as it was, for
+    /// [`Collection::close_seams`]. The port's own: no disc map wraps.
+    pub fn open_seams(&mut self, wrap: [bool; 2]) -> Option<Edge> {
+        let kept = self.edge;
+        if let Some(e) = self.edge.as_mut() {
+            for axis in (0..2).filter(|&a| wrap[a]) {
+                (e.min[axis], e.max[axis]) = (F(-f32::MAX), F(f32::MAX));
+            }
+        }
+        kept
+    }
+
+    /// **The seams closed after the step** (MD167a): the edge `kept` back, and every body past a
+    /// seam of a world wrapped on `wrap`, its sides `side`, moved a width round onto the world, as the
+    /// rider is ([`crate::seam`]): its centre now and at the last substep, its node's origin, its
+    /// collision record's places; its kept nearby list is forgotten, gathered afresh where it is now.
+    /// The bodies a joint pins together move as one, by where the first of them is; one held to the
+    /// world stays where it is. Its put-back place is its own, on the world.
+    pub fn close_seams(&mut self, kept: Option<Edge>, wrap: [bool; 2], side: [F; 2]) {
+        self.edge = kept;
+        if wrap == [false, false] {
+            return;
+        }
+        // Each body's group: the least body a chain of joints reaches it from.
+        let n = self.bones.len();
+        let mut group: Vec<usize> = (0..n).collect();
+        let mut held = vec![false; n];
+        let root = |g: &[usize], mut k: usize| {
+            while g[k] != k {
+                k = g[k];
+            }
+            k
+        };
+        for j in &self.joints {
+            let Some(a) = Some(j.pin.first).filter(|&a| a < n) else { continue };
+            match j.pin.second.filter(|&b| b < n) {
+                Some(b) => {
+                    let (ra, rb) = (root(&group, a), root(&group, b));
+                    group[ra.max(rb)] = ra.min(rb);
+                }
+                None => held[a] = true,
+            }
+        }
+        let roots: Vec<usize> = (0..n).map(|k| root(&group, k)).collect();
+        for k in 0..n {
+            if held[k] {
+                held[roots[k]] = true;
+            }
+        }
+        for r in (0..n).filter(|&k| roots[k] == k && !held[k]) {
+            let at = self.bones[r].body.position;
+            let lap = [crate::seam::lap(wrap[0], at.x(), side[0]), crate::seam::lap(wrap[1], at.z(), side[1])];
+            if lap == [0, 0] {
+                continue;
+            }
+            let by = [0, 1].map(|a| match lap[a] {
+                1 => F::ZERO - side[a],
+                -1 => side[a],
+                _ => F::ZERO,
+            });
+            for k in (0..n).filter(|&k| roots[k] == r) {
+                crate::seam::body(&mut self.bones[k].body, by);
+                let o = &mut self.objects[k];
+                o.node.origin = crate::seam::moved(o.node.origin, by);
+                if let Some(c) = o.collision.as_mut() {
+                    crate::seam::record(&mut c.record, by);
+                    c.nearby.built = false;
+                    c.nearby.nearby.found.clear();
+                }
+            }
+        }
+    }
 }
 
 /// The body's starts set and the body reset to them: place and turn, with no velocity and no rates;
