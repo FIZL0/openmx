@@ -1246,6 +1246,23 @@ pub struct Spin {
     /// turns the bike nose-down ([`SPIN_PITCH_FOLLOWS_THE_FLIP`]). Latched on the substep the wheels
     /// leave; false on every 360 alone.
     pub forward: bool,
+    /// **The port's own (S467):** how many times this 360's clip has started (0 to 1 in
+    /// [`spin_clip`]), wrapping; zeroed when the 360 fires. MX vs. ATV's stunt id stays the 360 from
+    /// its first clip start until the 360 step ends it (R47), and each start restarts the clip: this is
+    /// what the rider's and bike's animations read both off ([`Spin::shown`]). Animation only, so it is
+    /// not hashed.
+    pub starts: u8,
+}
+
+impl Spin {
+    /// **S467:** the 360's animation state runs: from the clip's first start until the 360 ends
+    /// (landing, touch, yaw under its floor), coming round included — MX vs. ATV's local bike keeps
+    /// the 360's stunt id through all of it and its clock never ends it while the torque goes in
+    /// (R47, `tests/mxvatv_stunt_end.rs`). A clip playing with no start counted (a 360 another step
+    /// runs) shows as it did.
+    pub fn shown(&self) -> bool {
+        self.clip != 0 || (self.starts != 0 && self.active)
+    }
 }
 
 /// The heading flattened into the horizontal plane, as an angle 0..2π from `+z`.
@@ -1323,6 +1340,7 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
             spin.armed = false;
             spin.active = true;
             spin.grace = F(SPIN_GRACE);
+            spin.starts = 0;
         } else if step.modifier {
             if x < -SPIN_HELD {
                 spin.armed = true;
@@ -1411,6 +1429,7 @@ pub fn spin_clip(spin: &mut Spin, turned: F) {
     if spin.clip == 0 {
         if turned > SPIN_CLIP {
             spin.clip = 1;
+            spin.starts = spin.starts.wrapping_add(1);
         }
     } else if turned >= SPIN_CLIP {
         if spin.clip == 1 {

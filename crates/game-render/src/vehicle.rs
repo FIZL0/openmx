@@ -601,7 +601,7 @@ impl Chassis {
     }
 
     /// [`Chassis::want`] with a trick pack's states (MD21): an extra in progress plays its own clip
-    /// and a 360 past its clip angle its own, when this chassis has them; otherwise what
+    /// and a 360 from its first clip start to its end its own (S467), when this chassis has them; otherwise what
     /// [`Chassis::want`] says, which without a pack is all of it.
     pub fn want_with_pack(&self, ride: &Ride, tricks: &Tricks) -> i32 {
         let lib = &self.stance.lib;
@@ -611,7 +611,7 @@ impl Chassis {
             .extra()
             .filter(|_| tricks.in_progress)
             .and_then(|k| has(va::PACK_EXTRA + k as i32));
-        let spin = ride.tricks.as_ref().filter(|t| t.spin.clip != 0).and_then(|t| {
+        let spin = ride.tricks.as_ref().filter(|t| t.spin.shown()).and_then(|t| {
             has(if t.spin.dir >= 1 { va::SPIN_RIGHT } else { va::SPIN_LEFT })
         });
         let want = Chassis::want(ride, tricks);
@@ -1040,6 +1040,7 @@ impl Chassis {
             band: speed,
             progress: tricks.progress,
             seq: tricks.seq,
+            spin_starts: ride.tricks.as_ref().map_or(0, |t| t.spin.starts),
             ..Request::default()
         }
     }

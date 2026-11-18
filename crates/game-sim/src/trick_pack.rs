@@ -225,7 +225,8 @@ impl crate::hash::State for State {
         w.bool("spin.wrecked", s.wrecked);
         w.bool("spin.forward", s.forward);
         // `spin.cut` (S154) is not walked: the rider takes it each frame with `spin.wrecked`, so it
-        // is false between frames, and the pack rides' hashes stay what they were.
+        // is false between frames, and the pack rides' hashes stay what they were. Nor is
+        // `spin.starts` (S467): only the animations read it, and they are not hashed either.
         w.u8("flip_row", self.flip_row as u8);
         w.f("side.now", self.side.now);
         w.u8("side.head", self.side.head as u8);
