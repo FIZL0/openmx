@@ -89,6 +89,11 @@ fn line_with<'a>(said: &'a str, part: &str) -> &'a str {
 /// Two shells riding `track` online for `frames` ticks, host's and guest's on `scripts`: each one's
 /// output.
 fn ride_online(track: &str, frames: u32, scripts: [Option<&str>; 2]) -> [String; 2] {
+    ride_online_with(track, frames, scripts, &[])
+}
+
+/// [`ride_online`] with `extra` on the host's command line.
+fn ride_online_with(track: &str, frames: u32, scripts: [Option<&str>; 2], extra: &[&str]) -> [String; 2] {
     // Each shell binds a port of its own (port 0) and keeps it: a port picked free here and bound
     // by the shell after its load was a window another slot's test could take it in (K29). The
     // host says its port; the guest is started on it; the host takes the guest's from its first
@@ -102,6 +107,9 @@ fn ride_online(track: &str, frames: u32, scripts: [Option<&str>; 2]) -> [String;
             .args(["--headless", "--track", track, "--frames", &frames, "--seats", "host,g"])
             .args(["--online", me, "--peer", peer])
             .stdout(std::process::Stdio::piped());
+        if me.starts_with("host@") {
+            shell.args(extra);
+        }
         if let Some(s) = script {
             shell.args(["--online-script", s]);
         }
@@ -186,6 +194,59 @@ fn two_online_shells_see_the_host_switch_into_the_monster_truck_and_back() {
     assert_eq!(line_with(&said[0], "car: monster "), line_with(&said[1], "car: monster "));
     let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
     assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with the truck out");
+}
+
+/// T3: an online seat dressed as a peer's (`dress_peer`, N16) and looked through — as a second player
+/// sitting down on this machine in a lobby ride is (N20) — follows its car on the car's own presets
+/// (S268), as the seat the ride loaded does. No headless path seats a second local player online,
+/// so the host's `--online-script` word `dress` rebuilds its own seat through the same dressing at
+/// tick 20, before it switches into the monster truck at 40. Its traced camera stands at the bike's
+/// distance until then and at the truck's after, the same as an undressed host's; a dressed seat
+/// with no car cameras (S268's bug) stays at the bike's.
+#[test]
+fn an_online_seat_dressed_as_a_peers_follows_its_car_on_the_cars_presets() {
+    if disc().is_none() {
+        return;
+    }
+    // Camera 0's distances traced after the line `from` (the last one) and before `to`. The trace's
+    // ticks are the shell's, which count while a shell waits for its peer, so a session tick has
+    // no fixed number in it: the shell's own lines mark the moments.
+    let distances = |s: &str, from: &str, to: Option<&str>| -> Vec<f32> {
+        let lines: Vec<&str> = s.lines().collect();
+        let start = lines.iter().rposition(|l| *l == from).unwrap_or_else(|| panic!("no `{from}`:\n{s}"));
+        let end = to.map_or(lines.len(), |to| start + lines[start..].iter().position(|l| *l == to).unwrap_or_else(|| panic!("no `{to}`:\n{s}")));
+        lines[start..end]
+            .iter()
+            .filter(|l| l.starts_with("camera 0 "))
+            .map(|l| {
+                let w: Vec<&str> = l.split(' ').collect();
+                let at = w.iter().position(|&x| x == "distance").expect("a distance");
+                w[at + 1].parse().expect("a distance")
+            })
+            .collect()
+    };
+    let drive = "40:monster,41:gas";
+    let dressed = ride_online_with("free09", 120, [Some(&format!("20:dress,{drive}")), None], &["--trace-camera"]);
+    let plain = ride_online_with("free09", 120, [Some(drive), None], &["--trace-camera"]);
+    for (who, s) in ["dressed host", "guest", "plain host", "guest"].iter().zip(dressed.iter().chain(&plain)) {
+        assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
+    }
+    let host = &dressed[0];
+    let told: String = host.lines().filter(|l| !l.starts_with("camera ")).map(|l| format!("{l}\n")).collect();
+    let dress = "online: seat 1 dressed as a peer's, 3 car cameras";
+    assert!(host.lines().any(|l| l == dress), "{told}");
+    // On the bike, dressed, until the switch.
+    let bike = distances(host, dress, Some("vehicle: monster"));
+    assert!(!bike.is_empty() && bike.iter().all(|&d| d < 20.0), "the dressed seat's bike camera: {bike:?}");
+    // In the truck: past the switch's frame, on the truck's preset, as the undressed host is.
+    let truck = distances(host, "vehicle: monster", None);
+    let want = distances(&plain[0], "vehicle: monster", None);
+    assert!(truck.len() > 30, "too few traced frames in the truck: {}", truck.len());
+    let on = *want.last().expect("the plain host traced its truck");
+    assert!(on > bike[0] + 8.0, "the plain host's truck camera stands {on} ft back, the bike's {}", bike[0]);
+    for (i, &d) in truck.iter().enumerate().skip(2) {
+        assert_eq!(d, on, "frame {i} in the truck: the dressed seat's camera stands {d} ft back, an undressed seat's {on}:\n{told}");
+    }
 }
 
 /// T2: what two online shells' runs must both say — the load's bike and then `switched`, every
