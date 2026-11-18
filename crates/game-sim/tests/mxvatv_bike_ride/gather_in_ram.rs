@@ -416,15 +416,17 @@ impl GatherInRam {
         let (wo, wb) = was;
         let (no, nb) = now;
         assert_eq!((&wb.spaces, &wb.tables, wb.global), (&nb.spaces, &nb.tables, nb.global), "the spaces changed");
+        // Most entries come out as they went in: an equal one is not cloned to be compared (K74:
+        // state 4's thousands of entries cloned a search were a third of the fade search's time).
         for (k, (a, b)) in wo.iter().zip(no).enumerate() {
             let e = self.items[k];
-            assert_eq!(ws::Collidable { flags: b.flags, ..a.clone() }, *b, "collidable {:#x} changed beyond its flags", e - 0x18);
-            if a.flags != b.flags {
+            if a != b {
+                assert_eq!(ws::Collidable { flags: b.flags, ..a.clone() }, *b, "collidable {:#x} changed beyond its flags", e - 0x18);
                 set_u8(ee, e - 0x18 + 0x126, b.flags);
             }
             let (pa, pb) = (&wb.places[k], &nb.places[k]);
-            assert_eq!(bp::Placement { stamp: pb.stamp, ..pa.clone() }, *pb, "entry {e:#x}'s place changed beyond its stamp");
-            if pa.stamp != pb.stamp {
+            if pa != pb {
+                assert_eq!(bp::Placement { stamp: pb.stamp, ..pa.clone() }, *pb, "entry {e:#x}'s place changed beyond its stamp");
                 set_u16(ee, e, pb.stamp);
             }
         }
