@@ -1935,7 +1935,8 @@ fn touch_controls((w, h): (f32, f32)) -> (Vec<menu::Bounds>, menu::Bounds) {
 /// P208: with the page's touch pad up, at a phone's 844x390 (where BRAKE and GAS covered them), a
 /// bigger phone's and a tablet's, every screen's hints stand left of the pad's right-hand controls
 /// and its band's line right of the stick's resting base, both still in the frame; with the pad
-/// down they are where they were.
+/// down they are where they were. F10b: the hints right of the stick too (the Controllers screen's
+/// long ones ran under it on a tablet).
 #[test]
 fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
     let mut disc = match game_render::Disc::open_configured() {
@@ -1972,6 +1973,7 @@ fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
                         for c in &thumb {
                             assert!(!overlap(b, *c), "{at}: the hints {b:?} under the pad's {c:?}");
                         }
+                        assert!(!overlap(b, stick), "{at}: the hints {b:?} under the stick {stick:?}");
                     }
                     menu::Part::Line(b) if b[2] > 0.0 => {
                         lines += 1;

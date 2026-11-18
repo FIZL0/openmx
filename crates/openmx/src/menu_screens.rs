@@ -917,14 +917,13 @@ impl<'a> Pen<'a> {
     /// [`Pen::hints`] with the tab's foot at `foot` (stage ems): the band's top, or the frame's
     /// bottom edge on the splash, which has no band for it to sit on (P278).
     fn hints_on(&mut self, hints: &[(Btn, &str)], foot: f32) {
+        let hints = &self.hint_words(hints, foot);
         let spacing = Pen::hint_spacing(hints);
         let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
         // The tab's slanted end leans 3 ems over its foot; the hints sit HINT_MARGIN in from its
         // middle and from `right`, so the tab fits them with the same margin each side (P341).
         let lead = HINT_LEAD;
-        let room = right - HINT_MARGIN - lead - self.left().max(0.0) - spacing;
-        let mut size = 1.55;
-        let full: f32 = self.hint_widths(hints, size).iter().sum();
+        let size = 1.55 * self.hint_shrink(hints, foot);
         if let Some(t) = self.title.take() {
             // The title held back right of the touch pad's stick (F10) and the hints share the
             // room up to the pedals, half an em apart, both shrunk alike where they must. Where
@@ -934,15 +933,9 @@ impl<'a> Pen<'a> {
             let (k, fit, up) = self.title_beside(&t, hints, foot);
             if k >= SHARED_SHRINK || self.over_the_rows(up) {
                 self.title_at(&t, up[0], foot - 1.2, TITLE_SIZE * k);
-                size *= k;
             } else {
                 self.title_at(&t, up[0], foot - 3.8, TITLE_SIZE * fit);
-                if full > room && room > 0.0 {
-                    size *= room / full;
-                }
             }
-        } else if full > room && room > 0.0 {
-            size *= room / full;
         }
         let d = 1.15 * size;
         let gap = 0.45 * size;
@@ -976,6 +969,35 @@ impl<'a> Pen<'a> {
         hints.iter().map(|(b, s)| self.button_wide(*b, d) + gap + self.wide(Weight::Bold, s, size)).collect()
     }
 
+    /// How much [`Pen::hints_on`] shrinks `hints` on a tab with its foot at `foot` (stage ems): to
+    /// fit from the frame's left, or right of the touch pad's stick while the pad is up (F10b), to
+    /// the pedals; or alike with the held title (F10) where they share the band's top.
+    fn hint_shrink(&self, hints: &[(Btn, &str)], foot: f32) -> f32 {
+        let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
+        let left = self.clear_of_the_stick(self.left().max(0.0));
+        let room = right - HINT_MARGIN - HINT_LEAD - left - Pen::hint_spacing(hints);
+        let full: f32 = self.hint_widths(hints, 1.55).iter().sum();
+        if let Some(t) = &self.title {
+            let (k, _, up) = self.title_beside(t, hints, foot);
+            if k >= SHARED_SHRINK || self.over_the_rows(up) {
+                return k;
+            }
+        }
+        if full > room && room > 0.0 { room / full } else { 1.0 }
+    }
+
+    /// `hints`' words: each before its `|`, or the short one after it where the touch pad is up and
+    /// the long ones would shrink past [`SHARED_SHRINK`] right of its stick (F10b: the Controllers
+    /// and Race screens' on a small phone and a tablet); a hint whose short word is empty is left
+    /// out then.
+    fn hint_words<'h>(&self, hints: &[(Btn, &'h str)], foot: f32) -> Vec<(Btn, &'h str)> {
+        let long: Vec<_> = hints.iter().map(|(b, s)| (*b, s.split('|').next().unwrap_or(s))).collect();
+        if !self.pad_up() || !hints.iter().any(|(_, s)| s.contains('|')) || self.hint_shrink(&long, foot) >= SHARED_SHRINK {
+            return long;
+        }
+        hints.iter().map(|(b, s)| (*b, s.rsplit('|').next().unwrap_or(s))).filter(|(_, s)| !s.is_empty()).collect()
+    }
+
     /// Where the title `t` held back right of the touch pad's stick (F10) goes beside `hints` on a
     /// tab with its foot at `foot` (stage ems): the shrink `k` both take to share the band's top,
     /// and the box (stage ems) it fills raised a row over the tab instead, `fit` of its size.
@@ -997,7 +1019,8 @@ impl<'a> Pen<'a> {
         if !self.pad_up() {
             return bottom;
         }
-        let (k, _, up) = self.title_beside(t, hints, STAGE.1 - BAND);
+        let hints = self.hint_words(hints, STAGE.1 - BAND);
+        let (k, _, up) = self.title_beside(t, &hints, STAGE.1 - BAND);
         if k >= SHARED_SHRINK { bottom } else { bottom.min(up[1] - 0.3) }
     }
 
@@ -1010,7 +1033,7 @@ impl<'a> Pen<'a> {
     }
 
     /// `left` (stage ems), or right of the page's touch pad's stick at rest while the pad is up
-    /// (P208), for the band's line.
+    /// (P208), for the band's line, the title (F10) and the hints' tab (F10b).
     fn clear_of_the_stick(&self, left: f32) -> f32 {
         let Some(room) = Room::of((self.size[0] as usize, self.size[1] as usize)) else { return left };
         let (right, _) = room.right_of_the_stick();
@@ -2976,7 +2999,7 @@ impl Pen<'_> {
             self.fade = 1.0;
         }
         self.title(Screen::Assign.title());
-        self.hints(&[(Btn::Circle, "Done"), (Btn::Square, "Take Off"), (Btn::Cross, "Find / Join"), (Btn::LeftRight, "Move")]);
+        self.hints(&[(Btn::Circle, "Done"), (Btn::Square, "Take Off|Off"), (Btn::Cross, "Find / Join|Join"), (Btn::LeftRight, "Move|")]);
     }
 
     /// A dashed rim round a box: short chalk dashes along its straight sides.
@@ -3039,7 +3062,7 @@ impl Pen<'_> {
         const SHOWN: usize = 9;
         let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
         let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
-        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National"), (Btn::Cross, "Select")];
+        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
         // F10a: the rows closer where the touch pad is up and the title needs their room to rise;
         // the down arrow an em under them, clear of it too.
         let floor = self.above_the_raised_title(Screen::Race.title(), &hints, LIST_BOTTOM + 1.0);
