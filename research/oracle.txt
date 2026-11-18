@@ -1098,7 +1098,7 @@ score_machine_race_tick     boot 0x002640c0 (dt f12, mgr) mode 1's handler: need
 #                                           Every card first: owner/chain vt+8 (card). Not racing: 0x4001
 #                                           -> owner/chain vt+0x20 (card+0x60, card+0x120). Racing: the
 #                                           odometer (vsub.xyz, mula/madda/madd, sqrt.s, add.s); 0x80000
-#                                           -> 0x00267d90 (unported); c.olt.s last.x < 0 skips the gate
+#                                           -> 0x00267d90 (score_card_jumps, S292c); c.olt.s last.x < 0 skips the gate
 #                                           line (NaN/-0 run it); gate line 0 -> return 0 at once (no
 #                                           close); OUT with 4|0x8000 -> mgr |= 4; zones. +0x10 = |gate -
 #                                           last|, +0x14 = |gate - now|; +0x10 <= 50 (c.ole.s): aim = gate
@@ -1116,6 +1116,17 @@ score_machine_race_tick     boot 0x002640c0 (dt f12, mgr) mode 1's handler: need
 #                                           steering (path_spot 0x0026b410, unported). After the loop:
 #                                           score_race_close's but the countdown has no kind test and the
 #                                           ranking is score_gate_rank.
+# S292c: both branches ported. 0x80000 is the race's jump watch, score_card_jumps (a0 mgr, a1 card, f12
+#   dt; its 1 ignored), at 0x002642cc after the odometer: LapRules::machine_step via RaceRules::jumps.
+#   The path steering (0x00264ba8..0x00264da8): path_spot(track, card+0x60, card+0x88, 0, 1, 0) (return
+#   ignored); walk from +0x8c on node.next while node +4 bit 0 (along f24 = 0) — no line-node stop,
+#   no on-track or next-node precondition, unlike score_race_aim; a node with no next steps to +0x50
+#   (prev; null on a one-node path) at along f21 = 1; card +0xa0 = (path, node, along) unclamped;
+#   path_spot_point on the local copy, 0 -> card +0x60 qword; 0x0026e630 (track, node, out) the
+#   path's way ahead, 0 -> vf0; +0x10 c.olt.s f20 = 10 pulls the point back along it by 10 - +0x10;
+#   owner/chain vt+0x20. A null node after path_spot (no paths / empty pool on a null +0x8c) reads
+#   word 0x54. LapRules::machine_path_aim; tests/race.rs, the mode-1 oracle (track at mgr+0x68, its
+#   +0x4c = path 0 for path_spot).
 score_gate_rank             boot 0x00262470 (mgr) -> 0 with no cards (no track test): score_rank's sort and
 #                                           notices, but q ahead of p on gates (+0x38) more, or equal and
 #                                           +0x14 c.olt.s less. LapRules::gate_rank

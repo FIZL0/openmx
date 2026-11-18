@@ -4201,8 +4201,8 @@ impl AsMut<LapCard> for RaceCard {
     }
 }
 
-/// The score manager's flag bit that sends the machine race's riders along the track's path rather
-/// than straight at their next gate (`0x80_0000`; the port leaves that way out).
+/// The score manager's flag bit that, with a track, points the machine race's riders along the
+/// track's paths rather than at their next gate ([`LapRules::machine_path_aim`]; `0x80_0000`).
 pub const PATH_STEER: u32 = 0x80_0000;
 
 /// Within this many feet of its next gate a rider aims past it, toward the gate after (the
@@ -4220,11 +4220,15 @@ pub enum MachineNotice {
     Line(LineNotice),
     /// The rider's step went through or past a live zone ([`zone_crossings`]).
     Zone { zone: usize, crossing: Crossing },
+    /// The card's jump watch ([`RaceRules::jumps`], for a card with
+    /// [`race_card_flags::WATCHES_JUMPS`]): one of its take-off, landing and best notices.
+    Jump(RaceNotice),
     /// The card's aim at its gate is new ([`RaceCard::to_track`]): the manager's listener hears it
     /// first, then the card's owner and its chain.
     Aimed,
     /// Where the rider is and the way it is to go (the card's owner and its chain): its aim for a
-    /// racing card, its look ahead ([`RaceCard::look`]) once more for a done one.
+    /// racing card, its look ahead ([`RaceCard::look`]) once more for a done one, or the path aim
+    /// ([`LapRules::machine_path_aim`]).
     Aim { point: Vf, ahead: Vf },
     /// The card's time limit ran out ([`LapRules::time_limit`]; told as [`FinishNotice::TimeUp`]).
     TimeUp,
@@ -4255,10 +4259,12 @@ impl LapRules {
     /// ([`LapRules::check_over`]), each card in list order ([`LapRules::machine_card`]; the list's
     /// head's race clock times the made-up finishes), and the close ([`LapRules::machine_close`]).
     /// `ghosts` are the cards' owners' ghost cards, by place in the list; `gates` the race's chain of
-    /// gates, `zones` the manager's zone list.
+    /// gates, `zones` the manager's zone list; `jump_settle` the manager's
+    /// [`WatchRules::jump_settle`]; `track` the manager's track, if it holds one.
     ///
     /// With no cards or no gates the handler does nothing at all; a card whose gate line says no stops
     /// it there (see [`MachineTick::went_on`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn machine_tick(
         &mut self,
         dt: F,
@@ -4266,6 +4272,8 @@ impl LapRules {
         ghosts: &mut [Option<LapCard>],
         gates: &[Gate],
         zones: &[Gate],
+        jump_settle: F,
+        mut track: Option<&mut TrackPaths>,
         rng: &mut Rng,
     ) -> MachineTick {
         let mut tick = MachineTick::default();
@@ -4277,7 +4285,7 @@ impl LapRules {
         for k in 0..cards.len() {
             let leader = (k > 0).then(|| cards[0].lap.race_time);
             let ghost = ghosts.get_mut(k).and_then(|g| g.as_mut());
-            let (go_on, said) = self.machine_card(dt, &mut cards[k], ghost, gates, zones, leader);
+            let (go_on, said) = self.machine_card(dt, &mut cards[k], ghost, gates, zones, leader, jump_settle, track.as_deref_mut());
             tick.said.extend(said.into_iter().map(|n| (k, n)));
             if !go_on {
                 return tick;
@@ -4296,7 +4304,8 @@ impl LapRules {
     /// [`card_flags::TIMED_OUT`]) tells where its rider is and its look ahead; a card not taking part,
     /// or in a fast-lap attack without [`card_flags::FAST_LAP`], does nothing more there. A racing card:
     ///
-    /// * its odometer runs by the step's length;
+    /// * its odometer runs by the step's length, and with [`race_card_flags::WATCHES_JUMPS`] the jump
+    ///   watch runs ([`RaceRules::jumps`], judging after `jump_settle`; told [`MachineNotice::Jump`]);
     /// * unless where it was seen the tick before is at a negative `x` (not yet seen), its gate line
     ///   ([`LapRules::gate_line`]); then a done card the race waits for ([`card_flags::PLAYER`] or
     ///   [`card_flags::PLAYER_TOO`]) starts the finish countdown ([`race_flags::PLAYER_DONE`]), and with
@@ -4313,12 +4322,13 @@ impl LapRules {
     ///   less its lap's start as the lap, and no kind of race is spared); the fast-lap attack clock.
     ///
     /// Then any card's time limit ([`LapRules::time_limit`]) and, for every card, where its rider is
-    /// and its aim ([`MachineNotice::Aim`]). `leader_time` is the list head's race clock (`None`: this
+    /// and its aim ([`MachineNotice::Aim`]) — or, with a `track` and [`PATH_STEER`], the path aim
+    /// ([`LapRules::machine_path_aim`]). `leader_time` is the list head's race clock (`None`: this
     /// card is the head, and its own is read when needed).
     ///
-    /// Left out: the helper behind card flag `0x8_0000`, and the path steering of [`PATH_STEER`] (the
-    /// port always aims straight). The original reads low memory for a card waiting at no gate whose
-    /// gate line it skips; the port stops the handler there.
+    /// The original reads low memory for a card waiting at no gate whose gate line it skips; the port
+    /// stops the handler there.
+    #[allow(clippy::too_many_arguments)]
     pub fn machine_card(
         &mut self,
         dt: F,
@@ -4327,6 +4337,8 @@ impl LapRules {
         gates: &[Gate],
         zones: &[Gate],
         leader_time: Option<F>,
+        jump_settle: F,
+        track: Option<&mut TrackPaths>,
     ) -> (bool, Vec<MachineNotice>) {
         let mut said = vec![MachineNotice::Look];
         let fl = card.lap.flags;
@@ -4335,14 +4347,63 @@ impl LapRules {
             if fl & done != 0 {
                 said.push(MachineNotice::Aim { point: card.lap.seen.now, ahead: card.look });
             }
-        } else if !self.machine_step(dt, card, ghost, gates, zones, leader_time, &mut said) {
+        } else if !self.machine_step(dt, card, ghost, gates, zones, leader_time, jump_settle, &mut said) {
             return (false, said);
         }
         if self.time_limit(dt, &mut card.lap) {
             said.push(MachineNotice::TimeUp);
         }
-        said.push(MachineNotice::Aim { point: card.lap.seen.now, ahead: card.to_track });
+        match track {
+            Some(track) if self.flags & PATH_STEER != 0 => said.push(Self::machine_path_aim(card, track)),
+            _ => said.push(MachineNotice::Aim { point: card.lap.seen.now, ahead: card.to_track }),
+        }
         (true, said)
+    }
+
+    /// The machine race's path aim, for every card when the manager holds a track and has
+    /// [`PATH_STEER`]: the card's spot ([`LapCard::spot`]) is found afresh, the nearest place on the
+    /// paths to its rider ([`crate::ai::follow::spot`], every stretch; left as it was when there is
+    /// none). From there the aim walks on node by node (each at its start) past nodes whose `+4` word
+    /// has bit 0, stopping at a path's last node — and from a last node it steps back to the end of
+    /// the stretch before (a path of one node leaves the spot naming no node, at 1). That spot is the
+    /// card's [`RaceCard::aim`]. Its point (the rider's own when it has none) and the path's way ahead
+    /// at its node (none: `(0, 0, 0, 1)`) are told; within 10 of the gate from the tick before's place
+    /// ([`LapCard::to_line_kept`]) the point is drawn back along the way by what is left of the 10.
+    ///
+    /// A spot naming no node after the search (no paths, or the search's pool empty, on a spot that
+    /// named none) has the original read low memory; the port takes it as walking no further.
+    pub fn machine_path_aim(card: &mut RaceCard, track: &mut TrackPaths) -> MachineNotice {
+        let now = card.lap.seen.now;
+        crate::ai::follow::spot(track, now, false, &mut card.lap.spot, None);
+        let mut aim = card.lap.spot;
+        if let Some((p, first)) = aim.at() {
+            let nodes = &track.paths[p].nodes;
+            let mut node = first;
+            while node + 1 < nodes.len() && nodes[node].word_04 & 1 != 0 {
+                node += 1;
+                aim.along = F::ZERO;
+            }
+            if node + 1 == nodes.len() {
+                aim.piece = node as u32;
+                aim.along = F::ONE;
+            } else {
+                aim.piece = node as u32 + 1;
+            }
+        }
+        card.aim = aim;
+        let mut point = now;
+        if !track.spot_point(&mut aim, &mut point) {
+            point = now;
+        }
+        let mut ahead = Vf::new(0.0, 0.0, 0.0, 1.0);
+        if !track.path_ahead(aim, &mut ahead) {
+            ahead = Vf::new(0.0, 0.0, 0.0, 1.0);
+        }
+        if lt(card.lap.to_line_kept, AIM_PULL_NEAR) {
+            let pull = ahead.mul(Vf::splat((AIM_PULL_NEAR - card.lap.to_line_kept).0));
+            point = point.merge(Dest::XYZ, point.sub(pull));
+        }
+        MachineNotice::Aim { point, ahead }
     }
 
     /// A racing card's work in the machine race, up to its clocks.
@@ -4355,10 +4416,16 @@ impl LapRules {
         gates: &[Gate],
         zones: &[Gate],
         leader_time: Option<F>,
+        jump_settle: F,
         said: &mut Vec<MachineNotice>,
     ) -> bool {
         let step = card.lap.seen.now.sub(card.lap.seen.last);
         card.odometer = F(fpu::add(card.odometer.0, fpu::sqrt(dot3(step, step).0)));
+        if card.lap.flags & race_card_flags::WATCHES_JUMPS != 0 {
+            let mut watch = RaceRules { lap: *self, watch: WatchRules { jump_settle, ..WatchRules::default() }, ..RaceRules::default() };
+            said.extend(watch.jumps(dt, card).into_iter().map(MachineNotice::Jump));
+            self.flags = watch.lap.flags;
+        }
         if !lt(F(card.lap.seen.last.x()), F::ZERO) {
             let (go_on, heard) = self.gate_line(&mut card.lap, ghost, gates);
             said.extend(heard.into_iter().map(MachineNotice::Line));
