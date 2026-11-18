@@ -110,7 +110,7 @@ mac=dist/macos/openmx-macos-arm64.dmg
 cp "$mac" "$out/openmx-macos-arm64.dmg"
 cp dist/openmx.apk "$out/openmx-android.apk"
 # P201: the sideloading source, at a URL that always serves the latest release's copy (FIZL0/apps reads it there)
-tools/ios-source.sh "$version" "$out/openmx-ios.ipa" >/dev/null
+tools/ios-source.sh "$version" "$out/openmx-ios.ipa" "$out/altstore-source.json" "$notes" >/dev/null
 tools/web.sh
 tar -czf "$out/web.tar.gz" -C web .
 (cd "$out" && sha256sum openmx-* web.tar.gz > SHA256SUMS)
