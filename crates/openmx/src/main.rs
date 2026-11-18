@@ -519,6 +519,9 @@ struct Seat {
     /// alone rides (`Controls::stick_alone`); off, the d-pad fires no marker and rides as the
     /// original's (`Controls::through` as it is), on the bike and in the plane.
     markers: bool,
+    /// The player's Preload Axis (P367): the pad axis a bike on Untamed's handling reads as its
+    /// analogue preload (`vehicle::with_preload`), `None` for none, as Untamed ships it.
+    preload: Option<game_sim::input::Axis>,
     /// The reset chord's two halves must go down together (P67, `Controls::chord_together`): the
     /// new layout's, where L1 is a clutch held through a launch and R1 on it is a trick, not the
     /// put-back. Under the original's, the original's chord.
@@ -641,6 +644,7 @@ impl Seat {
         // The d-pad is the markers' and not the ride's (P93): the stick alone steers. With the
         // player's markers off (P129) it is the original's, every meaning it has there.
         let mut controls = vehicle::hands(self.sim.poll(dt, &self.reports), self.markers);
+        controls = vehicle::with_preload(controls, &self.sim, self.preload);
         if self.together {
             controls = controls.chord_together(self.sim.input.pad(0), self.sim.table());
         }
@@ -2645,6 +2649,7 @@ mod split_contact {
             clears: 0,
             markers: false,
             together: false,
+            preload: None,
             shade: PageShade::default(),
         }
     }
@@ -8148,6 +8153,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         clears: 0,
         markers: args.markers_of(0, front.as_deref()),
         together: false,
+        preload: None,
         shade: PageShade::default(),
     }];
     // The race's HUD readouts, while it has its gate (P327).
@@ -8209,6 +8215,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             clears: 0,
             markers: args.markers_of(i + 1, front.as_deref()),
             together: false,
+            preload: None,
             shade: PageShade::default(),
         });
     }
@@ -9059,6 +9066,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         // The player's Markers switch (P129), live: a change under the pause
                         // rides from the frame it is made.
                         seat.markers = args.markers_of(i, front.as_deref());
+                        // And its Preload Axis (P367), live the same way. Not online, where every
+                        // machine rides every seat and would need each player's binding: there it
+                        // stays unbound, as Untamed ships it.
+                        seat.preload = front.as_deref().filter(|_| online.is_none()).and_then(|f| f.menu.settings.preload_axes[i.min(menu::SEATS_MAX - 1)].axis());
                         // And the layout's reset chord (P67), live like the layout itself.
                         seat.together = seats.scheme(from) == Scheme::New;
                         // A bike with MX vs. ATV's tricks (MD16) reads the new layout's Cross and Square as
@@ -9653,6 +9664,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             clears: 0,
                             markers: args.markers_of(i, Some(&*front)),
                             together: false,
+                            preload: None,
                             shade: PageShade::default(),
                         };
                         Ok((seat, rig, kept))
@@ -10024,6 +10036,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     clears: 0,
                     markers: true,
                     together: false,
+                    preload: None,
                     shade: PageShade::default(),
                 };
                 seat.sim.markers.up(vehicle::markers_of(Kind::Bike));

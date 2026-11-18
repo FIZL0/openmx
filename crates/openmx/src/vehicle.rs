@@ -946,6 +946,19 @@ pub fn hands(polled: Controls, markers: bool) -> Controls {
     if markers { polled.stick_alone() } else { polled }
 }
 
+/// A seat's hands with its Preload Axis (P367) handed in as Untamed's analogue preload
+/// ([`Controls::with_preload`]), read off player 0's pad through the bike's stick range, on a bike
+/// with Untamed's handling alone; any other bike, or `axis` `None`, leaves it unbound, as Untamed
+/// ships it.
+pub fn with_preload(controls: Controls, sim: &Sim, axis: Option<game_sim::input::Axis>) -> Controls {
+    match axis {
+        Some(_) if sim.phy.handling == game_sim::handling::Handling::Untamed && sim.plane.is_none() => {
+            controls.with_preload(sim.input.pad(0), axis, &sim.phy.stick)
+        }
+        _ => controls,
+    }
+}
+
 /// `pad` with its four d-pad directions let go (P107): what the shell's plane flies on, the d-pad
 /// being the session markers' (`game_sim::markers::fly`). Everything else is the pad as it was.
 pub fn without_dpad(pad: &game_sim::input::Pad) -> game_sim::input::Pad {
@@ -4390,6 +4403,24 @@ mod tests {
         let h = atv.flown.as_ref().unwrap();
         assert!(h.record.as_ref().unwrap().record.terrain, "the record's pass ran on the terrain");
         assert!(!h.touching() && h.ride.body.position.y() < before, "the record met nothing; it fell");
+    }
+
+    /// P367: the seat's Preload Axis reaches the ride on Untamed's handling alone, read off pad 0
+    /// through the bike's stick range; any other handling, or no axis, leaves it unbound.
+    #[test]
+    fn the_preload_axis_binds_on_untamed_handling_alone() {
+        use game_sim::handling::Handling;
+        use game_sim::input::{Axis, PADS, Report};
+        let mut sim = Sim::new(0);
+        let mut report = Report::idle();
+        report.set_axis(1, 255); // the right stick's Y, pulled all the way back
+        sim.input.tick(F(1.0 / 60.0), &[report; PADS]);
+        let polled = Controls::from_pad(sim.input.pad(0));
+        assert_eq!(with_preload(polled, &sim, Some(Axis::RightY)).preload, None, "MX Unleashed's handling");
+        std::sync::Arc::make_mut(&mut sim.phy).handling = Handling::Untamed;
+        assert_eq!(with_preload(polled, &sim, None).preload, None, "Off");
+        assert_eq!(with_preload(polled, &sim, Some(Axis::RightY)).preload, Some(sim.phy.stick.hi));
+        assert_eq!(with_preload(polled, &sim, Some(Axis::LeftY)).preload, Some(F(0.0)), "a centred axis");
     }
 
     #[test]

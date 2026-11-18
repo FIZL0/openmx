@@ -183,6 +183,7 @@ fn offline_marked(pads: &[Report], markers: bool) -> (Vec<F>, Vec<Vec<u8>>) {
         markers,
         // The online side's byte leaves the together chord off (P67), so this does too.
         together: false,
+        preload: None,
         shade: PageShade::default(),
         paused: false,
     };

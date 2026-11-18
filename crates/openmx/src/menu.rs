@@ -621,6 +621,10 @@ pub struct Settings {
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
     /// On unless turned off.
     pub markers: [bool; SEATS_MAX],
+    /// Each seat's analogue preload (P367), the Controls tab's Preload Axis row, 1P's first: the pad
+    /// axis a bike on Untamed's handling reads as Untamed's analogue preload, or Off — Untamed's own,
+    /// which binds nothing to it. Off unless set.
+    pub preload_axes: [PreloadAxis; SEATS_MAX],
     /// Settings → Updates (P191): what the desktop does about a newer build. Ask unless set.
     pub updates: Updates,
     /// The Graphics tab's Preset row on Auto (P223, [`video`]): the rows picked for this device and
@@ -1496,6 +1500,7 @@ impl Default for Settings {
             shadows: shadows_default(),
             shadow_quality: shadow_quality_default(),
             markers: [true; SEATS_MAX],
+            preload_axes: [PreloadAxis::Off; SEATS_MAX],
             updates: Updates::default(),
             video_auto: true,
 
@@ -1590,6 +1595,75 @@ fn pack_names(v: &str) -> Vec<String> {
     let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
     v.split(',').map(str::trim).filter(|n| !n.is_empty() && n.split('/').all(plain)).map(str::to_string).collect()
 }
+
+/// The pad axis a seat binds to Untamed's analogue preload (P367): Off, Untamed's own, or one stick
+/// axis. Untamed's preload reads the axis's plus side alone (0 to 1, the harder the bigger the
+/// shove), so each is named by the push that reads plus: right and down, but the right stick's X
+/// the other way, as the poll hands it out inverted ([`game_sim::input::AXIS_INVERTED`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreloadAxis {
+    #[default]
+    Off,
+    LeftX,
+    LeftY,
+    RightX,
+    RightY,
+}
+
+impl PreloadAxis {
+    pub const ALL: [PreloadAxis; 5] = [PreloadAxis::Off, PreloadAxis::LeftY, PreloadAxis::LeftX, PreloadAxis::RightY, PreloadAxis::RightX];
+
+    /// The pad axis it reads, `None` for Off.
+    pub fn axis(self) -> Option<game_sim::input::Axis> {
+        use game_sim::input::Axis;
+        match self {
+            PreloadAxis::Off => None,
+            PreloadAxis::LeftX => Some(Axis::LeftX),
+            PreloadAxis::LeftY => Some(Axis::LeftY),
+            PreloadAxis::RightX => Some(Axis::RightX),
+            PreloadAxis::RightY => Some(Axis::RightY),
+        }
+    }
+
+    /// Its row's name for it: the push that preloads.
+    pub fn label(self) -> &'static str {
+        match self {
+            PreloadAxis::Off => "Off",
+            PreloadAxis::LeftX => "Left Stick Right",
+            PreloadAxis::LeftY => "Left Stick Down",
+            PreloadAxis::RightX => "Right Stick Left",
+            PreloadAxis::RightY => "Right Stick Down",
+        }
+    }
+
+    /// The file's word.
+    pub fn word(self) -> &'static str {
+        match self {
+            PreloadAxis::Off => "off",
+            PreloadAxis::LeftX => "left_x",
+            PreloadAxis::LeftY => "left_y",
+            PreloadAxis::RightX => "right_x",
+            PreloadAxis::RightY => "right_y",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<PreloadAxis> {
+        PreloadAxis::ALL.into_iter().find(|a| a.word() == w)
+    }
+
+    /// `preload_axis`' line: a word a seat, 1P's first, the last for every seat past it, as
+    /// [`markers_seats`]; `None` for a word it cannot read or more words than seats.
+    pub fn parse_seats(v: &str) -> Option<[PreloadAxis; SEATS_MAX]> {
+        let words: Vec<PreloadAxis> = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()).map(PreloadAxis::from_word).collect::<Option<_>>()?;
+        if words.is_empty() || words.len() > SEATS_MAX {
+            return None;
+        }
+        Some(std::array::from_fn(|i| words[i.min(words.len() - 1)]))
+    }
+}
+
+/// Preload Axis' row's help (P367).
+pub const PRELOAD_AXIS_HELP: &str = "Untamed's analogue preload, on bikes with Untamed's handling: push this stick that way on the lip and the bike springs, harder the further it goes. Off is Untamed as it ships.";
 
 /// `markers`' line (P129): `on` or `off` a seat, 1P's first, the last for every seat past it; `None`
 /// for a line with a word it cannot read, or more words than seats.
@@ -1744,6 +1818,7 @@ impl Settings {
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "camera_start" | "camera_car_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
+                "preload_axis" => s.preload_axes = PreloadAxis::parse_seats(v).unwrap_or(s.preload_axes),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -1862,6 +1937,7 @@ impl Settings {
             + &self.cameras_text()
             + &cameras::text(&self.camera_sets)
             + &self.markers_text()
+            + &self.preload_axes_text()
             + &self.modifiers_text()
 
     }
@@ -2084,6 +2160,19 @@ impl Settings {
             None => 1,
         };
         format!("markers = {}\n", self.markers[..n].iter().map(|m| on_off(*m)).collect::<Vec<_>>().join(" "))
+    }
+
+    /// Each seat's Preload Axis (P367), only when one is bound, so a file from before it is written
+    /// as it was: one word a seat, as `markers`' line.
+    fn preload_axes_text(&self) -> String {
+        if self.preload_axes.iter().all(|a| *a == PreloadAxis::Off) {
+            return String::new();
+        }
+        let n = match self.preload_axes.iter().rposition(|a| *a != self.preload_axes[SEATS_MAX - 1]) {
+            Some(i) => i + 2,
+            None => 1,
+        };
+        format!("preload_axis = {}\n", self.preload_axes[..n].iter().map(|a| a.word()).collect::<Vec<_>>().join(" "))
     }
 
     fn cameras_text(&self) -> String {

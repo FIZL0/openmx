@@ -170,6 +170,8 @@ pub enum Key {
     PlaneLayout,
     /// A seat's session markers (P129), on or off.
     Markers,
+    /// A seat's pad axis for Untamed's analogue preload (P367), one of [`PreloadAxis::ALL`].
+    PreloadAxis,
     /// The Controls tab's experimental stick dead zone (I8): off — the original's — or one of
     /// [`game_sim::modifiers::DEAD_ZONES`], held as a seat's [`Knob::StickDeadZone`].
     DeadZone,
@@ -1074,6 +1076,11 @@ impl Menu {
             usize::from(!self.settings.markers[p.min(SEATS_MAX - 1)]),
             "On: the d-pad saves and rides back to markers, and the left stick alone steers and does tricks. Off: the d-pad steers, leans and does tricks as in the original.",
         );
+        // Untamed's analogue preload (P367): a pad axis, or none bound, as Untamed ships.
+        let axes = PreloadAxis::ALL.map(PreloadAxis::label);
+        let preload_now = PreloadAxis::ALL.iter().position(|a| *a == self.settings.preload_axes[p.min(SEATS_MAX - 1)]).unwrap_or(0);
+        let preload = Row::choice(Key::PreloadAxis, "Preload Axis", &axes, preload_now, PRELOAD_AXIS_HELP)
+            .tips(&["As Untamed ships", "Pull the left stick back", "Push the left stick right", "Pull the right stick back", "Push the right stick left"]);
         let mut rows = Vec::new();
         if self.many_seats() {
             rows.push(self.player_row("Whose controls these rows change. Every player's pad keeps its own."));
@@ -1083,6 +1090,7 @@ impl Menu {
             keyboard,
             plane,
             markers,
+            preload,
             Row::choice(
                 Key::Nintendo,
                 "Nintendo A/B",
@@ -2011,6 +2019,10 @@ impl Menu {
             Key::Markers => {
                 let i = self.control_seat().min(SEATS_MAX - 1);
                 self.settings.markers[i] = next(row) == 0;
+            }
+            Key::PreloadAxis => {
+                let i = self.control_seat().min(SEATS_MAX - 1);
+                self.settings.preload_axes[i] = PreloadAxis::ALL[next(row).min(PreloadAxis::ALL.len() - 1)];
             }
             Key::DeadZone => {
                 let ring = dead_zone_ring();
