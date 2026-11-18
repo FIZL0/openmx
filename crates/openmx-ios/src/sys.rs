@@ -1202,9 +1202,14 @@ fn audio_session() -> Id {
     get(class(c"AVAudioSession"), c"sharedInstance")
 }
 
-/// `secondaryAudioShouldBeSilencedHint`: another app (one that does not mix) is playing.
+/// `secondaryAudioShouldBeSilencedHint`: another app (one that does not mix) is playing. Only its
+/// `false` is taken (P376): it read `true` with nothing playing.
 fn other_audio_hint() -> bool {
-    flag(audio_session(), c"secondaryAudioShouldBeSilencedHint")
+    let s = audio_session();
+    let hint = flag(s, c"secondaryAudioShouldBeSilencedHint");
+    // for the log: whether `isOtherAudioPlaying` agrees, to tell on the phone which read is wrong
+    eprintln!("audio: read hint {hint}, other audio playing {}", flag(s, c"isOtherAudioPlaying"));
+    hint
 }
 
 /// Playback, mixing with others ([`crate::session`]), and the category and options read back, for

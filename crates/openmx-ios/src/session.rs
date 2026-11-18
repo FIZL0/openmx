@@ -33,8 +33,10 @@ pub enum Event {
     /// another app began playing, or has stopped.
     OtherAudio(bool),
     /// The `secondaryAudioShouldBeSilencedHint` property read (launch, the app back, the session made
-    /// active). After a take-over its `true` is passed over, as it may still be the app just stopped
-    /// (P339): only a new notice holds the music again.
+    /// active). Its `false` lets the music go; its `true` is passed over (P376): under Playback with
+    /// MixWithOthers the read said `true` at every launch and every return to the app with nothing
+    /// else playing (the phone logs of 2026-11-13 and 2026-11-18), so only the notice, sent when
+    /// another app's sound really starts or stops, holds the music.
     HintRead(bool),
     /// `UIApplicationDidEnterBackgroundNotification`.
     Background,
@@ -54,8 +56,6 @@ pub struct Session {
     away: bool,
     /// Another app's music is playing: ours is silent, the rest of the game's sound is not.
     pub other_audio: bool,
-    /// The player took the music back (P339), and no notice of another app's has come since.
-    took_over: bool,
     /// How many times the output is to have been started again; the output side compares it with
     /// the count it has done.
     pub restarts: usize,
@@ -63,7 +63,7 @@ pub struct Session {
 
 impl Session {
     /// Launch: nothing heard yet.
-    pub const START: Session = Session { interrupted: false, away: false, other_audio: false, took_over: false, restarts: 0 };
+    pub const START: Session = Session { interrupted: false, away: false, other_audio: false, restarts: 0 };
 
     pub fn on(&mut self, event: Event) {
         match event {
@@ -72,15 +72,15 @@ impl Session {
                 self.interrupted = false;
                 self.restarts += 1;
             }
-            Event::OtherAudio(on) => {
-                self.other_audio = on;
-                self.took_over = false;
+            Event::OtherAudio(on) => self.other_audio = on,
+            Event::HintRead(on) => {
+                if !on {
+                    self.other_audio = false;
+                }
             }
-            Event::HintRead(on) => self.other_audio = on && !self.took_over,
             Event::Background => self.away = true,
             Event::TookOver => {
                 self.other_audio = false;
-                self.took_over = true;
                 self.restarts += 1;
             }
             // Coming back after an interruption whose end never came, or from the background, starts
@@ -136,8 +136,37 @@ mod tests {
         s.on(OtherAudio(true));
         assert!(s.other_audio);
         s.on(HintRead(true));
-        assert!(s.other_audio, "and with no take-over since, a read says so too");
+        assert!(s.other_audio, "a read's true leaves the notice's hold be");
         s.on(HintRead(false));
+        assert!(!s.other_audio);
+    }
+
+    /// P376: the read said `true` at every launch and return with nothing else playing; the music
+    /// plays by default, is held only by the notice that another app's sound began, and plays again
+    /// at its end, or when a read finds nothing playing.
+    #[test]
+    fn music_plays_by_default_and_a_read_alone_never_holds_it() {
+        let mut s = Session::START;
+        assert!(!s.other_audio, "launch: nothing heard, the music plays");
+        // the phone log's launch and every foreground: `true` read, nothing playing
+        s.on(HintRead(true));
+        assert!(!s.other_audio);
+        s.on(Active);
+        s.on(HintRead(true));
+        s.on(Background);
+        s.on(Active);
+        s.on(HintRead(true));
+        assert!(!s.other_audio, "no read holds the music");
+        // Spotify starts: its notice holds ours; it stops: the music is back
+        s.on(OtherAudio(true));
+        assert!(s.other_audio);
+        s.on(OtherAudio(false));
+        assert!(!s.other_audio);
+        // it stopped while the app was away (no notice sent): the read on the way back lets go
+        s.on(OtherAudio(true));
+        s.on(Background);
+        s.on(HintRead(false));
+        s.on(Active);
         assert!(!s.other_audio);
     }
 
