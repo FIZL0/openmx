@@ -424,9 +424,8 @@ impl Sim {
             let mut riders: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
             rider_contact::pushed_riders(&mut riders, &met);
             drop(riders);
-            let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
-            let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];
-            self.traffic.props.step_with(dt, &prop_movers, &mut strikers);
+            // A plane that struck across a seam is seen a width over by those it struck (MD254).
+            self.traffic.props.step_flown(dt, &prop_movers, &mut plane.collider, &mut plane.body, plane.mass);
             if let (Some(plane), Some(race)) = (self.plane.as_mut(), self.race.as_deref_mut()) {
                 std::mem::swap(&mut plane.rng, &mut race.rng);
             }

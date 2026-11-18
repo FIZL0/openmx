@@ -187,7 +187,12 @@ impl Shared {
         let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
         // A seat that struck across a seam is seen by the bodies it struck, one width over, as in a
         // Sim's own step (MD167a, `Sim::props_step`).
-        let moved = crate::prop_contact::across_moved(std::mem::take(&mut self.set.across), &mut bump.vehicles, &mut wrecks);
+        // A seat's plane likewise (MD254).
+        let (flown, rest) = crate::prop_contact::across_flown(
+            std::mem::take(&mut self.set.across),
+            &mut flights.iter_mut().map(|f| f.as_deref_mut().map(|f| &mut f.body)).collect::<Vec<_>>(),
+        );
+        let moved = crate::prop_contact::across_moved(rest, &mut bump.vehicles, &mut wrecks);
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
         flights.resize_with(sims.len(), || None);
         let mut planes: Vec<Option<(&mut Collider, Weighed<'_>)>> = flights
@@ -210,6 +215,7 @@ impl Shared {
         drop(planes);
         drop(bodies);
         crate::prop_contact::across_back(moved, &mut wrecks);
+        crate::prop_contact::across_flown_back(flown, &mut flights.iter_mut().map(|f| f.as_deref_mut().map(|f| &mut f.body)).collect::<Vec<_>>());
         for ((s, side), w) in sims.iter_mut().zip(&sides).zip(wrecks) {
             s.wrecks_pushed(&[side.map(|_| w)]);
         }

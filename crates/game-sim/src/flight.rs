@@ -996,6 +996,12 @@ impl Flight {
     ///    the pushed bodies are written back ([`PropSet::pushed`]).
     ///
     /// The props' own step, which resolves the mirrors against the plane, is the caller's, after this.
+    ///
+    /// On a world that wraps (MD254, the port's own) a prop by the far side of a seam the plane's rays
+    /// reach across is in the search again one width over, by the plane ([`seam_copies`]): a copy's
+    /// hit is its prop's, its mirrors go back to the prop's place, and the body goes to the plane's
+    /// world a width back ([`PropSet::strike_as`]), noted for the props' step, which sees the plane a
+    /// width over ([`PropSet::step_flown`]); a plane the frame carries over a seam is that much nearer.
     #[allow(clippy::too_many_arguments)]
     pub fn frame_props(
         &mut self,
@@ -1047,10 +1053,18 @@ impl Flight {
     ) -> (Vec<Option<u32>>, [i8; 2]) {
         let mut met = met;
         let shapes = props.as_ref().map(|(set, _)| Arc::clone(&set.shapes));
-        let posed = match (&props, &shapes) {
+        let mut posed = match (&props, &shapes) {
             (Some((set, _)), Some(shapes)) => knocks(set, shapes),
             _ => Vec::new(),
         };
+        // On a world that wraps, the props by a seam's far side again one width over (MD254).
+        if let Some(rays) = self.rays.as_deref().filter(|_| !posed.is_empty()) {
+            let node = node_of(&self.body);
+            let (centre, reach) = flight_search::reach(rays, &[node.rows[0], node.rows[1], node.rows[2], node.origin]);
+            let seams = crate::tiles::seam_shifts(&*ground, centre, reach);
+            seam_copies(&mut posed, &seams, centre, reach);
+        }
+        let own = posed.iter().take_while(|p| p.by == [F::ZERO; 2]).count();
         let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
         let mesh = self.bike.clone();
         // The downed wreck bikes' hulls in its world (F35), by their place in the met's wrecks.
@@ -1060,6 +1074,15 @@ impl Flight {
         let wrecked: Vec<usize> = hulls.iter().map(|&(j, _)| j).collect();
         let (struck, movers, knocked, hit) =
             self.search_wrecked(dt, ground, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met.as_deref_mut(), &knocks, &wrecks, &wrecked);
+        // The material table hears a copy's hit as its prop's (MD254).
+        for s in &mut self.heard.0 {
+            if let crate::material_hit::Struck::Mesh { id, .. } = s
+                && let Some(p) = (*id as usize).checked_sub(flight_search::KNOCKED).and_then(|k| posed.get(k)).filter(|p| p.by != [F::ZERO; 2])
+                && let Some(k) = posed[..own].iter().position(|q| (q.collection, q.object) == (p.collection, p.object))
+            {
+                *id = (flight_search::KNOCKED + k) as u32;
+            }
+        }
         self.pass_mxvatv(dt, ground);
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
@@ -1122,8 +1145,17 @@ impl Flight {
             m.downed = downed;
         }
         bodies.truncate(at);
-        if let Some((set, _)) = props {
+        if let Some((set, me)) = props {
             set.pushed(&bodies);
+            // A plane its frame carried over a seam is that much nearer the bodies it struck
+            // across one (MD254): the props' step moves it the rest of the way, or not at all.
+            if let Some(area) = ground.area().filter(|_| seam != [0, 0]) {
+                let by = [crate::seam::by(seam[0], area.width), crate::seam::by(seam[1], area.depth)];
+                for a in set.across.iter_mut().filter(|a| a.player == me) {
+                    a.by = [a.by[0] - by[0], a.by[1] - by[1]];
+                }
+                set.across.retain(|a| a.player != me || a.by != [F::ZERO; 2]);
+            }
         }
         if self.attitude.flown {
             self.pad = pad;
@@ -1151,28 +1183,36 @@ impl Flight {
     ) {
         // Names past [`WRECK_FROM`] are the wreck bikes' mirrors (S276), not props.
         let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|o| (KNOCK_FROM..WRECK_FROM).contains(o)).collect::<Vec<_>>();
-        // The struck props in the order the plane's entries first name them.
+        // The struck props in the order the plane's entries first name them. A copy one width over
+        // is its prop's (MD254).
+        let body = |k: usize| (posed[k].collection, posed[k].object);
         let mut order: Vec<usize> = Vec::new();
         for o in from {
             let k = o - KNOCK_FROM;
-            if !order.contains(&k) {
+            if !order.iter().any(|&j| body(j) == body(k)) {
                 order.push(k);
             }
         }
         for (k, m) in knocked.iter().enumerate() {
-            if !m.is_empty() && !order.contains(&k) {
+            if !m.is_empty() && !order.iter().any(|&j| body(j) == body(k)) {
                 order.push(k);
             }
         }
+        // A copy's mirrors go back to its prop's place, where the prop's step resolves them.
+        let back = |v: Vf, by: [F; 2]| if by == [F::ZERO; 2] { v } else { crate::seam::moved(v, by) };
         let struck = order
             .iter()
             .map(|&k| {
-                let mirrors = knocked[k].iter().map(|e| contact::Contact { other: Some(me), ..*e }).collect();
+                let mirrors = (0..knocked.len())
+                    .filter(|&j| body(j) == body(k))
+                    .flat_map(|j| knocked[j].iter().map(move |e| contact::Contact { other: Some(me), point: back(e.point, posed[j].by), ..*e }))
+                    .collect();
                 (posed[k].collection, posed[k].object, mirrors)
             })
             .collect();
+        let across = order.iter().enumerate().filter(|&(_, &k)| posed[k].by != [F::ZERO; 2]).map(|(i, &k)| (i, posed[k].by)).collect();
         let mut places = Vec::with_capacity(order.len());
-        let mut strike = crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() };
+        let mut strike = crate::prop_contact::Strike { contacts: Vec::new(), struck, across, ..Default::default() };
         let pushed = match late {
             // Named as the props' step's striker `me`; the late props' probes' mirrors that
             // [`PropSet::strike_in`] puts on the strike's entries are a riding bike's frame's (B29),
@@ -1181,7 +1221,8 @@ impl Flight {
                 strike.by = Some((me, first));
                 set.strike_in(&mut strike, dt, world, movers)
             }
-            None => set.strike(&strike),
+            // One struck across a seam is handed to its frame a width back, by the plane (MD254).
+            None => set.strike_as(&strike, me),
         };
         for p in pushed {
             match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
@@ -1194,7 +1235,7 @@ impl Flight {
         }
         for e in &mut self.record.contacts {
             if let Some(k) = e.other.filter(|&o| o < WRECK_FROM).and_then(|o| o.checked_sub(KNOCK_FROM)) {
-                e.other = order.iter().position(|&j| j == k).map(|i| first + places[i]);
+                e.other = order.iter().position(|&j| body(j) == body(k)).map(|i| first + places[i]);
             }
         }
         let Some(hull) = self.hull.clone().filter(|_| self.rays.is_some()) else { return };
@@ -1754,6 +1795,9 @@ pub(crate) struct Posed<'a> {
     pub(crate) collection: usize,
     pub(crate) object: usize,
     pub(crate) knock: flight_search::Knock<'a>,
+    /// The shift that brings the plane to this place: zero at the prop's own, a seam's at a copy
+    /// one width over (MD254, [`seam_copies`]).
+    pub(crate) by: [F; 2],
 }
 
 /// Every prop of `set` with a collidable mesh (`shapes`, the set's) and a collision object, in
@@ -1766,10 +1810,34 @@ pub(crate) fn knocks<'a>(set: &PropSet, shapes: &'a [Vec<Option<track::Mesh>>]) 
             let (to_world, centre, radius) = world::Prop::posed(mesh, &PropSet::matrix(&object.node));
             let velocity = coll.bones[o].body.velocity;
             let capacity = col.record.capacity;
-            out.push(Posed { collection: c, object: o, knock: flight_search::Knock { mesh, to_world, centre, radius, velocity, capacity } });
+            out.push(Posed { collection: c, object: o, knock: flight_search::Knock { mesh, to_world, centre, radius, velocity, capacity }, by: [F::ZERO; 2] });
         }
     }
     out
+}
+
+/// **The knocks by a wrapped world's seams** (MD254, MD29): `posed` with, after every prop's own
+/// place, a copy of each one that stands again one width over, by the plane — for each of `seams`,
+/// the shifts that bring the plane (its rays' sphere, `centre` and `reach`) to the world's copy on a
+/// seam's far side ([`crate::tiles::seam_shifts`]) — where its sphere is within the rays' reach, as
+/// the riding bike's strike has them ([`crate::prop_contact::strike_wrapped`]): the prop's mesh and
+/// centre moved back by the shift, its velocity and room as they are. None with no seams.
+pub(crate) fn seam_copies(posed: &mut Vec<Posed<'_>>, seams: &[[F; 2]], centre: Vf, reach: F) {
+    let mut copies = Vec::new();
+    for &by in seams {
+        let back = [F::ZERO - by[0], F::ZERO - by[1]];
+        for p in posed.iter() {
+            let moved = crate::seam::moved(p.knock.centre, back);
+            let d = centre.sub(moved);
+            if F(vu::dot3(d.0, d.0)).sqrt() - p.knock.radius <= reach {
+                let mut knock = p.knock;
+                crate::seam::matrix(&mut knock.to_world, back);
+                knock.centre = moved;
+                copies.push(Posed { collection: p.collection, object: p.object, knock, by });
+            }
+        }
+    }
+    posed.extend(copies);
 }
 
 /// One wheel off its `biplane.phy` section, at rest.

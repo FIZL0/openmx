@@ -49,6 +49,8 @@
 //! The wreck bike's rays do the same since MD167a ([`crate::prop_wreck::wreck_rays_wrapped`]), noted
 //! as its side's ([`PropSet::strike_as`]); the props' step, a Sim's and the shared seats', moves each
 //! striker to the bodies it struck ([`across_moved`]).
+//! The flown plane's since MD254 ([`crate::flight::Flight::frame_props`]), its body moved for the
+//! props' step ([`across_flown`], [`PropSet::step_flown`]).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -638,11 +640,63 @@ pub fn across_moved(across: Vec<Across>, vehicles: &mut [crate::contact::Vehicle
 /// as the move made it is the one it had, word for word (a small coordinate plus a width is
 /// rounded, so moving it back would not be); one the step changed is moved back.
 pub fn across_back(moved: Vec<(usize, [F; 2], Body, Body)>, bodies: &mut [(Collider, Body, F)]) {
-    let same = |a: Vf, b: Vf| a.0.map(f32::to_bits) == b.0.map(f32::to_bits);
     for (k, by, before, after) in moved {
-        let b = &mut bodies[k].1;
-        let back = [F::ZERO - by[0], F::ZERO - by[1]];
-        b.position = if same(b.position, after.position) { before.position } else { crate::seam::moved(b.position, back) };
-        b.last_position = if same(b.last_position, after.last_position) { before.last_position } else { crate::seam::moved(b.last_position, back) };
+        body_back(&mut bodies[k].1, by, &before, &after);
+    }
+}
+
+/// One body [`across_moved`] or [`across_flown`] moved `by`, from `before` to `after`, back.
+fn body_back(b: &mut Body, by: [F; 2], before: &Body, after: &Body) {
+    let same = |a: Vf, b: Vf| a.0.map(f32::to_bits) == b.0.map(f32::to_bits);
+    let back = [F::ZERO - by[0], F::ZERO - by[1]];
+    b.position = if same(b.position, after.position) { before.position } else { crate::seam::moved(b.position, back) };
+    b.last_position = if same(b.last_position, after.last_position) { before.last_position } else { crate::seam::moved(b.last_position, back) };
+}
+
+/// **The flown planes that struck across a seam, by the bodies they struck** (MD254): for the
+/// props' step each [`Across`] whose striker flies a plane — its place in `planes`, the striker's
+/// index, `Some` — stands that plane's body `by` over, once (its centre now and at the last
+/// substep), as [`across_moved`] stands a wreck bike's. Answers the planes moved, by place, with the
+/// shift and the body's places before and after, for [`across_flown_back`]; and the other strikers'
+/// notes, for [`across_moved`].
+pub fn across_flown(across: Vec<Across>, planes: &mut [Option<&mut Body>]) -> (Vec<(usize, [F; 2], Body, Body)>, Vec<Across>) {
+    let mut out: Vec<(usize, [F; 2], Body, Body)> = Vec::new();
+    let mut rest = Vec::new();
+    for a in across {
+        let Some(Some(body)) = planes.get_mut(a.player) else {
+            rest.push(a);
+            continue;
+        };
+        if out.iter().any(|m| m.0 == a.player) {
+            continue;
+        }
+        let before = **body;
+        crate::seam::body(body, a.by);
+        out.push((a.player, a.by, before, **body));
+    }
+    (out, rest)
+}
+
+/// The planes [`across_flown`] moved, back their width after the step, as [`across_back`] puts the
+/// wreck bodies back.
+pub fn across_flown_back(moved: Vec<(usize, [F; 2], Body, Body)>, planes: &mut [Option<&mut Body>]) {
+    for (k, by, before, after) in moved {
+        if let Some(Some(b)) = planes.get_mut(k) {
+            body_back(b, by, &before, &after);
+        }
+    }
+}
+
+impl PropSet {
+    /// **The props' step with one flown plane as its striker** (S241, MD254): [`PropSet::step_with`],
+    /// the plane's body (`collider`, `body`, `mass`) its only other side, as the props' mirrors name
+    /// it (striker 0). A plane that struck a body across a seam this tick stands a width over for
+    /// it, by the bodies ([`across_flown`]), and back after; the seam notes are used up.
+    pub fn step_flown(&mut self, dt: F, movers: &crate::prop_set::PropMovers, collider: &mut Collider, body: &mut Body, mass: F) {
+        let (moved, _) = across_flown(std::mem::take(&mut self.across), &mut [Some(&mut *body)]);
+        let mut weighed = Weighed { body: &mut *body, mass };
+        let mut strikers = [Other { collider, side: Side::Body(&mut weighed) }];
+        self.step_with(dt, movers, &mut strikers);
+        across_flown_back(moved, &mut [Some(body)]);
     }
 }
