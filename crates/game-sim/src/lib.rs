@@ -717,6 +717,8 @@ impl Sim {
         // downed rider's wreck bike is on the props' node (S243, [`prop_wreck`]).
         let sides: Vec<(usize, usize)> = (0..self.players()).map(|i| (i, self.players() + i)).collect();
         let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
+        // And for a prop a bike's strike files in that pass, where the pass had them (S384).
+        let hulls = self.wreck_hulls(&sides);
         self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
@@ -741,7 +743,8 @@ impl Sim {
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
                 .map(|l| self.bump_in(i, l, &*world));
             if let Some(b) = bump.as_mut() {
-                self.strike_into(b, strike, dt, world, &mut prop_movers);
+                // The riders after it in player order framed already (the walk is backwards).
+                self.strike_into_among(b, strike, dt, world, &mut prop_movers, &hulls, &|j| j > i);
             }
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
