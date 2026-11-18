@@ -274,7 +274,9 @@ fn a_rider_steered_right_shows_on_the_right() {
     let span = overlay::radar_span(SPACING);
     for (stick, right) in [(1.0, true), (-1.0, false)] {
         let mut other = rider(&tables, [0.0, 0.0], [0.0, 1.0]);
-        ride(&mut other, 150, true, stick);
+        // Three seconds: full lock comes round about 90° by then, so it is still ahead (since S351's
+        // stock engine, five seconds came round past it).
+        ride(&mut other, 90, true, stick);
         let them = chase::bike(&other.rider.ride);
         let (x, y) = overlay::radar_mark(ground(me.target.body_point), ground(me.target.forward), ground(them.target.body_point), span);
         assert!(y < overlay::RADAR_AT.1, "a bike ridden ahead is not up the radar: {y}");
@@ -1108,7 +1110,10 @@ fn hud_scale_grows_the_radar_and_speedometer_about_their_corners() {
             for (part, small, big) in [("radar", r1, r15), ("speedometer", p1, p15)] {
                 let (sw, sh) = ((small.2 - small.0) as f32, (small.3 - small.1) as f32);
                 assert!(near(big.2 - big.0, 1.5 * sw) && near(big.3 - big.1, 1.5 * sh), "{what}: the {part} {small:?} -> {big:?}");
-                assert!(big.0 > 0 && big.1 > 0 && big.2 < vw && big.3 < vh, "{what}: the {part} at the view's edge: {big:?}");
+                // The top row is inside: at 1.5 in a quarter view the radar reaches it once its rose is
+                // turned off north a little (views 1 and 2 since S351's stock engine); a clipped one
+                // fails the size check above.
+                assert!(big.0 > 0 && big.2 < vw && big.3 < vh, "{what}: the {part} at the view's edge: {big:?}");
             }
             // About their corners: the radar's gaps to the left and bottom edges, and the
             // speedometer's to the right and bottom, half again as wide.

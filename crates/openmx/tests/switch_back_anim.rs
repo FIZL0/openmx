@@ -191,12 +191,13 @@ fn a_ride_started_in_the_plane_hands_over_a_riding_body() {
     let rolling = plane_first(&kit, Controls { gas: F::ONE, ..Controls::default() });
     rides_from_the_first_tick("rolling", &rolling);
 
-    // The rolling body moves with the ride.
-    let moved = rolling
-        .windows(2)
-        .filter(|w| w[0].joints.iter().zip(&w[1].joints).any(|(a, b)| (0..3).any(|i| (a[i] - b[i]).abs() > 1e-4)))
-        .count();
-    assert!(moved > FIVE_SECONDS / 2, "the rolling body hardly moved: {moved} ticks of {FIVE_SECONDS}");
+    // The rolling body moves with the ride: it ends in a pose of its own, not the idle one. (Until
+    // S351 this counted the ticks the pose changed on, over half of them; the stock bike surged on its
+    // engine braking then, and now it settles into a steady cruise inside a second, so a steady pose.)
+    let apart = idle[FIVE_SECONDS - 1].joints.iter().zip(&rolling[FIVE_SECONDS - 1].joints)
+        .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max))
+        .fold(0.0f32, f32::max);
+    assert!(apart > 0.1, "the rolling body ended in the idle one's pose: {apart} apart");
 
     // What it was before (V88): a rider fresh off `Rider::new` is still at the gate, so a shell that
     // built one without `no_start_line` would show the get-ready sequence again.

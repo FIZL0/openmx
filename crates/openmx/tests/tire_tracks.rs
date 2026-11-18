@@ -120,12 +120,14 @@ fn sim() -> Sim {
     Sim::with_rider(0, tables, phy, rider)
 }
 
-/// The tape: flat out straight down +z, over the kicker, then off the gas and braked to a stop.
+/// The tape: flat out straight down +z, over the kicker, then off the gas, a dab of the brake, and
+/// braked to a stop. The dab's dip in the rear's compression is the light tick that brings the rear's
+/// entry back after the air (S351's stock bike rolls on at a steady 0.227 after the landing).
 fn tape() -> Vec<Controls> {
     (0..900)
         .map(|i| Controls {
             gas: F(if i < 420 { 1.0 } else { 0.0 }),
-            brake: F(if i >= 600 { 1.0 } else { 0.0 }),
+            brake: F(if (600..630).contains(&i) || i >= 700 { 1.0 } else { 0.0 }),
             ..Controls::default()
         })
         .collect()
