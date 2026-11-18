@@ -641,6 +641,8 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
         .map(|(k, &(r, _, _))| {
             let bike = sim.rider_of(c33_player(ee, k)).ride.transform();
             let (rear_node, rear) = c33_rear_node(ee, r);
+            let (front_node, front) = c33_front_node(ee, r);
+            let (exhaust_node, exhaust) = c33_exhaust_node(ee, r);
             let m = ee.u32_at(r + 0x1490);
             let records = ee.u32_at(ee.u32_at(m + 0x30) + 4);
             let entries: Vec<Entry> = (0..ee.u32_at(m + 0x34))
@@ -659,9 +661,11 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
                     let switch = ee.read(em + 0x240, 1) as u8;
                     assert_eq!(vf(em + 0x70).0[..3], [0.0; 3], "{}'s entry {i}: an emitter offset", C33_NAMES[k]);
                     let pos = vf(em + 0x40);
-                    let place = match ee.u32_at(em + 0xa4) == rear_node {
-                        true => Place::Rear,
-                        false => Place::Chassis(dust::place_on(&bike, pos).expect("a bike transform that inverts")),
+                    let place = match ee.u32_at(em + 0xa4) {
+                        n if n == rear_node => Place::Rear,
+                        n if n == front_node => Place::Front,
+                        n if n == exhaust_node => Place::Exhaust,
+                        _ => Place::Chassis(dust::place_on(&bike, pos).expect("a bike transform that inverts")),
                     };
                     Entry {
                         kind,
@@ -696,13 +700,21 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
                 airspeed: F(ee.f32_at(at(feed, 0x20))),
                 tyres: [tyre(0), tyre(1)],
                 rear_compression: F(ee.f32_at(r + 0x87c)),
+                front_compression: F(ee.f32_at(r + 0x86c)),
+                steer: F(ee.f32_at(r + 0x874)),
+                grounded: ee.u32_at(r + 0x93c) != 0,
             };
             // S421: the rear tyre's emitters' point is the node's, from the seeded chassis.
             let point = rear.point(&bike, feed.rear_compression);
             for (i, e) in entries.iter().enumerate().filter(|(_, e)| e.emitter.place == Place::Rear) {
                 assert_eq!(point.to_bits(), e.emitter.pos.to_bits(), "{}'s entry {i}: the rear node's point", C33_NAMES[k]);
             }
-            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear) })
+            assert!(!feed.grounded, "{}'s bars were not turned in the image: they are the clip's", C33_NAMES[k]);
+            // S446: the front tyre's and the exhaust's nodes. Their points in the image are not the
+            // nodes' now: the drive moved the nodes after the image's last emit (tests/ai/draws.rs).
+            let places = |p: Place| entries.iter().filter(|e| e.emitter.place == p).count();
+            assert_eq!((places(Place::Front), places(Place::Exhaust)), (2, 1), "{}'s front and exhaust emitters", C33_NAMES[k]);
+            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust) })
         })
         .collect();
     riders.sort_by_key(|r| r.0);
@@ -727,6 +739,58 @@ pub(crate) fn c33_rear_node(ee: &Ee, r: u32) -> (u32, dust::RearNode) {
     assert_eq!(vf(arm + 0x70).to_bits(), pivot.to_bits(), "rider {r:#x}: SwingArm's place is its pivot");
     let rear = dust::RearNode { bike: local(ee.u32_at(arm + 0x100)), pivot, mount: vf(ee.u32_at(r + 0x7b4) + 0xa0), node: local(node) };
     (node, rear)
+}
+
+/// S446: rider `r`'s front tyre emitter node in its image, and the Sim's chain for it. The vehicle
+/// holds `Handlebars` at `+0x968` and `Shocks` at `+0x970`, the steering axis at `+0x9d0`, the fork's
+/// rest place at `+0x9b0` and its slide per compression at `+0x9e0`. The front tyre's node is the one
+/// child of `Shocks` an emitter hangs from.
+pub(crate) fn c33_front_node(ee: &Ee, r: u32) -> (u32, dust::FrontNode) {
+    let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+    let local = |n: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| vf(n + 0x40 + o)));
+    let (bars, shocks) = (ee.u32_at(r + 0x968), ee.u32_at(r + 0x970));
+    let node = c33_emitter_nodes(ee, r).find(|&n| ee.u32_at(n + 0x100) == shocks).expect("an emitter under Shocks");
+    assert_eq!(ee.u32_at(shocks + 0x100), bars, "rider {r:#x}: Shocks hangs under Handlebars");
+    assert_eq!(ee.u32_at(bars + 0x100), ee.u32_at(r + 0x964), "rider {r:#x}: Handlebars hangs under Bike");
+    let front = dust::FrontNode {
+        bike: local(ee.u32_at(r + 0x964)),
+        bars: local(bars),
+        // The image's bars are the clip's while no wheel is down (C33's riders are in the air).
+        pose: local(bars),
+        shocks: local(shocks),
+        node: local(node),
+        axis: vf(r + 0x9d0),
+        rest: vf(r + 0x9b0),
+        slide: F(ee.f32_at(r + 0x9e0)),
+    };
+    (node, front)
+}
+
+/// S446: rider `r`'s exhaust emitter node in its image, and the Sim's chain for it: the exhaust
+/// entry's emitter node, under the root of the pipe's own model, one of the models the vehicle holds
+/// at `+0x954` (count `+0x950`) whose kind (`+0x958`) 0 has the drive copy `Bike`'s world into them.
+pub(crate) fn c33_exhaust_node(ee: &Ee, r: u32) -> (u32, dust::ExhaustNode) {
+    let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+    let local = |n: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| vf(n + 0x40 + o)));
+    let m = ee.u32_at(r + 0x1490);
+    let em = (0..ee.u32_at(m + 0x34))
+        .map(|i| ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i))
+        .find(|&e| ee.u32_at(e + 0x10) == 0x0045_e780)
+        .map(|e| ee.u32_at(e + 0x14))
+        .expect("an exhaust entry");
+    let node = ee.u32_at(em + 0xa4);
+    let pipe = ee.u32_at(node + 0x100);
+    assert_eq!(ee.u32_at(pipe + 0x100), 0, "rider {r:#x}: the pipe's root has no parent");
+    let held = (0..ee.u32_at(r + 0x950)).find(|&i| ee.u32_at(ee.u32_at(r + 0x954) + 4 * i) == pipe);
+    let kind = held.map(|i| ee.u32_at(ee.u32_at(r + 0x958) + 4 * i));
+    assert_eq!(kind, Some(0), "rider {r:#x}: the pipe is a model that takes Bike's world");
+    (node, dust::ExhaustNode { bike: local(ee.u32_at(r + 0x964)), pipe: local(pipe), node: local(node) })
+}
+
+/// Rider `r`'s emitters' nodes, in its manager's order (`+0xa4`; 0 for none skipped).
+fn c33_emitter_nodes(ee: &Ee, r: u32) -> impl Iterator<Item = u32> + '_ {
+    let m = ee.u32_at(r + 0x1490);
+    (0..ee.u32_at(m + 0x34)).map(move |i| ee.u32_at(ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i) + 0x14)).map(move |em| ee.u32_at(em + 0xa4)).filter(|&n| n != 0)
 }
 
 /// The controls rider `r`'s image was saved holding: its stick, read back from the limiter's

@@ -6622,6 +6622,20 @@ vehicle_fx_spray_off  boot 0x003d8720 Spray's vt +0x18: flag &= ~1, clock +0x28 
 #   mat4_basis at the node's own position. +0x87c at the emitters is the rear wheel's +0xf0 of the
 #   frame before. Bike's local (vehicle +0x964) is the chassis pose's: it moves by a few ulps in C33
 #   (ticks 7, 9, 14, 18, 64); the Sim holds the image's.
+# S446 — the front tyre and exhaust emitters' points (crates/game-sim/src/dust.rs FrontNode, ExhaustNode;
+#   tests ai/draws.rs s328_… per tick in Ee, ai/race4.rs c33_front_node, c33_exhaust_node). Same emit as
+#   S421 (0x001b2870 on node +0xa4). Chain FrontTire_Particle01 -> Shocks (vehicle +0x970) -> Handlebars
+#   (+0x968) -> Bike (+0x964) -> root; the exhaust's node -> YZ250_Exhaust_Pipe (no parent). The drive
+#   0x002593e0 runs after the emitters: first the bike clip (0x00146870 / 0x00146ed0 / 0x00147e40 by
+#   kind, else 0x00144800) poses Bike and Handlebars (Handlebars' local moves by about a degree while
+#   riding: C33's riders' clip bars differ from the image's on every rider-tick), then at 0x00259c00
+#   q = +0x9b0 + (+0x9d0 vmulbc (+0x9e0 * snapshot front compression +0x86c)), vadd.xyz the nudge
+#   0x00420be0 (-0.03, 0, 0.02, 1); orientation_transform_point (0x001b3060) by Bike; transform_set_position
+#   (0x001b2660) on Shocks with space 0 (unpoint by Handlebars' world, transform_unpoint 0x001b3180).
+#   Then if +0x93c (either wheel down) node_set_rotation(+0x874 front steer, Handlebars, axis +0x9d0).
+#   Attachments: +0x950 count, +0x954 nodes, +0x958 kinds; kind 0 gets Bike's world (0x001b2a50 on
+#   +0x964) as its local (0x001b29f0), else Handlebars' world. The exhaust pipe is kind 0. In C33's 60
+#   ticks: 218 of 240 rider-ticks grounded (132 off straight), 220 with a front compression.
 
 # S100 — the 125 into a free09 trunk, live (tests crates/game-sim/tests/eco.rs
 #   a_free09_tree_against_the_original; captures context/capture/s100/{tree,nowreck}.csv in s2).

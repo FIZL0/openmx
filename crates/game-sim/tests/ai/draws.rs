@@ -2,7 +2,7 @@
 // S328 — C33's draws that are not the AI's: the original's whole frame in the interpreter
 // ---------------------------------------------------------------------------------------------------
 
-use super::race4::{C33_NAMES, C33_RIDERS, C33_STATE, c33_rear_node};
+use super::race4::{C33_NAMES, C33_RIDERS, C33_STATE, c33_exhaust_node, c33_front_node, c33_rear_node};
 use super::sim::s12e_u64;
 use super::*;
 use ps2_oracle::{Ee, Kit};
@@ -303,6 +303,17 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     }).collect();
     let rear_points: Rc<RefCell<Vec<(u32, F, [u32; 16], u32)>>> = Rc::default();
     let rp = Rc::clone(&rear_points);
+    // S446: and each front tyre and exhaust emitter's, against the Sim's chains on the nodes' locals as
+    // the original holds them when it emits; the drive that sets those locals is proved per tick below.
+    let others: Vec<(u32, u32, game_sim::dust::FrontNode, u32, game_sim::dust::ExhaustNode)> = C33_RIDERS
+        .iter()
+        .map(|&(r, _, _)| {
+            let ((front_node, front), (exhaust_node, exhaust)) = (c33_front_node(&ee, r), c33_exhaust_node(&ee, r));
+            (r, front_node, front, exhaust_node, exhaust)
+        })
+        .collect();
+    let other_points: Rc<RefCell<Vec<(u32, bool)>>> = Rc::default();
+    let op = Rc::clone(&other_points);
     ee.hooks.insert(
         addr("emit").unwrap(),
         Box::new(move |ee: &mut Ee| {
@@ -317,13 +328,47 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
                 assert_eq!(now.swingarm(c).to_bits(), mat(arm + 0x40).to_bits(), "{r:#x}: SwingArm aimed at a compression of {c:?}");
                 (r, now.point(&root, c), c, root.to_bits(), ee.u32_at(bike + 0x100))
             });
+            let node = ee.u32_at(a0 + 0xa4);
+            let other = others.iter().find(|o| node == o.1 || node == o.3).map(|&(r, front_node, front, _, exhaust)| {
+                let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+                let mat = |a: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| vf(a + o)));
+                let local = |n: u32| mat(n + 0x40);
+                let parent = |n: u32| ee.u32_at(n + 0x100);
+                if node == front_node {
+                    let (shocks, bars) = (parent(node), parent(parent(node)));
+                    let bike = parent(bars);
+                    let now = game_sim::dust::FrontNode { bike: local(bike), bars: local(bars), shocks: local(shocks), node: local(node), ..front };
+                    (r, true, now.point(&mat(parent(bike) + 0x80)))
+                } else {
+                    (r, false, game_sim::dust::ExhaustNode { pipe: local(parent(node)), node: local(node), ..exhaust }.point())
+                }
+            });
             through(ee);
+            if let Some((r, front, want)) = other {
+                let got = Vf([0, 4, 8, 12].map(|o| ee.f32_at(a0 + 0x40 + o)));
+                assert_eq!(want.to_bits(), got.to_bits(), "{r:#x}: emitter {a0:#x}'s point (front {front})");
+                op.borrow_mut().push((r, front));
+            }
             e.borrow_mut().push((a0, l.borrow().len() - before));
             if let Some((r, want, c, root, root_node)) = rear {
                 let got = Vf([0, 4, 8, 12].map(|o| ee.f32_at(a0 + 0x40 + o)));
                 assert_eq!(want.to_bits(), got.to_bits(), "{r:#x}: emitter {a0:#x}'s point");
                 rp.borrow_mut().push((r, c, root, root_node));
             }
+        }),
+    );
+    // S446: the clip's Handlebars and Bike as the drive places Shocks, by rider, for the drive's proof.
+    let posed: Rc<RefCell<Vec<(u32, game_sim::math::Mat4, game_sim::math::Mat4)>>> = Rc::default();
+    let ps = Rc::clone(&posed);
+    ee.hooks.insert(
+        addr("transform_set_position").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let a0 = ee.r(4) as u32;
+            if let Some(&(r, _, _)) = C33_RIDERS.iter().find(|&&(r, _, _)| ee.u32_at(r + 0x970) == a0) {
+                let local = |n: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| Vf([0, 4, 8, 12].map(|l| ee.f32_at(n + 0x40 + o + l)))));
+                ps.borrow_mut().push((r, local(ee.u32_at(r + 0x968)), local(ee.u32_at(r + 0x964))));
+            }
+            through(ee);
         }),
     );
     // A body's animation object is held at its rider's +0xdb4.
@@ -349,8 +394,13 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     );
     let mut generator_through = rows[0].0;
     let mut last_rear: Vec<f32> = C33_RIDERS.iter().map(|&(r, _, _)| ee.f32_at(ee.u32_at(r + 0x7b4) + 0xf0)).collect();
+    let curve = game_sim::camera::CurveTable::build();
+    let (mut turned, mut steered, mut slid, mut bent) = (0, 0, 0, 0);
+    let image_pose: Vec<[u32; 16]> = C33_RIDERS.iter().map(|&(r, _, _)| c33_front_node(&ee, r).1.pose.to_bits()).collect();
     for w in rows.windows(2) {
         let tick = w[1].0;
+        // S446: the nodes the drive sets, as the frame before left them.
+        let before: Vec<_> = C33_RIDERS.iter().map(|&(r, _, _)| (c33_front_node(&ee, r).1, c33_exhaust_node(&ee, r).1)).collect();
         neutral_pad(&mut ee);
         whole_frame(&mut ee, w[0].1, &mut clock);
         let sim_draws = log.borrow().len();
@@ -399,6 +449,38 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
                 assert_eq!(p.3, ee.u32_at(ee.u32_at(r + 0x7a4) + 0x254), "{}'s root is the chassis' node", C33_NAMES[k]);
             }
             last_rear[k] = ee.f32_at(ee.u32_at(r + 0x7b4) + 0xf0);
+        }
+        // S446: every front tyre and exhaust emitter took its point from its chain; and the drive, run on
+        // the frame before's nodes with this frame's snapshot, the root as the frame left it and Bike and
+        // Handlebars as the clip posed them, sets Shocks, Handlebars and the pipe's root as the original does.
+        let points = std::mem::take(&mut *other_points.borrow_mut());
+        let poses = std::mem::take(&mut *posed.borrow_mut());
+        for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
+            let name = C33_NAMES[k];
+            let n = |front: bool| points.iter().filter(|p| p.0 == r && p.1 == front).count();
+            assert_eq!((n(true), n(false)), (2, 1), "tick {tick}: {name}'s front and exhaust emitters");
+            let (now_front, now_exhaust) = (c33_front_node(&ee, r).1, c33_exhaust_node(&ee, r).1);
+            let root = game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| Vf([0, 4, 8, 12].map(|l| ee.f32_at(ee.u32_at(ee.u32_at(r + 0x7a4) + 0x254) + 0x80 + o + l)))));
+            let feed = game_sim::dust::Feed {
+                front_compression: F(ee.f32_at(r + 0x86c)),
+                steer: F(ee.f32_at(r + 0x874)),
+                grounded: ee.u32_at(r + 0x93c) != 0,
+                ..Default::default()
+            };
+            let pose: Vec<_> = poses.iter().filter(|p| p.0 == r).collect();
+            assert_eq!(pose.len(), 1, "tick {tick}: {name}'s Shocks placed once");
+            assert_eq!(pose[0].2.to_bits(), now_front.bike.to_bits(), "tick {tick}: {name}'s Bike posed before Shocks is placed");
+            let (mut front, mut exhaust) = before[k];
+            (front.bike, front.pose, exhaust.bike) = (now_front.bike, pose[0].1, now_exhaust.bike);
+            front.drive(&root, &feed, &curve);
+            exhaust.drive(&root);
+            assert_eq!(front.shocks.to_bits(), now_front.shocks.to_bits(), "tick {tick}: {name}'s Shocks slid by a front compression of {:?}", feed.front_compression);
+            assert_eq!(front.bars.to_bits(), now_front.bars.to_bits(), "tick {tick}: {name}'s Handlebars at a steer of {:?}, grounded {}", feed.steer, feed.grounded);
+            assert_eq!(exhaust.pipe.to_bits(), now_exhaust.pipe.to_bits(), "tick {tick}: {name}'s pipe took Bike's world");
+            turned += usize::from(feed.grounded);
+            steered += usize::from(feed.grounded && feed.steer != F(0.0));
+            slid += usize::from(feed.front_compression != F(0.0));
+            bent += usize::from(pose[0].1.to_bits() != image_pose[k]);
         }
         // S328c: the emitters that drew, two draws each, as C33_DUST says.
         let mut dust = Vec::new();
@@ -451,6 +533,8 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         assert_eq!(theirs, Some(calls.len()), "tick {tick}: the capture's steps against the frame's draws");
     }
     assert_eq!(generator_through, rows[TICKS].0, "the generator agrees through");
+    println!("S446: {turned} rider-ticks turned the bars ({steered} off straight), {slid} slid the fork; the clip's bars differ from the image's on {bent}");
+    assert!(turned > 0 && slid > 0, "the drive's turn and slide were both exercised");
 }
 
 
@@ -499,3 +583,4 @@ fn render(ee: &mut Ee) {
     ee.call(at, &[u64::from(app)], &[], 4_000_000_000);
     unstub_hardware(ee, stubs);
 }
+
