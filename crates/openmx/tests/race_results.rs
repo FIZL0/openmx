@@ -16,6 +16,8 @@
 //! * P358: `profile_stat_add` stats 0 to 6 over 20,000 cases against [`results::RiderRecord::add_stat`],
 //!   and the results menu's stats commit, run whole, over 10,000 races against
 //!   [`results::Records::commit_race`].
+//! * P364: the results menu's score commit, run whole, over 10,000 races against
+//!   [`results::Records::commit_score`]: every profile's points.
 //!
 //! The records file reads back as it was written, and the tips are the popup's words.
 
@@ -569,7 +571,7 @@ impl Pick {
         let (races, wins, play_time, preloads, clutches, wrecks) = (c(), c(), c(), c(), c(), c());
         let mut f = || F(if self.below(3) == 0 { f32::from_bits(self.next() as u32) } else { self.below(1 << 20) as f32 / 8.0 });
         let (win_rate, feet, race_time) = (f(), f(), f());
-        RiderRecord { races, wins, win_rate, play_time, feet, preloads, clutches, wrecks, race_time }
+        RiderRecord { races, wins, win_rate, play_time, feet, preloads, clutches, wrecks, race_time, points: 0 }
     }
     /// An amount the stat add may be handed: any float, whole numbers either side of 16 bits,
     /// fractions, a race's seconds or feet.
@@ -669,7 +671,7 @@ fn the_stats_commit_matches_the_results_menus_commit() {
             activity: if p.below(4) == 0 { p.below(6) as i32 - 1 } else { 2 },
             profile: Some(p.below(6) as usize),
             clock: p.amount(),
-            seats: (0..players).map(|_| SeatTally { feet: p.amount(), preloads: n(&mut p), clutches: n(&mut p), wrecks: n(&mut p) }).collect(),
+            seats: (0..players).map(|_| SeatTally { feet: p.amount(), preloads: n(&mut p), clutches: n(&mut p), wrecks: n(&mut p), ..SeatTally::default() }).collect(),
         };
         zero(&mut ee, APP, 0x1000);
         zero(&mut ee, FRONT, 0x400);
@@ -715,6 +717,99 @@ fn the_stats_commit_matches_the_results_menus_commit() {
         raced += usize::from(moved && tally.activity == 2);
     }
     assert!(counted > 7_000 && raced > 5_000 && counted - raced > 1_000, "{counted} committed, {raced} raced");
+}
+
+/// P364: the results menu's score commit (`results_score_commit`, run whole: the interface lookup,
+/// the player list and the items' interfaces hooked) over 10,000 races — no player to a dozen,
+/// each with a profile or none, profiles shared, any banked total (fractions, negatives, past 32
+/// bits, NaN) and points near the word's ends — against [`Records::commit_score`]: every profile's
+/// points word.
+#[test]
+fn the_score_commit_matches_the_results_menus_commit() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [commit, id] = match addrs(["results_score_commit", "interface_id"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    const STATUS_ID: u32 = 0x2a;
+    const EVENT: u32 = FRONT + 0x100;
+    const SCENE: u32 = FRONT + 0x200;
+    const LIST_VT: u32 = FRONT + 0x300;
+    const HOOK_ITEM: u32 = 0x018a_2000;
+    const HOOK_IFACE: u32 = 0x018a_3000;
+    const IFACES: u32 = 0x018e_0000;
+    let slot_of = |slot: usize| PROFILES + 0x100 * slot as u32;
+    ee.hooks.insert(id, Box::new(|ee| {
+        let out = ee.r(6) as u32;
+        ee.set_u32(out, STATUS_ID);
+    }));
+    ee.hooks.insert(HOOK_ITEM, Box::new(|ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (LIST, 1));
+        ee.set(2, u64::from(ITEMS + 0x100 * ee.r(6) as u32));
+    }));
+    // The item's RaceStatusVehicleInterface, 0x24 past the word that points at the card.
+    ee.hooks.insert(HOOK_IFACE, Box::new(|ee| {
+        assert_eq!(ee.r(5) as u32, STATUS_ID);
+        ee.set(2, u64::from(IFACES + (ee.r(4) as u32 - ITEMS) + 0x24));
+    }));
+    let mut p = Pick(0x51c8_3f0e_a97d_2b64);
+    let (mut scored, mut moved_words, mut saturated) = (0, 0, 0);
+    for case in 0..10_000 {
+        let mut records = Records::default();
+        for slot in 0..6 {
+            records.seat(slot).points = match p.below(4) {
+                0 => p.next() as i32,
+                1 => i32::MAX - p.below(100) as i32,
+                2 => i32::MIN + p.below(100) as i32,
+                _ => p.below(100_000) as i32,
+            };
+        }
+        let players = if p.below(8) == 0 { 0 } else { 1 + p.below(12) as usize };
+        let seats: Vec<SeatTally> = (0..players)
+            .map(|_| SeatTally {
+                profile: (p.below(4) != 0).then(|| p.below(6) as usize),
+                banked: match p.below(4) {
+                    0 => p.amount(),
+                    1 => F(p.below(1 << 16) as f32 * 25.0),
+                    _ => F(p.below(1 << 20) as f32 / 4.0),
+                },
+                ..SeatTally::default()
+            })
+            .collect();
+        let tally = RaceTally { activity: 2, profile: None, clock: F::ZERO, seats };
+        zero(&mut ee, APP, 0x1000);
+        zero(&mut ee, FRONT, 0x400);
+        ee.set_u32(APP + 0x3d4, FRONT);
+        ee.set_u32(APP + 0x3cc, SCENE);
+        ee.set_u32(FRONT + 0xc, EVENT);
+        ee.write(EVENT + 0x114, 1, players as u128);
+        ee.set_u32(SCENE + 0x30, SCENE + 0x40);
+        ee.set_u32(SCENE + 0x40 + 0x30, LIST);
+        ee.set_u32(LIST + 8, LIST_VT);
+        ee.set_u32(LIST_VT + 0x84, HOOK_ITEM);
+        ee.set_u32(ITEM_VT + 0xa4, HOOK_IFACE);
+        for (k, s) in tally.seats.iter().enumerate() {
+            let k = k as u32;
+            let (item, iface, card) = (ITEMS + 0x100 * k, IFACES + 0x100 * k, CARDS + 0x200 * k);
+            ee.set_u32(item + 8, ITEM_VT);
+            ee.set_u32(iface, card);
+            put_f(&mut ee, card + 0xdc, s.banked);
+            ee.set_u32(APP + 0x3f4 + 4 * k, s.profile.map_or(0, slot_of));
+        }
+        for (slot, r) in records.seats.iter().enumerate() {
+            ee.set_u32(slot_of(slot) + 0xc0, r.points as u32);
+        }
+        ee.call(commit, &[u64::from(APP)], &[], BUDGET);
+        let before: Vec<i32> = records.seats.iter().map(|r| r.points).collect();
+        let moved = records.commit_score(&tally);
+        for (slot, r) in records.seats.iter().enumerate() {
+            assert_eq!(ee.u32_at(slot_of(slot) + 0xc0) as i32, r.points, "case {case}: slot {slot} of {tally:?}");
+            moved_words += usize::from(r.points != before[slot]);
+        }
+        scored += usize::from(moved);
+        saturated += tally.seats.iter().filter(|s| s.profile.is_some() && s.banked.0.abs() >= 2.147_483_6e9).count();
+    }
+    assert!(scored > 7_000 && moved_words > 20_000 && saturated > 100, "{scored} scored, {moved_words} words moved, {saturated} saturated");
 }
 
 #[test]
@@ -776,11 +871,19 @@ fn the_records_read_back_as_they_were_written() {
     assert_eq!(r.seats.len(), 3);
     assert_eq!(r.seats[0].win_rate.0.to_bits(), fpu::div(100.0, 3.0).to_bits());
     // P358: the race statistics read back too, the floats bit for bit.
-    let tally = RaceTally { activity: 2, profile: Some(2), clock: F(95.3), seats: vec![SeatTally { feet: F(8123.456), preloads: 4, clutches: 9, wrecks: 2 }] };
+    let tally = RaceTally { activity: 2, profile: Some(2), clock: F(95.3), seats: vec![SeatTally { feet: F(8123.456), preloads: 4, clutches: 9, wrecks: 2, ..SeatTally::default() }] };
     assert!(r.commit_race(&tally));
     assert!(!r.commit_race(&RaceTally { profile: None, ..tally.clone() }));
     assert_eq!((r.seats[2].play_time, r.seats[2].preloads, r.seats[2].clutches, r.seats[2].wrecks), (95, 4, 9, 2));
     assert_eq!((r.seats[2].feet, r.seats[2].race_time), (F(8123.456), F(95.3)));
+    // P364: the points read back too; a line from before them reads them as 0.
+    let scored = RaceTally { seats: vec![SeatTally { profile: Some(1), banked: F(1234.75), ..SeatTally::default() }], ..tally.clone() };
+    assert!(r.commit_race(&scored));
+    assert!(r.commit_race(&RaceTally { profile: None, ..scored.clone() }));
+    assert_eq!(r.seats[1].points, 2468);
+    let nine = Records::parse("seat.0 = 3 1 42055555 4 00000000 1 2 3 00000000\n");
+    assert_eq!((nine.seats[0].races, nine.seats[0].wrecks, nine.seats[0].points), (3, 3, 0));
+    assert_eq!(Records::parse("seat.0 = 3 1 42055555 4 00000000 1 2 3 00000000 x\n"), Records::default());
     let text = r.text();
     assert_eq!(Records::parse(&text), r);
     assert_eq!(Records::parse(&format!("junk\nseat.x = 1 2 3\nseat.1 = 1\nseat.0 = 1 2 3 4\n{text}")), r);

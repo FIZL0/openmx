@@ -319,7 +319,8 @@ impl FameMarks {
 
 /// A rider's record as the profile keeps it: races, wins and the win percentage, and the race
 /// statistics the results menu commits on its way out (P358): play time in whole seconds (stat 0),
-/// feet ridden (1), preloads (2), clutch pulls (3), wrecks (4) and seconds raced (5).
+/// feet ridden (1), preloads (2), clutch pulls (3), wrecks (4) and seconds raced (5); and the
+/// points the score commit banks (P364), the profile's word the unlock shop spends.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RiderRecord {
     pub races: u16,
@@ -331,6 +332,7 @@ pub struct RiderRecord {
     pub clutches: u16,
     pub wrecks: u16,
     pub race_time: F,
+    pub points: i32,
 }
 
 impl RiderRecord {
@@ -371,6 +373,11 @@ impl RiderRecord {
             _ => {}
         }
     }
+
+    /// P364: a card's banked total added to the points, cut to a whole number (the word wraps).
+    pub fn add_points(&mut self, banked: F) {
+        self.points = self.points.wrapping_add(fpu::to_i32(banked.0));
+    }
 }
 
 /// What the results menu's stats commit reads of a race (P358): the event's activity (only a
@@ -386,13 +393,16 @@ pub struct RaceTally {
 }
 
 /// One player's words the stats commit reads from their statistics tracker: feet ridden (`+0x78`),
-/// preloads (`+0x38`), clutch pulls (`+0x3c`) and wrecks (`+0x34`).
+/// preloads (`+0x38`), clutch pulls (`+0x3c`) and wrecks (`+0x34`); and what the score commit
+/// reads (P364): the player's own profile slot, if they have one, and their card's banked total.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SeatTally {
     pub feet: F,
     pub preloads: i32,
     pub clutches: i32,
     pub wrecks: i32,
+    pub profile: Option<usize>,
+    pub banked: F,
 }
 
 /// The riders' records, one per seat, kept in `records.txt`.
@@ -427,12 +437,28 @@ impl Records {
         moved
     }
 
+    /// P364: the results menu's score commit, which its stats commit runs first: every player seat
+    /// with a profile has its card's banked total added to the points of its own profile (not
+    /// player 0's). Whether any record moved.
+    pub fn commit_score(&mut self, tally: &RaceTally) -> bool {
+        let mut moved = false;
+        for s in &tally.seats {
+            if let Some(slot) = s.profile {
+                self.seat(slot).add_points(s.banked);
+                moved = true;
+            }
+        }
+        moved
+    }
+
     /// P358: the results menu's stats commit, as Restart and Quit's yes run it on their way out of
-    /// a race: for each player seat, seconds raced (a single race only), then play time, feet
-    /// ridden, preloads, clutch pulls and wrecks, every seat's counted in player 0's profile slot.
-    /// No profile for player 0: nothing. Whether any record moved.
+    /// a race: the score commit ([`Records::commit_score`]), then for each player seat, seconds
+    /// raced (a single race only), then play time, feet ridden, preloads, clutch pulls and wrecks,
+    /// every seat's counted in player 0's profile slot. No profile for player 0: no stats.
+    /// Whether any record moved.
     pub fn commit_race(&mut self, tally: &RaceTally) -> bool {
-        let Some(slot) = tally.profile else { return false };
+        let scored = self.commit_score(tally);
+        let Some(slot) = tally.profile else { return scored };
         let n = |v: i32| F(fpu::from_i32(v));
         for s in &tally.seats {
             let r = self.seat(slot);
@@ -445,19 +471,19 @@ impl Records {
             r.add_stat(3, n(s.clutches));
             r.add_stat(4, n(s.wrecks));
         }
-        !tally.seats.is_empty()
+        scored || !tally.seats.is_empty()
     }
 
-    /// `seat.N = races wins rate play feet preloads clutches wrecks raced` a line, the floats as
-    /// their bits so they read back exactly. A line of the first three alone (before P358) reads
-    /// with the rest 0.
+    /// `seat.N = races wins rate play feet preloads clutches wrecks raced points` a line, the floats
+    /// as their bits so they read back exactly. A line of the first three alone (before P358), or
+    /// without the points (before P364), reads with the rest 0.
     pub fn text(&self) -> String {
         self.seats
             .iter()
             .enumerate()
             .map(|(k, r)| {
                 format!(
-                    "seat.{k} = {} {} {:08x} {} {:08x} {} {} {} {:08x}\n",
+                    "seat.{k} = {} {} {:08x} {} {:08x} {} {} {} {:08x} {}\n",
                     r.races,
                     r.wins,
                     r.win_rate.0.to_bits(),
@@ -466,7 +492,8 @@ impl Records {
                     r.preloads,
                     r.clutches,
                     r.wrecks,
-                    r.race_time.0.to_bits()
+                    r.race_time.0.to_bits(),
+                    r.points
                 )
             })
             .collect()
@@ -482,13 +509,21 @@ impl Records {
             let Some(([races, wins, rate], rest)) = w.split_first_chunk::<3>() else { continue };
             let (Ok(races), Ok(wins), Some(win_rate)) = (races.parse(), wins.parse(), bits(rate)) else { continue };
             let mut r = RiderRecord { races, wins, win_rate, ..RiderRecord::default() };
-            if let [play, feet, preloads, clutches, wrecks, raced] = rest[..] {
+            if let [play, feet, preloads, clutches, wrecks, raced, ref points @ ..] = rest[..] {
                 let (Ok(play_time), Some(feet), Ok(preloads), Ok(clutches), Ok(wrecks), Some(race_time)) =
                     (play.parse(), bits(feet), preloads.parse(), clutches.parse(), wrecks.parse(), bits(raced))
                 else {
                     continue;
                 };
                 r = RiderRecord { play_time, feet, preloads, clutches, wrecks, race_time, ..r };
+                match points {
+                    [] => {}
+                    [p] => match p.parse() {
+                        Ok(points) => r.points = points,
+                        Err(_) => continue,
+                    },
+                    _ => continue,
+                }
             } else if !rest.is_empty() {
                 continue;
             }
