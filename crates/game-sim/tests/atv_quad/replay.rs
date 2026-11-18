@@ -30,8 +30,12 @@ const LCG: u64 = 0x5851_f42d_4c95_7f2d;
 /// their phase-flipped rows (s-jump 49, s-wheelie-launch 145), and race-jump-side's "a bone touches"
 /// (+0x920) arms its put-back on the capture's frame by itself. Each wreck's lag was found by inverting
 /// the captured spin through the quaternion the frame turned it by and searching the LCG's stream for
-/// its draws (R37, R41); each idle variant's is the smallest that picks the variant that matches. Where
-/// the original's extra draws come from is not known (the journals).
+/// its draws (R37, R41); each idle variant's is the smallest that picks the variant that matches. The
+/// draws are the game's sound and effects code between frames (R41 logged rand()'s callers in the
+/// original): the engine note, the no-repeat crash and landing sound picks, a random pick from a list,
+/// the trail's sound object (two a frame while it plays) and the wreck clank (after the spin); after
+/// the wreck the trail's linked effects items step their dust emitters, which draw twice per puff.
+/// On race-jump and race-wheelie-launch those callers' draws before the wreck sum to the lags here.
 const RNG_LAG: [(&str, usize, u64); 7] = [
     ("race-jump-side", 183, 41),
     ("race-jump-side", 226, 1),

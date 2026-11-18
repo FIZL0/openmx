@@ -13491,3 +13491,20 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   it writes only the record's +0x200 (= the bike's new part at +0xfc). MD81a's hook had swapped +0xf8
 #   to an empty record; with no swap, 414 of 10 000 states enter twice (231 clause then joust, 183
 #   clause then scenery), reasons and +0x1250 matching. With the swap put back, the oracle fails at state 8.
+# R41 — where SLUS-21104's ATV rides draw rand() outside the sim frame (tests/atv_quad/replay.rs RNG_LAG).
+# Comment rows only. Journal: research/journal/2026-11-17-r41-atv-rand-callers.
+#   Recipe: a copy of a C28 .p2s with rand 0x003561a8 patched to `j 0x000f1000`; the trampoline there counts
+#   calls at 0x000f0000, rings 256 ra at 0x000f0010 and the caller's *(sp+176) at 0x000f0410, then runs
+#   rand's first two words (addiu sp,-16; lui v0,0x39) and jumps to 0x003561b0. The recorder reads the ring
+#   (field rlog, 0x000f0000, 2064 bytes) and rand's state (field rng, 0x00393a90 -> 0xa8, 8 bytes); caller =
+#   ra - 8. race-jump's and race-wheelie-launch's logged rides equal C28's csvs (race-jump to row 259 on the
+#   second run, all 300 on the first). 0x000f0000.. was assumed free.
+#   Callers the replay's sim frame does not make (race-jump, race-wheelie-launch):
+#   0x004a3bcc, 0x004a3d08, 0x004a3ffc, 0x004a4180, 0x004a4300 engine note (near 0x004a3520, ctor 0x004a2d40);
+#   0x001972d0 the no-repeat sound pick 0x001972a0; 0x0019d034 in 0x0019d020 (rand x count pick from a list;
+#   called from 0x0019a040, a vtable 0x003b5a00 slot, and 0x0025a3e0); 0x004e9950 in 0x004e9820 (vtable
+#   0x003d0fa0 +0x80, the trail's sound object; twice a frame while it plays); 0x005000b4 in the wreck clank
+#   0x00500040 (after the wreck entry's five draws); 0x0050d07c/0x0050d0b4 the dust emitter 0x0050ceb0 called
+#   through vt +0x98 from 0x004fe1e4 in the Linked effects item step 0x004fe010 (post-wreck; the in-frame
+#   calls come from 0x00128b68). Before the wreck's first frame these sum to 22 (race-jump, row 66) and 50
+#   (race-wheelie-launch, row 80), the lags R37/R41 found by inverting the spin.
