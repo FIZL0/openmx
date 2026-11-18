@@ -21,6 +21,12 @@
 //!   props' step moves a wreck bike that struck across a seam to the ball and back word for word;
 //!   the ragdoll's bones are offered a ball by the far seam one width over; a rolling ball wraps
 //!   over a seam where a world that does not wrap puts it back (the disc ones skipped without it).
+//! * (MD254) a flown plane by the near seam strikes a ball by the far one: its frame files the same
+//!   mirrors on the ball's list at the ball's own place, notes itself a width over, and pushes the
+//!   ball as at the ball's place; the props' step sees it there and puts it back; a whole Sim tick
+//!   moves the ball as the plane at the ball's place does, also when the frame carries the plane
+//!   back over the seam; a world that does not wrap leaves the ball alone (skipped without the disc
+//!   or MX.PSR).
 
 use game_sim::math::{self, Mat4};
 use game_sim::tiles::{generate, Piece, Reach, SEAM_COPIES, Source, Tile, Tiled};
@@ -536,4 +542,159 @@ fn a_rolling_ball_wraps_over_a_seam() {
     let e = edged.collections[c].bones[0].body;
     assert_eq!(bits(e.position), bits(place), "put back over the edge: {:?}", e.position);
     assert!(!e.enabled);
+}
+
+// MD254: the flown plane's strike on the knockable props across a seam.
+
+/// The biplane as the port builds it off `machine.res` in MX.PSR (tests/prop_plane.rs's), without its
+/// hull: the props' rays on it are not this test's (they stay at the props' own places).
+fn the_plane() -> Option<game_sim::flight::Flight> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let kit = ps2_oracle::Kit::load().map_err(|why| ps2_oracle::skip(&why)).ok()?;
+    let here = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso/MX.PSR");
+    let path = if here.exists() { here } else { kit.ctx("iso").join("MX.PSR") };
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        ps2_oracle::skip(&format!("no {} — `./kit extract MX.PSR` writes it", path.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("machine.res");
+    let member = |name: &str| {
+        let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).unwrap_or_else(|| panic!("machine.res has {name}"));
+        res.read(&bytes, e).expect("its bytes")
+    };
+    let plane = game_sim::phy::Plane::read_bytes(&member(game_sim::phy::BIPLANE_PHY));
+    let rays = game_sim::track::Rays::parse(&member(game_sim::flight_search::BIPLANE_RAYS)).expect("biplanem.col");
+    Some(game_sim::flight::Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)))
+}
+
+/// `plane` with its body (and where it was a substep ago) at `at`, rolling at 10 ft/s along -x.
+fn flying_at(plane: &game_sim::flight::Flight, at: Vf) -> game_sim::flight::Flight {
+    let mut p = plane.clone();
+    let v = Vf::new(-10.0, 0.0, 0.0, 0.0);
+    p.body.position = at;
+    p.body.last_position = Vf::new(at.x() + 10.0 * DT.0, at.y(), at.z(), 1.0);
+    p.body.velocity = v;
+    p
+}
+
+#[test]
+fn a_plane_by_the_near_seam_strikes_a_ball_by_the_far_one() {
+    let Some((set, _)) = knock_disc() else { return };
+    let Some(plane) = the_plane() else { return };
+    // The plane ahead of a ball on +x, where its rays strike it.
+    let mut found = None;
+    let mut roomy = Strip { flat: game_sim::world::Flat::default(), width: F(40_000.0), wraps: false };
+    'find: for (c, coll) in set.collections.iter().enumerate() {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        for ahead in (4..80).map(|k| k as f32 * 0.25) {
+            for up in [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, -0.5, -1.0] {
+                let at = Vf::new(ball.x() + ahead, ball.y() + up, ball.z(), 1.0);
+                let mut p = flying_at(&plane, at);
+                if p.search_props(DT, &mut roomy, &set).iter().any(|s| s.0 == c && !s.2.is_empty()) {
+                    found = Some((c, at));
+                    break 'find;
+                }
+            }
+        }
+    }
+    let (c, at) = found.expect("some spot by some ball where the plane's rays strike it");
+    // A world whose far seam is the whole foot under the plane, the plane a width back.
+    let width = at.x().floor();
+    let near = Vf::new(at.x() - width, at.y(), at.z(), 1.0);
+    assert!((0.0..1.0).contains(&near.x()));
+    let mut wrapped = Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: true };
+    let mut plain = Strip { flat: game_sim::world::Flat::default(), width: F(width), wraps: false };
+    assert!(flying_at(&plane, near).search_props(DT, &mut plain, &set).iter().all(|s| s.2.is_empty()), "alone, the ball is a width from the plane");
+
+    // One frame among the props, as a lone plane's (the shell's split-screen seat's): the ball's list
+    // takes the same mirrors at its own place, and the plane is noted a width over.
+    const ME: usize = 0;
+    let tables = game_sim::ride::Tables::build();
+    let frame = |at: Vf, world: &mut Strip| {
+        let mut set = set.clone();
+        let mut p = flying_at(&plane, at);
+        p.frame_props(DT, Default::default(), world, &tables, &[], None, &mut set, ME);
+        (set, p)
+    };
+    let (want, wp) = frame(at, &mut roomy);
+    let (got, gp) = frame(near, &mut wrapped);
+    let (wl, gl) = (&want.collections[c].objects[0].collision.as_ref().unwrap().record.contacts, &got.collections[c].objects[0].collision.as_ref().unwrap().record.contacts);
+    assert!(!wl.is_empty() && wl.len() == gl.len(), "the ball's list: {} vs {}", gl.len(), wl.len());
+    for (g, w) in gl.iter().zip(wl) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "mirror normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close(g.point, w.point), "mirror point at the ball's own place {:?} vs {:?}", g.point, w.point);
+    }
+    assert!(got.collections[c].bones[0].body.enabled, "the strike woke the ball");
+    assert!(got.across.iter().any(|a| (a.collection, a.object, a.player, a.by) == (c, 0, ME, [F(width), F::ZERO])), "{:?}", got.across);
+    assert!(want.across.is_empty());
+    // The plane's frame pushed the ball a width back, by the plane, and wrote it back at its place.
+    let (g, w) = (got.collections[c].bones[0].body, want.collections[c].bones[0].body);
+    assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    assert!(close_by(gp.body.position, wp.body.position, width), "plane {:?} vs {:?}", gp.body.position, wp.body.position);
+    assert!(close(gp.body.velocity, wp.body.velocity), "plane velocity {:?} vs {:?}", gp.body.velocity, wp.body.velocity);
+    assert!(gp.record.contacts.iter().any(|e| e.other.is_some()), "the plane's entries name the ball");
+
+    // The props' step sees the plane a width over, by the ball, and puts it back.
+    use game_sim::prop_set::PropSet;
+    let movers = game_sim::prop_set::PropMovers::default();
+    let step = |mut set: PropSet, mut p: game_sim::flight::Flight| {
+        let before = p.body;
+        set.step_flown(DT, &movers, &mut p.collider, &mut p.body, p.mass);
+        (set, p, before)
+    };
+    let (want, wp, _) = step(want, wp);
+    let (got, gp, gbefore) = step(got, gp);
+    assert!(got.across.is_empty(), "the notes are used up");
+    let (g, w) = (got.collections[c].bones[0].body, want.collections[c].bones[0].body);
+    assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    assert!(close(g.rates, w.rates), "ball rates {:?} vs {:?}", g.rates, w.rates);
+    assert!(close(gp.body.velocity, wp.body.velocity), "plane velocity {:?} vs {:?}", gp.body.velocity, wp.body.velocity);
+    if bits(wp.body.position) == bits(flying_at(&plane, at).body.position) {
+        assert_eq!(bits(gp.body.position), bits(gbefore.position), "a place the step left alone is back word for word");
+    }
+
+    // A whole tick of a Sim flying the plane (the late-search path, B34): the ball goes where it goes
+    // with the plane at its own place.
+    let tick = |at: Vf, world: &mut Strip| {
+        let mut sim = game_sim::Sim::new(0x5254);
+        sim.traffic.props = set.clone();
+        sim.plane = Some(flying_at(&plane, at));
+        sim.step(DT, &Default::default(), world);
+        sim
+    };
+    let want = tick(at, &mut roomy);
+    let got = tick(near, &mut wrapped);
+    let (g, w) = (got.traffic.props.collections[c].bones[0].body, want.traffic.props.collections[c].bones[0].body);
+    assert!(w.velocity != Vf::ZERO || w.rates != Vf::ZERO, "the tick moved the ball: {w:?}");
+    assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    let (gp, wp) = (&got.plane.as_ref().unwrap().body, &want.plane.as_ref().unwrap().body);
+    assert!(close(gp.velocity, wp.velocity), "plane velocity {:?} vs {:?}", gp.velocity, wp.velocity);
+    assert!(got.traffic.props.across.is_empty());
+    // A plane its frame carries back over the near seam, onto the ball's side: the props' step sees
+    // it where it now is, not a width further on.
+    let over = at.x() - 0.1;
+    let mut crossing = Strip { flat: game_sim::world::Flat::default(), width: F(over), wraps: true };
+    let got = tick(Vf::new(0.1, at.y(), at.z(), 1.0), &mut crossing);
+    let gp = &got.plane.as_ref().unwrap().body;
+    assert!(gp.position.x() > over - 1.0, "the plane went over the seam: {:?}", gp.position);
+    let (g, w) = (got.traffic.props.collections[c].bones[0].body, want.traffic.props.collections[c].bones[0].body);
+    assert!(close(g.position, w.position), "ball {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "ball velocity {:?} vs {:?}", g.velocity, w.velocity);
+    assert!(close(gp.velocity, wp.velocity), "plane velocity {:?} vs {:?}", gp.velocity, wp.velocity);
+    // On a world that does not wrap the plane by the near seam flies through: the ball sleeps on.
+    let alone = tick(near, &mut plain);
+    assert!(!alone.traffic.props.collections[c].bones[0].body.enabled || alone.traffic.props.collections[c].bones[0].body.velocity == set.collections[c].bones[0].body.velocity);
 }
