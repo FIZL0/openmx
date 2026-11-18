@@ -723,13 +723,23 @@ struct Replayed {
 }
 
 fn replay(kit: &Kit, state: &str, csv: &str, last: usize) -> Option<Replayed> {
+    replay_among(kit, state, csv, last, None)
+}
+
+/// [`replay`] with `among` (MD247): the quad stepped among Rocksbury's knockable props
+/// ([`quad::Ride::step_among`]), its hull the one their passes strike.
+fn replay_among(kit: &Kit, state: &str, csv: &str, last: usize, mut among: Option<&mut Among>) -> Option<Replayed> {
     let rows = rows(kit, csv)?;
     let mut s = setup(kit, state)?;
     let dt = F(f32::from_bits(DT));
     let mut out = Replayed { off: Vec::new(), skipped: Vec::new(), clock: Vec::new(), before_put_back: Vec::new() };
+    let mut step = |ride: &mut quad::Ride, world: &mut Rocksbury, segments, r: &Row, among: Option<&mut Among>| match among {
+        Some(a) => ride.step_among(&controls(r), dt, world, segments, &mut a.knocked, Some(&mut a.hull)),
+        None => ride.step(&controls(r), dt, world, segments),
+    };
     for (n, r) in rows.iter().enumerate().take(last + 1) {
-        let before = s.ride.clone();
-        s.ride.step(&controls(r), dt, &mut s.world, s.segments);
+        let before = (s.ride.clone(), among.as_deref().cloned());
+        step(&mut s.ride, &mut s.world, s.segments, r, among.as_deref_mut());
         out.clock.push((s.ride.tailed.as_ref().unwrap().vehicle.stuck_time, F(r.f("stuck_time"))));
         if bad_read(&rows, n) {
             out.skipped.push(n);
@@ -737,9 +747,10 @@ fn replay(kit: &Kit, state: &str, csv: &str, last: usize) -> Option<Replayed> {
         }
         let off = body_off(r, &s.ride.body);
         if !off.is_empty() {
-            let mut held = before;
+            let (mut held, mut again) = before;
             held.tailed.as_mut().unwrap().vehicle.stuck_time = F::ZERO;
-            held.step(&controls(r), dt, &mut s.world, s.segments);
+            // The props as they stood before the tick, stepped again beside it.
+            step(&mut held, &mut s.world, s.segments, r, again.as_mut());
             if body_off(r, &held.body).is_empty() {
                 out.before_put_back.push(n);
                 continue;
@@ -816,12 +827,53 @@ fn the_untamed_quad_from_its_files_is_md147s_spawned_quad() {
 /// (`SX_A.scn`'s `TripleBale02` at (437.99, 9.28, 474.69), a 253 lb body with a collision record of its
 /// own), its two-way contact with the quad not yet ported; the bale's `f.col` stood still as a solid
 /// spins the port's quad instead.
+///
+/// MD247: on Rocksbury with its bales ([`bales`]), each with its own frame, still to row 196: none
+/// wakes before the take-off. On tick 197 the quad's rays strike the top of a triple bale ([`BALE`]),
+/// which wakes and files its own hits ([`untamed_bale_wakes_and_files_its_hits_on_md224_steer`]); but
+/// the original's left front wheel's sweep also lands on the bale that tick (the wheel's swept-contact
+/// word set on all four substeps), which the port's sweep does not see, and the quad's body is off
+/// from row 197 (MD247's journal).
 #[test]
 fn untamed_quad_replays_md147_steer() {
     let Some(kit) = kit() else { return };
-    let Some(r) = replay(&kit, "spawn", "steer", 196) else { return };
+    let Some(ee) = image(&kit, "spawn") else { return };
+    let Some(mut among) = bales(&kit, &ee) else { return };
+    let Some(r) = replay_among(&kit, "spawn", "steer", 196, Some(&mut among)) else { return };
     assert!(r.off.is_empty(), "{} rows off:\n{}", r.off.len(), r.off.join("\n"));
     assert!(r.skipped.len() < 4, "rows {:?} were read badly", r.skipped);
+    assert!(among.knocked.iter().all(|k| !k.body.is_some_and(|b| b.body.enabled)), "a bale woke before the take-off");
+}
+
+/// MD247: tick 197 of MD224's steer with the bales, the two lists as the original files them (read
+/// off the original stepping the image; research/oracle.txt `# MD247`). The quad's: its two hits on
+/// the bale, then the bale's nine mirrors. The bale's (it alone woke): the quad's two mirrors, its
+/// nine heightfield rays' hits on the terrain (rays 4, 5, 6, 7, 15, 16, 20, 21, 23 of its 26), then its
+/// nine hits on the quad's hull face by face, each face's in ray order (rays 0, 2, 8, 11, 24, 25 on
+/// one, 4, 6, 23 on the other). The entries' rays, normals and points were the original's bit for bit.
+#[test]
+fn untamed_bale_wakes_and_files_its_hits_on_md224_steer() {
+    let Some(kit) = kit() else { return };
+    let Some(rows) = rows_in(&kit, "md224", "steer") else { return };
+    let Some(mut s) = setup(&kit, "spawn") else { return };
+    let Some(mut among) = bales(&kit, &s.world.ee) else { return };
+    let dt = F(f32::from_bits(DT));
+    for r in rows.iter().take(198) {
+        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut among.knocked, Some(&mut among.hull));
+    }
+    assert!(among.knocked.iter().filter(|k| k.body.is_some_and(|b| b.body.enabled)).map(|k| k.id).eq([BALE]), "only the struck bale woke");
+    let quad: Vec<(u32, u32)> = s.ride.recorded.as_ref().expect("the quad's record").record.contacts.iter().map(|c| (c.kind, c.other)).collect();
+    let mut want = vec![(0, BALE); 2];
+    want.extend([(1, BALE); 9]);
+    assert_eq!(quad, want, "the quad's list (kind, other)");
+    let bale = among.knocked.iter().find(|k| k.id == BALE).expect("the bale");
+    let rays = bale.own.as_ref().expect("the bale's frame").rays.pairs();
+    let ray = |c: &handling::record::Contact| rays.iter().position(|&[a, b]| a.to_bits() == c.from.to_bits() && b.to_bits() == c.to.to_bits());
+    let got: Vec<(u32, u32, Option<usize>)> = bale.record.contacts.iter().map(|c| (c.kind, c.other, ray(c))).collect();
+    let mut want = vec![(1, 1, None); 2];
+    want.extend([4, 5, 6, 7, 15, 16, 20, 21, 23].map(|k| (0, 0, Some(k))));
+    want.extend([0, 2, 8, 11, 24, 25, 4, 6, 23].map(|k| (0, 1, Some(k))));
+    assert_eq!(got, want, "the bale's list (kind, other, ray)");
 }
 
 /// The settled rows' hazard clock is the port's: the row's stuck time is the port's after the tick,
@@ -884,6 +936,83 @@ fn bale(kit: &Kit, ee: &Ee) -> Option<game_sim::quad::Knockable> {
     let rows: [Vf; 4] = std::array::from_fn(|k| v(ee, node + 0x60 + 0x10 * k as u32));
     let record = game_sim::handling::record::read(&|a| ee.u32_at(a), BALE);
     Some(game_sim::quad::Knockable::new(BALE, mesh, rows, record).with_body(knocked(ee, BALE)))
+}
+
+/// MD247: Untamed's knockable prop's vtable (a bale's, single or triple).
+const KNOCKABLE_VTABLE: u32 = 0x003e_f2b0;
+
+/// MD247: Rocksbury's knockable props and the quad's hull their passes strike.
+#[derive(Clone)]
+struct Among {
+    knocked: Vec<game_sim::quad::Knockable>,
+    hull: game_sim::quad::Knockable,
+}
+
+/// MD247: every knockable prop the image holds (Rocksbury's bales: each object of
+/// [`KNOCKABLE_VTABLE`]), each with its body ([`knocked`]) and its own frame
+/// ([`game_sim::quad::KnockFrame`]): its rays its `m.col`'s (the struck bale's checked against the
+/// part's rays in the image), its gravity (the object's `+0x118`, its `+0x40`) and its world's rate (`+0x110`, its `+4`),
+/// its record's impulse mask. Its mesh is its collidable's `f.col` (the record's `+0x208`, the name in
+/// `+0xc4`..), its frame its node's rows. The quad's hull is its chassis' frame mesh
+/// ([`quad::hull_file`]).
+fn bales(kit: &Kit, ee: &Ee) -> Option<Among> {
+    let dir = kit.ctx("untamed/sx_a/col");
+    let files: Vec<PathBuf> = std::fs::read_dir(&dir).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let read = |name: &str| {
+        let p = files.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name)));
+        std::fs::read(p.unwrap_or_else(|| panic!("{name} is not in {}", dir.display()))).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    let mut meshes = std::collections::BTreeMap::new();
+    let mut knocked = Vec::new();
+    for obj in (0x0010_0000..ee.ram.len() as u32 - 0x200).step_by(16) {
+        if ee.u32_at(obj + 4) != KNOCKABLE_VTABLE {
+            continue;
+        }
+        let (body, rec, world) = (ee.u32_at(obj + 0xe8), ee.u32_at(obj + 0xf8), ee.u32_at(obj + 0x110));
+        if rec == 0 || ee.u32_at(rec + 0xe4) != body {
+            continue;
+        }
+        let c = ee.u32_at(rec + 0x208);
+        // The name is the printable run after the collidable's `+0xc4` word's leading bytes.
+        let name: String = (0..0x3c).map(|k| ee.u8_at(c + 0xc4 + k)).skip_while(|b| !b.is_ascii_graphic()).take_while(|&b| b != 0).map(char::from).collect();
+        let shape = name.rsplit('\\').next().unwrap_or(&name).to_ascii_lowercase();
+        // A stale copy of an object (its collidable gone) is no prop.
+        let Some(stem) = shape.strip_suffix("f.col") else { continue };
+        let rays_name = format!("{stem}m.col");
+        let (mesh, rays) = meshes
+            .entry(shape.clone())
+            .or_insert_with(|| {
+                let mesh = game_sim::track::Mesh::parse(&read(&shape)).unwrap_or_else(|e| panic!("{shape}: {e}"));
+                let rays = game_sim::track::Rays::parse(&read(&rays_name)).unwrap_or_else(|e| panic!("{rays_name}: {e}"));
+                (mesh, game_sim::flight_search::Rays::of(&rays))
+            })
+            .clone();
+        if rec == BALE {
+            // The part's rays (`+0x198` their count, `+0x1a0` them) are the file's.
+            let part = ee.u32_at(rec + 0x200);
+            let list = ee.u32_at(part + 0x1a0);
+            let image: Vec<[Vf; 2]> = (0..ee.u32_at(part + 0x198)).map(|k| [v(ee, list + 0x20 * k), v(ee, list + 0x20 * k + 0x10)]).collect();
+            let bits = |r: &[[Vf; 2]]| r.iter().map(|[a, b]| (a.to_bits(), b.to_bits())).collect::<Vec<_>>();
+            assert_eq!(bits(&rays.pairs()), bits(&image), "the bale's rays from {rays_name}");
+        }
+        let node = ee.u32_at(rec + 0xe8);
+        let frame: [Vf; 4] = std::array::from_fn(|k| v(ee, node + 0x60 + 0x10 * k as u32));
+        let record = handling::record::read(&|a| ee.u32_at(a), rec);
+        let k = self::knocked(ee, rec);
+        let held = game_sim::atv_contact::Held {
+            record: game_sim::atv_contact::Record { collider: k.collider, impulse_mask: v(ee, rec + 0x150) },
+            mass: k.mass,
+            ..Default::default()
+        };
+        let world = game_sim::biplane::World { iterations: 1, rate: f(ee, world + 4) };
+        let own = game_sim::quad::KnockFrame { rays, gravity: v(ee, ee.u32_at(obj + 0x118) + 0x40), world, held };
+        knocked.push(game_sim::quad::Knockable::new(rec, mesh, frame, record).with_body(k).with_frame(own));
+    }
+    assert!(knocked.iter().any(|k| k.id == BALE), "the struck bale is not among the image's knockables");
+    let hull = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/untamed_atv/Veh/Col").join(quad::hull_file("ATV_R_ChasisM.col")?)).ok()?;
+    let hull = game_sim::track::Mesh::parse(&hull).unwrap_or_else(|e| panic!("ATV_R_ChasisF.col: {e}"));
+    let hull = game_sim::quad::Knockable::new(1, hull, [Vf::ZERO; 4], Default::default());
+    Some(Among { knocked, hull })
 }
 
 /// MD246: Untamed's quad record's resolution, its vt `+0x88` (SLUS-21104's, the entry's fields moved:
@@ -1016,13 +1145,13 @@ fn untamed_quad_resolves_its_hits_on_the_bale_as_the_original() {
     let mut knocked = [bale];
     let dt = F(f32::from_bits(DT));
     for r in rows.iter().take(197) {
-        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked);
+        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked, None);
     }
     assert_eq!(knocked[0].body, Some(self::knocked(&ee, BALE)), "the bale's body moved before the quad struck it");
     // Tick 197's pass: two hits on the bale, held with the bale's body.
     let before = (s.ride.clone(), knocked.clone());
     let Some(ee0) = image(&kit, "spawn") else { return };
-    s.ride.record_among(dt, &mut s.world, &mut knocked);
+    s.ride.record_among(dt, &mut s.world, &mut knocked, None);
     let held = s.ride.recorded.as_ref().expect("the quad's record").held.clone();
     assert_eq!(held.entries.len(), 2, "the hits held on tick 197");
     assert!(held.entries.iter().all(|e| e.contact.other == Some(0)) && held.bodies.len() == 1, "each hit's other side is the bale's body");
@@ -1107,7 +1236,7 @@ fn untamed_quad_resolves_its_hits_on_the_bale_as_the_original() {
     // the bale's body comes back to it as it went (still), out of the quad's held list.
     let (mut ride, mut knocked) = before;
     let calls = ride.rest.len();
-    ride.step_among(&controls(&rows[197]), dt, &mut s.world, s.segments, &mut knocked);
+    ride.step_among(&controls(&rows[197]), dt, &mut s.world, s.segments, &mut knocked, None);
     assert!(!ride.rest[calls..].contains(&Call::GravityRecord), "the gravity's call was not answered on tick 197");
     assert_eq!(knocked[0].body, Some(self::knocked(&ee0, BALE)), "the bale's body after tick 197");
     assert!(ride.recorded.as_ref().is_some_and(|r| r.held.bodies.is_empty() && r.held.entries.len() == 2), "the held list after tick 197");
@@ -1138,7 +1267,7 @@ fn untamed_quad_record_strikes_the_bale_on_md224_steer() {
     let mut knocked = [bale];
     let dt = F(f32::from_bits(DT));
     for r in rows.iter().take(198) {
-        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked);
+        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked, None);
     }
     let r = &rows[197];
     let count = hex_words(r, "rec")[0xf0 / 4] as usize;
