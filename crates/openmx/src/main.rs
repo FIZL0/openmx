@@ -5686,15 +5686,33 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         mods.plane(0, &mut plane);
         vehicle::wheels_height(&Flight::new(&plane))
     });
-    // A car parks only by its own track's file (S245), a world's by its home tile's.
+    // A car parks only by its own track's file (S245); in a world, at its own track's tile, by that
+    // tile's file (S266): the one in the folder the tile's scene is stemmed (`tracks\free09\machine.txt`
+    // for FREE09), no other.
+    let tile_machines: Vec<(String, Vec<u8>, [f32; 2])> = match (&world_mod, &machine_res) {
+        (Some(w), Some(res)) => w.pieces[..w.tile_count]
+            .iter()
+            .filter_map(|p| {
+                let e = res.find_suffix(&format!("{}\\machine.txt", p.stem))?;
+                let folder = e.name.replace('/', "\\").rsplit('\\').nth(1).map(str::to_string)?;
+                if !folder.eq_ignore_ascii_case(&p.stem) {
+                    return None;
+                }
+                Some((e.name.clone(), res.read(&e.name).ok()?, p.tile.at.map(|a| a.0)))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let lot_spots = |name: &str, b: &[u8], ground: &mut dyn FnMut(Vf) -> f32| {
-        vehicle::parked_by(
+        let home = vehicle::parked_by(
             name,
             match &world_mod {
                 Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, spot_rest, ground),
                 None => Machine::ALL.iter().map(|&m| vehicle::spots(b, m)).collect(),
             },
-        )
+        );
+        let tiles: Vec<(&str, &[u8], [f32; 2])> = tile_machines.iter().map(|(n, b, at)| (n.as_str(), &b[..], *at)).collect();
+        vehicle::tile_cars(home, &tiles)
     };
     let lot = {
         let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
