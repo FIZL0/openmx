@@ -12241,6 +12241,31 @@ tip_popup_arm               boot 0x0029abc0 (popup, 1) +0xb4 = any of +0xc0/+0xc
 #                                           "STR_PRELOAD_TEXT1" / "STR_CLUTCH_TEXT1" fields from the %s of
 #                                           0x00435cf0 / 0x00435d50 ("You didn't use the "pre-load" /
 #                                           "clutch" feature during the last race!"), with 0 empties them.
+race_tip_fade               boot 0x002fcff0 (race manager tick) its tip clock (+0x410) run out: the menu
+#                                           stack (app+0x3d0)+0xd4 pushes the activity's +0x3a0 (0x001c8850), then
+#                                           0x001c8670(stack, in, out, 1) with 250/250 ms when the
+#                                           "PreloadAndClutchTipPopup" has +0xb4 or +0xb8 set, else 750/1333;
+#                                           +0x114 = 1. 0x001c8670 -> 0x001c8e80(fader stack+0x50, in ms):
+#                                           +0x38 = ms / 1000, +0x3c = 0 (1 for 0 ms), +0x48 = 1. The fader's
+#                                           tick (vt 0x00450e40 slot +0x38 = 0x001c8a80): while +0x3c < 1 and
+#                                           +0x38 != 0, +0x34 += dt, +0x3c = min(+0x34 / +0x38, 1). S13d: the
+#                                           activity is ticked 7 more frames after the tip's and then never
+#                                           (act +0x148, mgr +0xf8 and the flash object freeze), 0.25 s at
+#                                           1/30. Who reads the fader to stop the activity was not traced.
+#                                           Ported (S334): race::Race::{outro, outro_up, OUTRO_FADE}
+race_prop_raiser            boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot +0x38 = 0x002feb40) the
+#                                           activity's +0x3a8, built when activity +0x3a4 != 0 and put on
+#                                           the score manager's node (pass 2) before the flashes. 0x002fe050
+#                                           gathers the scene's (app+0x3cc) props whose name (+0x144) matches
+#                                           the scene's +0xb0 / +0xac objects' +0x3c names (needs both);
+#                                           0x002fea40 binds the score manager (+0x98) and two spots
+#                                           (+0x80/+0x84). Tick: the first card (+0x34, next +0x1c8) with
+#                                           +0x14 < spot < +0x10 sets a group going (0x002fe7e0 / 0x002fe910:
+#                                           keeps each prop's pose, its y +0x94 + 50 at +0x5c); props blended
+#                                           there over +0x50 / +0x64 s through the prop's vt+0xe4, then its
+#                                           own vt+0x18 when done. No rand() in the tick or its two callees
+#                                           (the props' vt+0xe4 not followed). On sx01 (S13d) +0x3a4 = 1.
+#                                           Not ported (S334 read it).
 # P333 — the tip popup and the results menu's buttons (menu::race::{tip_title, Results::tip_ok, buttons, press}).
 #   Popup vtable 0x00455d30: ctor 0x0029aad0 ("Preload Movie"/"Clutch Movie" parts +0xa4/+0xac, their "Mode"
 #   +0xa8/+0xb0, the STR_WARNING field +0xd0); open 0x0029ad60 (button bar +0x8c: one button, icon 0,

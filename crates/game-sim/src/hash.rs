@@ -622,6 +622,11 @@ impl State for crate::race::Race {
             w.f("stage_length", s);
         }
         w.bool("tip_armed", self.tip_armed);
+        // The tip's popup fading in (S334), once the tip has shown: a race before it walks as before.
+        if let Some(run) = self.outro {
+            w.bool("tip_words", self.tip_words);
+            w.f("outro", run);
+        }
         w.f("countdown.length", self.countdown.length);
         w.f("countdown.elapsed", self.countdown.elapsed);
         w.bool("countdown.running", self.countdown.running);

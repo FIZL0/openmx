@@ -664,6 +664,14 @@ pub struct Race {
     pub stage: Option<F>,
     /// The tip clock has been armed from the stage (`+0x474`); it is armed once.
     pub tip_armed: bool,
+    /// The "preload and clutch" popup the tip puts up has a word to show (S334): some player's
+    /// card was not first and never used the preload, or the clutch (the popup's `+0xb4`/`+0xb8`,
+    /// from [`Supercross::race_end`]'s tips). The front end's to say; it picks how long the menu
+    /// takes to fade in over the race ([`OUTRO_FADE`]).
+    pub tip_words: bool,
+    /// The menu's fade-in over the race, from the tip on (S334): the seconds it has run. Once it
+    /// has run its length the race is ticked no more ([`Race::outro_up`]). `None` before the tip.
+    pub outro: Option<F>,
     pub countdown: Countdown,
     /// The race's activity, the countdown's listener (S304): while the countdown runs, its start
     /// timeline is called at the countdown's cadence ([`Countdown::interval`]). `None` — no listener —
@@ -729,6 +737,8 @@ impl Race {
             tip_in: F::ZERO,
             stage: None,
             tip_armed: false,
+            tip_words: false,
+            outro: None,
             countdown: Countdown { length, elapsed: F::ZERO, running: true, interval: WINDOW, acc: F::ZERO },
             activity: None,
             scene_clock: F::ZERO,
@@ -754,8 +764,16 @@ impl Race {
     /// starts them and every later tick runs them ([`Laps`]). Last, the stadium's camera flashes, a
     /// child the score manager's tick walks at its end ([`crate::camera_flash::CameraFlashes::tick`]),
     /// drawing their picks on [`Race::rng`].
+    ///
+    /// The tip puts the "preload and clutch" popup up, fading in over the race (S334): the fade runs
+    /// on from that tick, `dt` a tick after the race's work, and once it has run its length
+    /// ([`OUTRO_FADE`]) the race is ticked no more — no clocks, no laps and no flashes — and the tick
+    /// does nothing ([`Race::outro_up`]).
     pub fn tick(&mut self, dt: F, riders: &[CardFeed]) -> Frame {
         let mut frame = Frame::default();
+        if self.outro_up() {
+            return frame;
+        }
         let started = !self.countdown.running;
         if !(read(self.music_in) <= F::ZERO) && !self.music_held {
             self.music_in = F(fpu::sub(self.music_in.0, dt.0));
@@ -790,6 +808,7 @@ impl Race {
             if self.tip_in <= F::ZERO {
                 frame.tip = true;
                 self.tip_in = F::ZERO;
+                self.outro = Some(F::ZERO);
             }
         } else if let Some(length) = self.stage
             && !self.tip_armed
@@ -829,7 +848,26 @@ impl Race {
         if let Some(flashes) = &mut self.flashes {
             flashes.tick(dt, &mut self.rng);
         }
+        // The menu's fader: it runs while short of its length.
+        if !self.outro_up()
+            && let Some(run) = &mut self.outro
+        {
+            *run = F(fpu::add(run.0, dt.0));
+        }
         frame
+    }
+
+    /// How long the tip's popup takes to fade in over the race: a quarter of a second when it has a
+    /// word to show ([`Race::tip_words`]), three quarters otherwise (the menu's 250 and 750 ms).
+    pub fn outro_fade(&self) -> F {
+        if self.tip_words { OUTRO_FADE[0] } else { OUTRO_FADE[1] }
+    }
+
+    /// The tip's popup has faded in over the race (S334): the race is ticked no more. The fader's
+    /// share of its length, `min(run / length, 1)`, has reached one.
+    pub fn outro_up(&self) -> bool {
+        let Some(run) = self.outro else { return false };
+        !(F(fpu::min(fpu::div(run.0, self.outro_fade().0), 1.0)) < F::ONE)
     }
 
     /// **The drop**, the countdown's end: the music clock set to a second, the gate opened, and the
@@ -841,6 +879,10 @@ impl Race {
         self.scene_clock = F(8.0) + F(5.0) * self.rng.unit();
     }
 }
+
+/// How long the menu takes to fade in over the race when the tip puts its popup up (S334), in
+/// seconds: with a word to show, and without (the menu's 250 and 750 ms over 1000).
+pub const OUTRO_FADE: [F; 2] = [F(0.25), F(0.75)];
 
 /// A caught rider's bike thrown back: the bike's message for it stops the chassis dead
 /// ([`crate::chassis::stop`]) and then makes the push its velocity, `w` and all. The bike is not
