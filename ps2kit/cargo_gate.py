@@ -93,6 +93,49 @@ def changed(cwd: Path, shared: str) -> list[str] | None:
     return sorted(out)
 
 
+def context_changed(cwd: Path, shared: str, dirs: list[str]) -> list[str]:
+    """Files under the git-ignored `context/<dir>/` for each of `dirs` (gate.toml [select] `context`) written
+    after the shared branch's merge-base was committed, as `context/<dir>/…` paths. The worktrees share one
+    context, so a task that re-records a capture or a state in place changes what main's tests read before its
+    code lands, and no commit says so: C39 rewrote s89/across.csv and the merge gate after it, on main's old
+    replay test, went red for a merge that had not done it (K78)."""
+    if not dirs:
+        return []
+    g = lambda *a: subprocess.run(['git', *a], cwd=str(cwd), capture_output=True, text=True)
+    base = g('merge-base', 'HEAD', shared)
+    when = g('log', '-1', '--format=%ct', base.stdout.strip()) if not base.returncode else base
+    if when.returncode or not when.stdout.strip().isdigit():
+        return []
+    since = int(when.stdout.strip())
+    out = []
+    for d in dirs:
+        top = cwd / 'context' / d
+        for here, _, files in os.walk(top):
+            for name in files:
+                p = Path(here) / name
+                try:
+                    if p.stat().st_mtime > since:
+                        out.append(f'context/{d}/{p.relative_to(top).as_posix()}')
+                except OSError:
+                    continue
+    return sorted(out)
+
+
+def _context_words(top: str, f: str) -> list[str]:
+    """What a test that reads `f` (under `top`, `context/capture/`) has in its source: a folder's name in quotes
+    (`.join("s89")`), else the file's name, its stem at a string's start (`"s146-roof`) or the stem's lead up to
+    a dash (`"s89-` of `format!("s89-{name}.eeMemory.bin")`)."""
+    rest = f[len(top):].split('/')
+    if len(rest) > 1:
+        return [f'"{rest[0]}"', f'"{rest[0]}/', top.split('/', 1)[1] + rest[0]]
+    name = rest[0]
+    stem = name.split('.')[0]
+    words = [name, f'"{stem}']
+    if '-' in stem:
+        words.append(f'"{stem.split("-")[0]}-')
+    return words
+
+
 def _workspace(cwd: Path, env: dict) -> list[dict] | None:
     """`cargo metadata --no-deps`'s packages, or None if cargo can't say."""
     r = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=str(cwd), env=env,
@@ -134,7 +177,9 @@ def select(cwd: Path, shared: str, env: dict, sel: dict, why: list[str] | None =
     it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
     one of their names in quotes (`addr("name")`); a file under one of `data` reaches the binaries whose
     sources name its path, or its directory below `data`. A file a `reach` glob matches reaches the binaries
-    whose sources hold one of its words (the kit's own files: the tests that run `kit`). `ignore` globs reach
+    whose sources hold one of its words (the kit's own files: the tests that run `kit`). A file under one of
+    `context`'s git-ignored `context/<dir>/` written since the shared commit (`context_changed`) reaches the
+    binaries naming its folder or file (`_context_words`). `ignore` globs reach
     nothing. Anything else (the
     workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything. `shared` is the
     shared branch, or the commit a merge's gate starts from (`./kit check --since`); `why` gets the reason
@@ -203,11 +248,14 @@ def select(cwd: Path, shared: str, env: dict, sel: dict, why: list[str] | None =
                 dirty(n)
 
     oracle, data = sel.get('oracle'), [str(d).rstrip('/') + '/' for d in sel.get('data', [])]
-    for f in touched:
+    held = [f'context/{str(d).strip("/")}/' for d in sel.get('context', [])]
+    for f in touched + context_changed(cwd, shared, [h[8:-1] for h in held]):
         if any(fnmatch.fnmatch(f, g) for g in sel.get('ignore', [])):
             continue
         path = (root / f).resolve()
-        if f == oracle:
+        if (top := next((h for h in held if f.startswith(h)), None)) is not None:
+            naming(_context_words(top, f))
+        elif f == oracle:
             words = sorted({l[1:].split()[0] for l in _diff_lines(cwd, shared, f)
                             if l[1:].strip() and not l[1:].lstrip().startswith('#')})
             naming([f'"{w}"' for w in words])
