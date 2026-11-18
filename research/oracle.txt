@@ -1276,6 +1276,10 @@ drop_gate_update            boot 0x002ff900 (dt, obj) vt +0x38. With on: step = 
 #                                           turned += step; node_turn(step, node, axis). MoveGateDown's
 #                                           sink to y -100 over MoveTime runs here too (+0x50/+0x54/+0x58)
 drop_gate_snap              boot 0x002ffc50 (obj, activity) the whole turn at once, called by 0x0031a620
+activity_ghost              boot 0x0031a510 the "Ghost" activity class (event type 3), 0x3c0 bytes: base race
+#                                           activity, own vtables at +0x44/+0x58/+0x17c/+0x3a0 (S12)
+activity_ghost_load         boot 0x0031a620 its init: +0xe4 = 5, +0xb0 = 3, base setup, gate props, the drop
+#                                           gate turned at once (drop_gate_snap). Not ported: S12g
 # P313c — MoveGateDown's sink. Static reading only (no save state on a track that sinks). Ported as
 # game_sim::drop_gate::Sink (sim, F) + race_start::GateSwing::pieces (render), Race::sink.
 toy_reader_drop_gate        boot 0x002af2e0 [DropGate] -> scene(app+0x3cc)+0xb4: GateName +0 (0x40),
