@@ -63,6 +63,9 @@ tests = []
 # made each one take an hour (user 2026-11-09: 'i dont want tests to take so long for quicker progress').
 oracle = "research/oracle.txt"
 data = ["research", "tools"]  # a file here reaches the tests that name its path or its directory
+# Captures, states and recordings in the shared, git-ignored context/ written since the base commit reach the tests
+# naming their folder or file: C39 re-recorded s89/across in place and main's replay test went red with no commit (K78).
+context = ["capture", "states", "recordings"]
 ignore = ["*.md", "plan/*", "research/journal/*", ".github/*"]
 
 [select.reach]

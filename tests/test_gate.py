@@ -180,13 +180,14 @@ PICK = {
     'b/Cargo.toml': '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\na = { path = "../a" }\n',
     'b/src/lib.rs': 'pub fn four() -> u32 { a::two() * 2 }\n',
     'b/tests/uses.rs': '#[test]\nfn uses() { assert_eq!(b::four(), 4); }\n',
-    'b/tests/names.rs': '#[test]\nfn names() { let _ = "alpha"; }\n',
+    'b/tests/names.rs': '#[test]\nfn names() { let _ = "alpha"; let _ = "rides"; }\n',
     'c/Cargo.toml': '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n',
     'c/src/lib.rs': 'pub fn one() -> u32 { 1 }\n',
-    'c/tests/alone.rs': '#[test]\nfn alone() { assert_eq!(c::one(), 1); }\n',
+    'c/tests/alone.rs': '#[test]\nfn alone() { assert_eq!(c::one(), 1); let _ = format!("s7-{}.bin", 1); }\n',
     'research/oracle.txt': '# names\nalpha boot 0x00100000 one\nbeta boot 0x00100010 two\n',
     'research/c9/rows.csv': 'a,b\n',
     'gate.toml': '[select]\noracle = "research/oracle.txt"\ndata = ["research"]\nignore = ["*.md"]\n'
+                 'context = ["capture", "states"]\n'
                  '[select.reach]\n"kit/*" = [\'"alpha"\']\n',
     'kit/tool.py': 'x = 1\n',
 }
@@ -202,7 +203,7 @@ def test_select() -> None:
             (w / rel).parent.mkdir(parents=True, exist_ok=True)
             (w / rel).write_text(text)
         g('init', '-q', '-b', 'main', cwd=w)
-        (w / '.gitignore').write_text('target/\ntimes.json\ntimes-cores.json\nlog\nCargo.lock\n')
+        (w / '.gitignore').write_text('target/\ntimes.json\ntimes-cores.json\nlog\nCargo.lock\ncontext/\n')
         g('add', '-A', cwd=w)
         g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base', cwd=w)
         g('checkout', '-qb', 'task/T2', cwd=w)
@@ -235,6 +236,18 @@ def test_select() -> None:
         check(got == {'-p b --test names'}, f"an oracle line: the binary naming it ({sorted(got)})")
         got = ran({'research/c9/rows.csv': 'a,b\n1,2\n'})
         check(got == set(), f'a research file no test names reaches nothing ({sorted(got)})')
+        # The shared, git-ignored context: a capture or state written after the base commit reaches the binaries
+        # naming its folder or its file's lead (K78); one older than the commit reaches nothing.
+        for rel in ('context/capture/rides/one.csv', 'context/states/s7-two.bin', 'context/capture/old/x.csv'):
+            (w / rel).parent.mkdir(parents=True, exist_ok=True)
+            (w / rel).write_text('x\n')
+        then = int(g('log', '-1', '--format=%ct', cwd=w).stdout.strip())
+        os.utime(w / 'context/capture/old/x.csv', (then - 100, then - 100))
+        for rel in ('context/capture/rides/one.csv', 'context/states/s7-two.bin'):
+            os.utime(w / rel, (then + 5, then + 5))
+        got = ran({})
+        check(got == {'-p b --test names', '-p c --test alone'}, f're-recorded context: the binaries naming it ({sorted(got)})')
+        shutil.rmtree(w / 'context')
         got = ran({'kit/tool.py': 'x = 2\n'})
         check(got == {'-p b --test names'}, f'a reach glob: the binaries holding its words ({sorted(got)})')
         got = ran({'notes.md': 'hi\n'})
