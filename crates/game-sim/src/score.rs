@@ -603,6 +603,11 @@ pub struct AtvRows {
     /// the front flip's watches read, as the original's backflip reads the node it left the frame
     /// before.
     pub heights: (F, F),
+    /// The bike was off the ground as the frame started (S472): the original's backflip reads the
+    /// ground word the frame before left, as it reads the heights, so on the frame the wheels touch
+    /// its clip still runs and its node still grows. Only the next frame ends it — with the clip
+    /// part way round, in the wreck, whose cancel loses the node.
+    pub aloft: bool,
     /// The backflip's or the 360's move is still on (S411): its stunt word stays held past the clip
     /// until the move itself ends, which on a landing is a frame or so after the wheels touch.
     pub move_on: bool,
@@ -867,8 +872,9 @@ impl Score {
             }
         }
         // The backflip: started over the top, ended round; a watch forgotten part way ends it too.
-        // Both watches read the heights the frame started with (S411).
-        let s = &Sense { up_y: rows.heights.0, forward_y: rows.heights.1, ..*s };
+        // Both watches read the heights the frame started with (S411), and whether the bike was up
+        // then (S472).
+        let s = &Sense { up_y: rows.heights.0, forward_y: rows.heights.1, airborne: rows.aloft, ..*s };
         let was = self.flip;
         if rows.flip_torque || !s.airborne || s.wrecked {
             self.watch_flip(s);

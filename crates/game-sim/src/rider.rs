@@ -1390,6 +1390,8 @@ impl Rider {
                     trick_running: tricks.in_progress,
                     // S411: the original's backflip reads the frame the bike started this one in.
                     heights: (F(riding_from.0.0[1].y()), F(riding_from.0.0[2].y())),
+                    // S472: and whether the bike was up as the frame started.
+                    aloft: was_airborne,
                     move_on: ride.air.flipping || ride.air.flip_active || t.spin.active,
                     flip_torque: ride.air.flip_torque_applied && !front_row,
                     front_torque: ride.air.flip_torque_applied && front_row,

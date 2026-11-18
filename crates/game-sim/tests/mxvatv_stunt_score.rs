@@ -339,10 +339,10 @@ struct Ride {
     nodes: Vec<Node>,
 }
 
-/// An S411 capture, or `None` (and a skip) without it.
-fn ride(name: &str) -> Option<Vec<Ride>> {
+/// An S411 or S472 capture (`task` its folder), or `None` (and a skip) without it.
+fn ride(task: &str, name: &str) -> Option<Vec<Ride>> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let path = kit.ctx("capture").join("s411").join(format!("{name}.csv"));
+    let path = kit.ctx("capture").join(task).join(format!("{name}.csv"));
     let Ok(text) = std::fs::read_to_string(&path) else {
         skip(&format!("{} is not there: capture it with research/s411/play.sh", path.display()));
         return None;
@@ -389,7 +389,9 @@ fn ride(name: &str) -> Option<Vec<Ride>> {
 /// 360's node off its clip, then the frame (the bank's clock and the backflip's watch), then the
 /// manager's growth; and compared on every row with the original's card and bank clock. A frame
 /// the recorder missed is run on the next row's words, and must change none of them; a row read late
-/// holds the next frame (the next row's words exactly), and the next row is no frame on.
+/// holds the next frame (the next row's words exactly), and the next row is no frame on. On the
+/// frame the original's wreck count goes up the rider's wreck entry runs first (S472: the card's
+/// crash, the 360 and the front flip watch forgotten), and the frames after it are wrecked.
 fn ride_the_port(name: &str, rows: &[Ride]) {
     let mut frame: Vec<u32> = rows.iter().map(|r| r.vsync / 2).collect();
     for k in (0..rows.len() - 1).rev() {
@@ -404,10 +406,16 @@ fn ride_the_port(name: &str, rows: &[Ride]) {
     let dt = F::from_bits(DT);
     for k in 1..rows.len() {
         let (was, r) = (&rows[k - 1], &rows[k]);
-        assert_eq!(r.wrecks, rows[0].wrecks, "{name}: no wreck in these rides");
         let ticks = frame[k] - frame[k - 1];
+        let crash = r.wrecks != was.wrecks;
+        if crash {
+            assert_eq!((ticks, r.wrecks - was.wrecks), (1, 1), "{name}: one wreck, on a frame the recorder has at {}", r.vsync);
+            port.crashed();
+            front = 0;
+        }
+        let wrecked = r.wrecks != rows[0].wrecks;
         if ticks > 1 {
-            let same = |r: &Ride| (r.ground, r.clip, r.spin, r.move_on, r.flags & 0x60, r.nodes.len());
+            let same = |r: &Ride| (r.ground, r.clip, r.spin, r.move_on, r.flags & 0x60, r.nodes.len(), r.wrecks);
             assert_eq!(same(was), same(r), "{name}: the recorder missed a frame that changed something at {}", r.vsync);
         }
         for _ in 0..ticks {
@@ -419,13 +427,14 @@ fn ride_the_port(name: &str, rows: &[Ride]) {
                 port.atv_end(id);
             }
             hang = if r.ground { F::ZERO } else { hang + dt };
-            let s = score::Sense { front: r.ground, rear: r.ground, airborne: !r.ground, hang_time: hang, up_y: r.heights.0, forward_y: r.heights.1, ..Default::default() };
+            let s = score::Sense { front: r.ground, rear: r.ground, airborne: !r.ground, hang_time: hang, wrecked, up_y: r.heights.0, forward_y: r.heights.1, ..Default::default() };
             let rows = score::AtvRows {
                 backflip: score::ATV_BACKFLIP,
                 wheelie: score::ATV_WHEEL,
                 stoppie: score::ATV_WHEEL,
                 trick_running: false,
                 heights: was.heights,
+                aloft: !was.ground,
                 move_on: r.move_on,
                 flip_torque: r.flip_torque,
                 front_torque: false,
@@ -463,7 +472,7 @@ fn first(rows: &[Ride], from: usize, f: impl Fn(&Ride) -> bool) -> usize {
 /// port's card, run on the same rows, matches the original's on every row.
 #[test]
 fn the_backflip_calls_come_when_the_originals_do() {
-    let Some(rows) = ride("flip2") else { return };
+    let Some(rows) = ride("s411", "flip2") else { return };
     let start = first(&rows, 1, |r| r.clip == 1);
     let over = first(&rows, start, |r| r.clip == 2);
     let round = first(&rows, over, |r| r.clip == 0);
@@ -495,7 +504,7 @@ fn the_backflip_calls_come_when_the_originals_do() {
 /// rows with its 360 node off the clip, matches the original's on every row.
 #[test]
 fn the_three_sixty_starts_held_on_its_clip() {
-    let Some(rows) = ride("spin3") else { return };
+    let Some(rows) = ride("s411", "spin3") else { return };
     let start = first(&rows, 1, |r| r.spin != 0);
     let round = first(&rows, start, |r| r.spin == 0);
     let n = &rows[start].nodes;
@@ -508,4 +517,59 @@ fn the_three_sixty_starts_held_on_its_clip() {
     let banked = first(&rows, down, |r| r.flags & 0x20 == 0);
     assert_eq!((gone - down, banked - gone), (1, 6), "the move ends a frame down, the bank six frames on");
     ride_the_port("spin3", &rows);
+}
+
+/// S472: a move landed with its clip running, on the original's ride, and the wreck it ends in. The
+/// clip and the node run on through the frame the wheels touch (the move reads the ground word the
+/// frame before left), the node grown one frame more; the next frame wrecks, and the wreck's cancel
+/// loses it — no node, the combo closed, nothing on the total. The bank's clock, held up on the
+/// stunt word that frame started with, is put back to 0.2 and run down once more on the wreck's
+/// frame, as on the frame before, then counts down on the frames the wrecked bike is on the ground
+/// only, and stops at or under 0. Then the port's card, run on the same rows with the rider's
+/// wreck entry on the wreck's frame, matches the original's on every row.
+fn landed_mid_clip(name: &str, rows: &[Ride], clip: impl Fn(&Ride) -> u32, id: u32) {
+    let start = first(rows, 1, |r| clip(r) != 0);
+    let down = first(rows, start, |r| r.ground);
+    let wreck = down + 1;
+    for k in [start, down, wreck] {
+        assert_eq!(rows[k].vsync - rows[k - 2].vsync, 4, "{name}: the rows either side of {k} are all there");
+    }
+    assert!(rows[..wreck].iter().all(|r| r.wrecks == rows[0].wrecks), "{name}: no wreck before");
+    assert_eq!(rows[wreck].wrecks, rows[0].wrecks + 1, "{name}: the wreck on the frame after the wheels touch");
+    assert_eq!(clip(&rows[down]), clip(&rows[down - 1]), "{name}: the clip runs on through the touch");
+    assert_ne!(clip(&rows[down]), 0, "{name}: landed with its clip running");
+    let (n, m) = (&rows[down].nodes, &rows[down - 1].nodes);
+    assert_eq!((n.len(), n[0].id, n[0].flags), (1, id, 0x3d), "{name}: the node live on the touch");
+    assert!(m[0].points < n[0].points, "{name}: and grown");
+    let w = &rows[wreck];
+    assert_eq!((clip(w), w.nodes.len(), w.flags & 0x60, w.total, w.combo), (0, 0, 0, rows[0].total, 0), "{name}: lost in the wreck");
+    // The clock: 0.2 less a frame on the touch and again on the wreck, then down on the ground only.
+    assert_eq!((rows[down].bank, w.bank), (0x3e2a_ab8a, 0x3e2a_ab8a), "{name}: the bank's clock");
+    for k in wreck + 1..rows.len() {
+        let (a, b) = (F::from_bits(rows[k - 1].bank), F::from_bits(rows[k].bank));
+        if rows[k].ground && F::ZERO < a {
+            assert!(b < a, "{name}: counted on the ground at {}", rows[k].vsync);
+        } else {
+            assert_eq!(a, b, "{name}: held at {}", rows[k].vsync);
+        }
+    }
+    ride_the_port(name, rows);
+}
+
+/// S472: two backflips landed short with the clip at 2, both wrecked (`flipw30`, `flipw38`:
+/// `research/s411/flipw*.pad`, flip.pad with the stick pulled back 30 and 38 ticks). flipw30's
+/// wrecked bike leaves the ground with the clock at 0.033, which holds there until it is down again.
+#[test]
+fn a_backflip_landed_mid_clip_is_lost_in_the_wreck() {
+    for name in ["flipw30", "flipw38"] {
+        let Some(rows) = ride("s472", name) else { return };
+        landed_mid_clip(name, &rows, |r| r.clip, 41);
+    }
+}
+
+/// S472: a right 360 landed with its clip running and wrecked (`spin2`: `research/s411/spin2.pad`).
+#[test]
+fn a_three_sixty_landed_mid_clip_is_lost_in_the_wreck() {
+    let Some(rows) = ride("s472", "spin2") else { return };
+    landed_mid_clip("spin2", &rows, |r| r.spin, 45);
 }

@@ -1,0 +1,24 @@
+# S411: start.p2s is paused on the quit dialog with NO lit. Cross takes NO, Start resumes, gas from tick 66;
+# the probe left the first lip at row 140 and landed at row 185.
+down cross
+sleep 3t
+up cross
+sleep 30t
+down start
+sleep 3t
+up start
+sleep 30t
+down cross
+# S472: flip.pad with the stick back 30t, not 50: the backflip lands short with its clip running (a wreck).
+# R1 and the stick forward on the climb, back on the lip, R1 held through the air; the bike rides on down.
+sleep 42t
+down r1
+stick l 0 -1
+sleep 20t
+stick l 0 1
+sleep 30t
+stick l 0 0
+up r1
+sleep 140t
+release
+sleep 10t
