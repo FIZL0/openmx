@@ -5022,31 +5022,50 @@ impl<'a> Racing<'a> {
     /// AI path `net`; the race track's own paths; the line gate's centre and normal; and the score
     /// manager's flag word (`+0x5c`) as the race word.
     ///
-    /// The card's next gate is `None`: the laps' cards keep a gate only as an index into a gate race's
-    /// list, which [`crate::race::Laps`] does not hold (a lap race's cards have none, as sx01's). With
-    /// no `laps` (no race, or a start alone) there is no race or card, and the drivers answer false,
-    /// as the original's do with a null race; a player with no card in the laps drives with no card.
+    /// The card's next gate (its `+0x80`) is the one its [`crate::race::LapCard::gate`] indexes in the
+    /// laps' checkpoint list, which in a gate race is the chain of gates (S376): the gate driver reads
+    /// its flags, centre, normal, side facing, speed and spot, the crossing test the whole gate. A lap
+    /// race's cards have none, as sx01's. With no `laps` (no race, or a start alone) there is no race
+    /// or card, and the drivers answer false, as the original's do with a null race; a player with no
+    /// card in the laps drives with no card.
     pub fn of(laps: Option<&'a crate::race::Laps>, player: usize, net: Option<&'a mut crate::race::TrackPaths>) -> Racing<'a> {
         let race = laps.map(|l| drive::Race { kind: l.rules.lap.kind, track_reach: l.track.ahead, line_spot: l.course.line_spot });
-        let card = laps.and_then(|l| l.card(player)).map(|c| drive::Card {
-            flags: c.flags,
-            to_line_kept: c.to_line_kept,
-            to_line: c.to_line,
-            on_track: c.on_track as u32,
-            seen: c.seen,
-            kept_spot: c.kept_spot,
-            gate: None,
-        });
+        let (card, gate) = laps.map_or((None, None), |l| race_card(l, player));
         Racing {
             race,
             card,
             net,
             track: laps.map(|l| &*l.track),
-            gate: None,
+            gate,
             line: laps.map(|l| (l.course.line.centre, l.course.line.normal)),
             race_word: laps.map(|l| l.rules.lap.flags),
         }
     }
+}
+
+/// Player `player`'s card in `laps` as the drivers read it, and its next gate as the crossing test
+/// does: the gate its [`crate::race::LapCard::gate`] indexes in the checkpoint list (a gate race's
+/// chain of gates), `None` for none or for an index past the list.
+fn race_card(laps: &crate::race::Laps, player: usize) -> (Option<drive::Card>, Option<crate::race::Gate>) {
+    let Some(l) = laps.card(player) else { return (None, None) };
+    let next = l.gate.and_then(|i| laps.lists.checkpoints.get(i));
+    let card = drive::Card {
+        flags: l.flags,
+        to_line_kept: l.to_line_kept,
+        to_line: l.to_line,
+        on_track: l.on_track as u32,
+        seen: l.seen,
+        kept_spot: l.kept_spot,
+        gate: next.map(|g| drive::Gate {
+            flags: g.gate.flags,
+            centre: g.gate.centre,
+            normal: g.gate.normal,
+            side: g.side,
+            speed: g.speed,
+            spot: g.spot,
+        }),
+    };
+    (Some(card), next.map(|g| g.gate))
 }
 
 /// What a [`Racer::tick`] asks of the rest of the game.
@@ -6480,24 +6499,16 @@ impl Pilot {
 /// saw the rider and its kept spot; the race track's paths and its line gate's centre and normal;
 /// the manager's flag word (its `+0x5c`); and `net`, the lane's AI net.
 ///
-/// The card's next gate is `None`: the laps keep no chain of gates (only a gate race has one, and
-/// only the gate driver, mode 4, reads it).
+/// The card's next gate is the one its lap card's gate indexes in the laps' checkpoint list, a gate
+/// race's chain of gates (S376, as [`Racing::of`]); a lap race's cards have none.
 pub fn racing_of<'a>(laps: &'a crate::race::Laps, player: usize, net: Option<&'a mut crate::race::TrackPaths>) -> Racing<'a> {
-    let card = laps.card(player).map(|l| drive::Card {
-        flags: l.flags,
-        to_line_kept: l.to_line_kept,
-        to_line: l.to_line,
-        on_track: l.on_track as u32,
-        seen: l.seen,
-        kept_spot: l.kept_spot,
-        gate: None,
-    });
+    let (card, gate) = race_card(laps, player);
     Racing {
         race: Some(drive::Race { kind: laps.rules.lap.kind, track_reach: laps.track.ahead, line_spot: laps.course.line_spot }),
         card,
         net,
         track: Some(&laps.track),
-        gate: None,
+        gate,
         line: Some((laps.course.line.centre, laps.course.line.normal)),
         race_word: Some(laps.rules.lap.flags),
     }

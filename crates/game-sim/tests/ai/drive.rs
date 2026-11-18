@@ -1123,6 +1123,19 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
                 ee.set_u32(stand + 0x94 + k, ee.u32_at(b + 0x220 + k));
             }
             ee.set_u32(card_at + 0x80, stand);
+            // S376: and it is the race's whole chain of gates (the manager's `+0x70`, next `+0x90`),
+            // which the gate driver does not read but the port's laps feed the card's gate from.
+            ee.set_u32(stand + 0x90, 0);
+            ee.set_u32(race_at + 0x70, stand);
+            // The last brain's is a side gate, with a facing across the line's and a speed of its
+            // own, so the side gate's words are fed too.
+            if b == S282C_RIDERS[2] {
+                ee.set_u32(stand + 0x30, ee.u32_at(stand + 0x30) | drive::SIDE_GATE);
+                for k in (0..16).step_by(4) {
+                    ee.set_u32(stand + 0xb0 + k, ee.u32_at(line_at + 0x60 + k));
+                }
+                ee.set_u32(stand + 0xa4, 37.5f32.to_bits());
+            }
         }
         let gate_at = ee.u32_at(card_at + 0x80);
         let (_, race, card, _, _) = read_drive(&ee, b);
@@ -1148,7 +1161,13 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
         let race_word = ee.u32_at(race_at + 0x5c);
         // S332: the race driver drives by the Sim's race as `Pilot::think` hands it on
         // (`Racing::of`), over laps holding the image's race, track and card.
-        let mut laps = (mode == 2).then(|| s332_laps(&ee, race_at, card_at, line_at, &track, &on_track));
+        // S376: the gate driver too, the card's gate an index into the laps' chain of gates.
+        let mut laps = Some(s332_laps(&ee, race_at, card_at, line_at, &track, &on_track));
+        if mode == 4 {
+            let l = laps.as_mut().unwrap();
+            (l.lists.checkpoints, l.cards[0].card.lap.gate) = s376_chain(&ee, race_at, gate_at, &on_net);
+            assert_eq!(l.cards[0].card.lap.gate, Some(0), "{b:#x}: the card waits at the chain's first gate");
+        }
         assert_eq!((racer.brain.mode, racer.brain.flags), (mode, flags), "{b:#x}: the stand-in's words");
         bike.path_net = with_net;
         assert_eq!(racer.brain.flags & flag::KEEP_ON_TRACK, 0, "{b:#x}: the avoidance's edge push needs the track's edge");
@@ -1307,6 +1326,33 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
 /// `+0x38` the laps keep as their ahead reach) and line gate (the track's `+0x5c`) with the line's spot,
 /// and brain's card as player 0's (its flags at `+8`, its distances to the line, on-the-track word,
 /// step and kept spot). Everything else is the laps' defaults, which the drivers do not read.
+/// S376: a race's chain of gates as the laps hold it, from the manager's `+0x70` along each gate's
+/// `+0x90` (each spot on the AI net, as `on_net` reads it), and where in it the gate at `gate_at` is.
+fn s376_chain(ee: &Ee, race_at: u32, gate_at: u32, on_net: &dyn Fn(u32) -> Spot) -> (Vec<game_sim::race::ListGate>, Option<usize>) {
+    use super::sim::s12e_f;
+    let quad = |a: u32| raw(got(ee, a));
+    let mut chain = Vec::new();
+    let mut at = ee.u32_at(race_at + 0x70);
+    let mut index = None;
+    while at != 0 {
+        if at == gate_at {
+            index = Some(chain.len());
+        }
+        let gate = game_sim::race::Gate {
+            flags: ee.u32_at(at + 0x30),
+            centre: quad(at + 0x40),
+            normal: quad(at + 0x50),
+            across: quad(at + 0x60),
+            width: s12e_f(ee, at + 0x70),
+            height: s12e_f(ee, at + 0x74),
+            reach_sq: s12e_f(ee, at + 0x7c),
+        };
+        chain.push(game_sim::race::ListGate { gate, spot: on_net(at + 0x94), side: quad(at + 0xb0), speed: s12e_f(ee, at + 0xa4) });
+        at = ee.u32_at(at + 0x90);
+    }
+    (chain, index)
+}
+
 fn s332_laps(
     ee: &Ee, race_at: u32, card_at: u32, line_at: u32, track: &game_sim::race::TrackPaths, on_track: &dyn Fn(u32) -> Spot,
 ) -> game_sim::race::Laps {

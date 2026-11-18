@@ -1089,7 +1089,7 @@ wire!(crate::race::WatchRules { jump_settle, off_after, off_blink, off_nag, wron
 wire!(crate::race::LapRules { flags, kind, laps, ghost_runs, record_limit, free_records, finish_wait, finish_clock, time_limit });
 wire!(crate::race::Course { line, line_spot, lap_length });
 wire!(crate::race::LineLists { checkpoints, others, reach });
-wire!(crate::race::ListGate { gate, spot });
+wire!(crate::race::ListGate { gate, spot, side, speed });
 wire!(crate::race::Entry { player, card, stats });
 // A bike's statistics tracker (S319): what the results menu shows at the race's end.
 wire!(crate::race::Tracker { laps_led, times_in_lead, passes, times_passed, wrecks, preloads, clutches, preload_held, clutch_held, entries_seen });

@@ -6331,7 +6331,7 @@ fn the_line_lists_match_the_race_handlers_card_stretch() {
             if p.below(6) == 0 {
                 gate.flags &= !flags::CLOSED;
             }
-            ListGate { gate, spot }
+            ListGate { gate, spot, side: Vf::default(), speed: F::ZERO }
         };
         let lists = LineLists {
             checkpoints: (0..p.below(5)).map(|_| make(&mut p, &t)).collect(),
@@ -10301,7 +10301,7 @@ fn the_card_join_matches_the_score_managers_join() {
         let has_line = p.below(5) != 0;
         let n = p.below(4) as usize;
         let lists = LineLists {
-            checkpoints: (0..n).map(|_| ListGate { gate: finish_line(&mut p), spot: Spot::default() }).collect(),
+            checkpoints: (0..n).map(|_| ListGate { gate: finish_line(&mut p), spot: Spot::default(), side: Vf::default(), speed: F::ZERO }).collect(),
             ..LineLists::default()
         };
         let kind = [race_kind::RACE, race_kind::PRACTICE, race_kind::GHOST_RACE, 0][p.below(4) as usize];
