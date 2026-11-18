@@ -27,8 +27,8 @@ at ~15,000 ft/s along it (R14). With `bones` the same delta also moves every tri
 in the body actor's neighbourhood (actor - 0x2800 .. vehicle + 0x2800), the parts array and the
 bodies after it, and the nine bone collisions.
 
-After the load it rides 30 frames (no pad) before it pauses; `ride=0` teleports on the loaded frame
-itself (B15: a state saved mid-jump, research/b15_recording2_state.py's).
+After the load it rides 30 frames (no pad) before it pauses; `ride=0` teleports as soon after the load
+as the pause lands (B15/C37: a state saved mid-jump, research/c37/south3.sh's).
 Run it under `./kit pcsx2 with --`, with PCSX2 started under QT_ACCESSIBILITY=1.
 """
 
@@ -95,11 +95,22 @@ def f3(a):
     return struct.unpack('<3f', p.read_block(a, 12))
 
 
-if RIDE == 0 and not paused():   # a load keeps the VM paused
+if RIDE == 0:
+    # C37: a paused copy ignores a load, so load running and pause at once (a frame or two passes;
+    # the image is the frame it stops on).
+    if paused():
+        A.press(item)
+        wait(0.5)
+    start = p.read32(FRAME)
+    p.load_state(STATE)
+    end = time.time() + 10
+    while p.read32(FRAME) >= start and time.time() < end:
+        pass
     A.press(item)
-    wait(0.5)
-p.load_state(STATE)
-wait(1.0)
+    wait(1.0)
+else:
+    p.load_state(STATE)
+    wait(1.0)
 if RIDE:
     # Run a while past the load: on the loaded frame itself the image is not a ridden tick's (R14
     # saw the port wreck a tick early from one, which B16 found was the test's seeding), and the
