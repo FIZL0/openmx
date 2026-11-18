@@ -913,8 +913,9 @@ fn clock_matches(clock: &[(F, F)], from: usize) {
 /// the landing after it, and on along the ground to row 254, its clock the row's from row 140. Row 180
 /// itself was read before the tick's tail: it is the port's tick with the put-back held off. MD198: no
 /// map-edge throw on the way (the image's edge word is off in Free Ride); on row 255 the quad strikes
-/// the stadium's side wall (`FP01A_A.col`, [`solids`]) and wrecks, where the port's bounce is not yet
-/// the original's (MD198a).
+/// the stadium's side wall (`FP01A_A.col`, [`solids`]) and wrecks. MD198a: the wall contact and the
+/// record's push-out are the original's, and the next tick's record files nothing on both (the wreck
+/// rays keep their old frame), but row 256's body is not yet the original's.
 #[test]
 fn untamed_quad_replays_md147_hazard_time_through_the_put_back() {
     let Some(kit) = kit() else { return };

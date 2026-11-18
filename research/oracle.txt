@@ -13955,6 +13955,22 @@ atv_binding_lookup          atv 0x00118e10 = (controls *(*0x003eab60), cmd, 2, 1
 #   -0.4201, -0.2027): its hits' normal speeds pass -10 only with the original's quad.
 #   Same tick the quad's left front wheel's sweep lands on the bale (wheel +0xdc and +0xd4 set, substeps 1-4; the
 #   wheels at quad +0x17f0): ~220 lb more up force than the port's after the first resolve; not ported.
+# MD198a — Untamed's (SLUS-21701) quad strike on Rocksbury's stadium side wall (FP01A_A.col), hazard-time ticks
+# 253-258 (game_sim::quad::Ride::record_on/record_among/swap, Recorded::kept, RecordOn::stood; tests/
+# untamed_race_quad.rs). Read off MD147's hazard-time image and MD224's capture, as # MD81a comment rows.
+# Journal: research/journal/2026-11-18-md198a-stadium-wall-strike.
+#   PostProcess 0x004dbdd0 (via 0x004f1270 / 0x004e9790) writes record +0x24 (heightfield rays on) = up.y <= 0.25
+#   every tick: the record's next pass reads it.
+#   Record 0x01c326b0 (quad 0x01be4760 +0xf8), body 0x01be6de0. Parts: riding rays 0x01be7020 (quad +0xfc, +0x108),
+#   chassis mesh 0x01c314e0 (+0x100, ATV_R_Chassis.col), trigger 0x01c45cf0, wreck rays 0x01c45ec0. Record +0x200
+#   the active part, +0x204/+0x208 the others, +0x20c struck. A part's frame (collidable +0x130) is synced only
+#   while it is active: the wreck rays swapped in on tick 255 keep their identity frame at (395.8, 3.76, 155.9),
+#   so tick 256's pass files no contacts.
+#   Wreck entry 0x004fa390: vt +0x4a0, vt +0x4a8(-1), vt +0x398(0) (takes the chassis mesh out of the world),
+#   vt +0x484 (the swap to the wreck rays), the zeroes, then the base wreck 0x004cbc60 (damping only when quad
+#   +0xbac is not 0 or 1; 1 here). Tick 255: the wall contact and push-out agree (hit points within 2e-5 along
+#   the normal); tick 256's body does not (35 words), with the record's list empty on both.
+
 # S328d — C33's render-pass draws (crates/game-sim/tests/ai/draws.rs runs the render in Ee each frame:
 #   Ee::io holds the hardware registers, the kernel calls return 0, the three waits below are hooked).
 #   The render's only draws on the shared generator are track_strip_add's row height jitter (return

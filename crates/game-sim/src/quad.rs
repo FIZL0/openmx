@@ -4361,6 +4361,10 @@ pub struct RecordOn<'a> {
     pub category: u32,
     /// Another record a hit names: none ever is on an MX Unleashed world, so this is never reached.
     pub nobody: crate::handling::record::Record,
+    /// MD198a: the frame the world rays are stood at in place of the node's, the part's own while
+    /// it has not been synced since [`Ride::swap`] put it in ([`Recorded::kept`]); the sweep's
+    /// placing of the part brings it to the node.
+    pub stood: Option<[Vf; 4]>,
 }
 
 /// How far the terrain's box reaches on a world with no map edge.
@@ -4456,13 +4460,17 @@ impl crate::handling::record::Collides for RecordOn<'_> {
     }
     fn place_part(&mut self) {
         // The rays are stood at the node's frame when they are searched.
+        self.stood = None;
     }
     fn part_rays(&self) -> Vec<[Vf; 2]> {
         self.rays.to_vec()
     }
     fn search(&mut self, _nearby: bool) -> Vec<crate::handling::record::Hit> {
         let rays = self.rays;
-        let stood: Vec<[Vf; 2]> = rays.iter().map(|[a, b]| [self.scene.tip(0, *a), self.scene.tip(0, *b)]).collect();
+        let stood: Vec<[Vf; 2]> = match self.stood {
+            Some(m) => rays.iter().map(|[a, b]| [crate::atv_moto::frame_point(&m, *a), crate::atv_moto::frame_point(&m, *b)]).collect(),
+            None => rays.iter().map(|[a, b]| [self.scene.tip(0, *a), self.scene.tip(0, *b)]).collect(),
+        };
         let hits = self.sweep_segments(&stood);
         rays.iter()
             .zip(hits)
@@ -4747,12 +4755,21 @@ pub struct Recorded {
     /// MD133a's: the wreck body's lists, parts and trigger segments ([`Ride::build_wreck`],
     /// [`Ride::shape_trigger`]).
     pub parts: WreckParts,
+    /// MD198a: the part [`Ride::swap`] put in is not yet synced to the node: the next pass stands
+    /// its world rays at the part's own frame (the original's part frame `+0x130`, synced after the
+    /// world step, before the wreck test swaps).
+    pub kept: bool,
 }
 
 impl Recorded {
     /// The rays the record runs on: the wreck rays once [`swap_rays`] put them in, else the riding.
     pub fn active(&self) -> &[[Vf; 2]] {
-        if self.rays.active == self.rays.wreck && self.rays.wreck != self.rays.riding { &self.wreck } else { &self.riding }
+        if self.active_part() == Part::Wreck { &self.wreck } else { &self.riding }
+    }
+
+    /// The part whose rays [`Recorded::active`] gives.
+    pub fn active_part(&self) -> Part {
+        if self.rays.active == self.rays.wreck && self.rays.wreck != self.rays.riding { Part::Wreck } else { Part::Riding }
     }
 }
 
@@ -5093,12 +5110,17 @@ impl<R: Moto + Default> Ride<R> {
     /// [`crate::handling::record::pass`] on [`RecordOn`]), before the steps: the pass's contacts into
     /// the held list ([`crate::atv_contact::Held::refill`]) the gravity's call resolves
     /// ([`Bike::contacts`]), the record's touch and its struck object's class into [`Bike::touching`]
-    /// and [`Bike::struck_class`], and the damping the clear gives the body.
+    /// and [`Bike::struck_class`], and the damping the clear gives the body. The heightfield rays are
+    /// on as the last frame's air state left [`Quad::tipped`] (MD198a: the original's PostProcess
+    /// writes it into the record).
     pub fn record_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
         let Some(r) = self.recorded.as_mut() else { return };
+        r.record.heightfield = self.q.tipped;
         let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
         let rays = r.active().to_vec();
-        let mut on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
+        let stood = r.kept.then(|| self.bike.parts.collidables.states[crate::atv_sync::slot(r.active_part())].frame);
+        r.kept = false;
+        let mut on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default(), stood };
         crate::handling::record::clear(&mut r.record, &mut on);
         let mut view = self.body.view();
         let body = if r.record.body { Some(&mut view) } else { None };
@@ -5135,15 +5157,18 @@ impl<R: Moto + Default> Ride<R> {
         for k in knocked.iter_mut() {
             if k.awake() {
                 let mut scene = k.scene();
-                let mut on = RecordOn { world: &mut *world, scene: &mut scene, rays: &[], damped: None, category: 0, nobody: Default::default() };
+                let mut on = RecordOn { world: &mut *world, scene: &mut scene, rays: &[], damped: None, category: 0, nobody: Default::default(), stood: None };
                 crate::handling::record::clear(&mut k.record, &mut on);
             } else {
                 k.record.contacts.clear();
             }
         }
+        r.record.heightfield = self.q.tipped;
         let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
         let rays = r.active().to_vec();
-        let on = RecordOn { world: &mut *world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
+        let stood = r.kept.then(|| self.bike.parts.collidables.states[crate::atv_sync::slot(r.active_part())].frame);
+        r.kept = false;
+        let on = RecordOn { world: &mut *world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default(), stood };
         let mut among = RecordAmong { on, knocked: &mut *knocked, tree: None };
         crate::handling::record::clear(&mut r.record, &mut among);
         let mut view = self.body.view();
@@ -5173,7 +5198,7 @@ impl<R: Moto + Default> Ride<R> {
                 let mut scene = k.scene();
                 let tree = k.own.as_ref().map(|o| o.rays.clone());
                 let own_rays = tree.as_ref().map(|t| t.pairs()).unwrap_or_default();
-                let on = RecordOn { world: &mut *world, scene: &mut scene, rays: &own_rays, damped: None, category: HULL_CATEGORY, nobody: Default::default() };
+                let on = RecordOn { world: &mut *world, scene: &mut scene, rays: &own_rays, damped: None, category: HULL_CATEGORY, nobody: Default::default(), stood: None };
                 let mut among = RecordAmong { on, knocked: std::slice::from_mut(&mut *hull), tree };
                 let b = k.body.as_mut().expect("an awake body");
                 let mut view = b.body.view();
@@ -5288,9 +5313,16 @@ impl<R: Moto + Default> Ride<R> {
     /// one swapped to in the world already.
     pub fn swap(&mut self, wrecked: bool) {
         let Some(r) = self.recorded.as_mut() else { return };
+        // MD198a: the part going out was synced to the node after this frame's step; the one coming
+        // in keeps the frame it was last synced at until the next pass ([`Recorded::kept`]).
+        let from = r.active_part();
+        let mut scene = self.bike.parts.scene;
+        scene.update(0);
+        self.bike.parts.collidables.states[crate::atv_sync::slot(from)].frame = scene.nodes[0].world;
         let mut view = self.body.view();
         swap_rays(&mut r.rays, wrecked, true, &mut self.q, &mut view, &mut self.rest);
         self.body.set_view(&view);
+        r.kept = r.active_part() != from;
     }
 
     /// **The wreck test, its clock and the put-back** (MD133: [`crate::handling::wreck::wreck_test`]
@@ -6061,6 +6093,7 @@ impl<R: Moto + Default> Ride<R> {
             wreck: Vec::new(),
             rays: Rays { active: RIDING_RAYS, active_too: RIDING_RAYS, record: RIDING_RAYS, wreck: RIDING_RAYS, riding: RIDING_RAYS },
             parts: WreckParts::default(),
+            kept: false,
         });
         let body = WreckBody { riding: Col::made(RIDING_RAYS), ..WreckBody::default() };
         self.build_wreck(&body, read, TRIGGER_PROBE, WRECK_RAYS, QUAD_ACTOR, |_| 0);
