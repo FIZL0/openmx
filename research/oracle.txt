@@ -887,6 +887,16 @@ race_intro_end              boot 0x002fd630 (activity, fade) cameras stopped by 
 #                                           (no chassis test) word +0x14 = 0. Supercross::end_intro
 scene_camera_cut            boot 0x001ffbc0 (camera, a, b) the scene camera's cut/stop; presentation
 hud_overlay_show            boot 0x002a8560 (overlay) shows a HUD overlay (+0xd0 +0x54 == 0 -> on)
+hud_overlay_hide            boot 0x002a85d0 (overlay) hides the 30 second board (+0xd0) if up: alpha,
+#                                           scale (node +0x74 +0x60), turn (+0x64) 0; +0xd4..+0xf4 0 (P375)
+race_overlay_tick           boot 0x002a7da0 (overlay, dt f12) RacingOverlays' tick: the board's moves
+#                                           +0xd4 in / +0xdc turn / +0xd8 out, each 0.25 s on clock +0xe0
+#                                           (out holds 0.25 s first; turn to -pi/2); then +0xe0 += dt and,
+#                                           with +0xe4, +0xe8 += dt and race_overlay_board (P375)
+race_overlay_board          boot 0x002a8b80 (overlay, up) starts each move once: up <= 0.75 in, <= 1.5
+#                                           turn, <= 2.25 out (flags +0xec/+0xf0/+0xf4) (P375)
+race_overlay_bind           boot 0x002a6c60 RacingOverlays binds its pieces by name; CountdownBoard
+#                                           (30secboard, racingoverlays.lyt) at +0xd0 (P375)
 hud_overlay_mode            boot 0x002a7270 (overlay, mode, b) a jump table of 7 modes; the AllAI grid
 #                                           calls it with 6 on "RacingOverlays"
 list_nth                    boot 0x0021ca40 (list, n) -> the nth item (+4 head, +8 next), 0 past the end

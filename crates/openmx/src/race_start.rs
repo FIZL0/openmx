@@ -16,7 +16,7 @@ use game_render::scene::{Placement, Scene};
 use game_render::V3;
 use game_sim::race::{self, GridStart, Prop, Race, Supercross};
 use game_sim::rng::Rng;
-use ps2_float::{F, Vf};
+use ps2_float::{F, Vf, fpu};
 
 /// The scene prop the start gate stands on: its name has this in it (sx01's `THQsxdropgate`, the
 /// nationals' `Nat15_Dropgate01`).
@@ -629,6 +629,35 @@ impl GateSwing {
     }
 }
 
+/// P375: the seconds the race's 30 second board has been up, which [`crate::ride_hud`] plays it by;
+/// `None` before the lights and from the drop on. The original's countdown listener shows its race
+/// overlay's board at its first call in the lights window ([`Supercross::lights_on`]) and the drop
+/// hides it; the board's clock counts from that call's tick, a tick on by the tick's end. The
+/// listener's calls are replayed from the countdown's zero at its cadence ([`race::Countdown`]'s
+/// accumulator) in ticks of 1/30 s; a track intro, which moves the countdown on when it ends, is not
+/// replayed (the shell counts it as seen, [`lay_out`]).
+pub fn board_up(race: &Race) -> Option<f32> {
+    let a = race.activity.as_ref()?;
+    let c = &race.countdown;
+    if !c.running || c.interval <= F::ZERO {
+        return None;
+    }
+    let dt = game_sim::tick::DeltaTime::CAP_30;
+    let (mut t, mut acc) = (F::ZERO, F::ZERO);
+    while t < c.elapsed {
+        let called = c.interval <= acc || acc == F::ZERO;
+        if c.interval <= acc {
+            acc = F(fpu::sub(acc.0, c.interval.0));
+        }
+        if called && !(t < a.lights_on) && t < a.lights_off {
+            return Some(c.elapsed.0 - t.0);
+        }
+        acc = F(fpu::add(acc.0, dt));
+        t = F(fpu::add(t.0, dt));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,5 +881,36 @@ mod tests {
         assert!(GateSwing::take(&mut scene, "[CameraFlash]\n").is_none());
         assert!(GateSwing::take(&mut scene, "[DropGate]\nGateName=Nat15_Dropgate01\n").is_none());
         assert_eq!(scene.models.len(), 2);
+    }
+    /// P375: the board comes up at the listener's first call in the lights window — the shell's at
+    /// the countdown's first tick — counts the countdown on from there, and goes at the drop.
+    #[test]
+    fn the_board_counts_from_the_lights_call_to_the_drop() {
+        let prop = Prop { across: Vf::new(1.0, 0.0, 0.0, 0.0), look: Vf::new(0.0, 0.0, 1.0, 0.0), at: Vf::new(0.0, 0.0, 0.0, 1.0), half_width: F(30.0), height: F(1.0) };
+        let s = lay_out(&prop, vec![F(1.54)], 1, 1).unwrap();
+        let mut race = s.race((s.spot, s.facing));
+        let dt = game_sim::tick::DeltaTime::CAP_30;
+        let step = |t: F| F(fpu::add(t.0, dt));
+        assert!(race.countdown.running);
+        assert_eq!(board_up(&race), None, "no tick yet");
+        race.countdown.elapsed = step(F::ZERO);
+        assert_eq!(board_up(&race), Some(dt), "the shell's lights call is the first tick's");
+        race.countdown.elapsed = F(1.0);
+        assert_eq!(board_up(&race), Some(1.0));
+        // Lights at 0.25: the calls every 0.1 s or so fall at 0, four ticks on, and so on; the first
+        // in the window is past 0.25.
+        race.activity.as_mut().unwrap().lights_on = F(0.25);
+        race.activity.as_mut().unwrap().lights_off = F(0.35);
+        race.countdown.elapsed = F(0.2);
+        assert_eq!(board_up(&race), None, "before the lights");
+        race.countdown.elapsed = (0..20).fold(F::ZERO, |t, _| step(t));
+        let up = board_up(&race).unwrap();
+        let called = race.countdown.elapsed.0 - up;
+        assert!((0.25..0.35).contains(&called), "called at {called}");
+        race.countdown.running = false;
+        assert_eq!(board_up(&race), None, "the drop hides it");
+        race.countdown.running = true;
+        race.activity = None;
+        assert_eq!(board_up(&race), None, "no listener, no board");
     }
 }

@@ -1342,7 +1342,7 @@ impl RideHud<'_> {
                 let card = self.race_laps.and_then(|(l, players)| l.card(race_player(v, players)));
                 let (lap, place) = card.map_or((None, None), |c| race_start::shown(c, r.laps));
                 let run = card.map_or(0, |c| c.laps.max(0) as u32);
-                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders, run }
+                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders, run, board: seat.sim.race.as_deref().and_then(race_start::board_up) }
             }),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
