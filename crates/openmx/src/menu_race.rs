@@ -9,7 +9,7 @@
 //! (P313 wires them in).
 
 use super::fame::{FameBook, FameTry, table_title};
-use super::results::{Board, FameMarks, HandOver, RaceTally, Records, Tip, tips_of};
+use super::results::{Board, Bought, FameMarks, HandOver, RaceTally, Records, Shop, Tip, tips_of};
 use super::{Act, Menu, Press, Screen};
 use ps2_float::F;
 
@@ -401,6 +401,11 @@ pub struct RaceMenu {
     /// last saved them.
     pub records: Records,
     pub records_changed: bool,
+    /// P369: the unlock shop's list (the disc's `store.dat`; empty without it), its lit category,
+    /// and the last purchase's answer and the item it was for.
+    pub shop: Shop,
+    pub shop_tab: usize,
+    pub shop_said: Option<(Bought, usize)>,
     /// P334: the Hall of Fame (`fame.txt`), whether a name went in since the shell last saved it,
     /// and the players' cards the race under way handed over for it.
     pub fame: FameBook,
@@ -422,6 +427,7 @@ impl Menu {
         match screen {
             Screen::Race => race_tracks(self.race.kind).len(),
             Screen::RaceSetup => SETUP_ROWS.len(),
+            Screen::Shop => self.race.shop.categories.get(self.race.shop_tab).map_or(0, |c| c.items.len()).max(1),
             _ => 1,
         }
     }
@@ -429,6 +435,14 @@ impl Menu {
     /// One press on a race screen, after Up and Down have walked its rows.
     pub(super) fn race_press(&mut self, screen: Screen, at: usize, p: Press) -> Act {
         match screen {
+            // P369: Triangle (Back's twin, so first) opens the unlock shop.
+            Screen::Race if p.triangle => {
+                self.race.shop_tab = 0;
+                self.race.shop_said = None;
+                self.cursor[Screen::Shop.index()] = 0;
+                self.push(Screen::Shop);
+            }
+            Screen::Shop => self.shop_press(at, p),
             Screen::Race => {
                 if p.left || p.right || p.l1 || p.r1 {
                     let n = RACE_KINDS.len();
@@ -643,6 +657,30 @@ impl Menu {
     /// Whether the Hall of Fame changed since the last call, for the shell to save it.
     pub fn take_fame_changed(&mut self) -> bool {
         std::mem::take(&mut self.race.fame_changed)
+    }
+
+    /// P369: one press on the unlock shop: Cross, Circle or Start put the Not Enough Points dialog
+    /// away and do nothing else then; Left and Right (L1 and R1) step the category, Cross buys the
+    /// lit item with player 0's record's points (the original spends player 0's profile's).
+    fn shop_press(&mut self, at: usize, p: Press) {
+        if (p.ok || p.back || p.start) && self.race.shop_said.is_some_and(|(b, _)| b == Bought::NotEnoughPoints) {
+            self.race.shop_said = None;
+            return;
+        }
+        let n = self.race.shop.categories.len();
+        if (p.left || p.right || p.l1 || p.r1) && n > 0 {
+            let t = self.race.shop_tab;
+            self.race.shop_tab = if p.left || p.l1 { (t + n - 1) % n } else { (t + 1) % n };
+            self.race.shop_said = None;
+            self.cursor[Screen::Shop.index()] = 0;
+        } else if p.ok {
+            let Some(item) = self.race.shop.categories.get(self.race.shop_tab).and_then(|c| c.items.get(at)) else { return };
+            let said = self.race.records.seat(0).buy(item);
+            self.race.records_changed |= said == Bought::Bought;
+            self.race.shop_said = Some((said, at));
+        } else if p.back {
+            self.pop();
+        }
     }
 
     /// Whether the riders' records changed since the last call, for the shell to save them.

@@ -19,7 +19,12 @@
 //! * P364: the results menu's score commit, run whole, over 10,000 races against
 //!   [`results::Records::commit_score`]: every profile's points.
 //!
-//! The records file reads back as it was written, and the tips are the popup's words.
+//! * P369: the unlock shop's buy check and the profile's unlock (`unlock_buy`, `profile_unlock`) over
+//!   10,000 purchases against [`results::RiderRecord::buy`] and `unlock`: the answer, the points,
+//!   the profile's unlock table and the item's locked word.
+//!
+//! The records file reads back as it was written, and the tips are the popup's words; the store
+//! list reads as the original's store reader reads it.
 
 #[allow(unused)]
 #[path = "../src/files.rs"]
@@ -30,7 +35,7 @@ mod results;
 use game_sim::race::{EndTip, LapCard};
 use ps2_float::{F, fpu};
 use ps2_oracle::{Ee, addr, game_or_skip, skip};
-use results::{Board, CardStats, FameMarks, RaceTally, Records, ResultCard, RiderRecord, SeatTally, Who};
+use results::{Board, Bought, CardStats, FameMarks, RaceTally, Records, ResultCard, RiderRecord, SHOP_CATEGORIES, SHOP_ITEMS, SeatTally, Shop, ShopItem, Who};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -571,7 +576,7 @@ impl Pick {
         let (races, wins, play_time, preloads, clutches, wrecks) = (c(), c(), c(), c(), c(), c());
         let mut f = || F(if self.below(3) == 0 { f32::from_bits(self.next() as u32) } else { self.below(1 << 20) as f32 / 8.0 });
         let (win_rate, feet, race_time) = (f(), f(), f());
-        RiderRecord { races, wins, win_rate, play_time, feet, preloads, clutches, wrecks, race_time, points: 0 }
+        RiderRecord { races, wins, win_rate, play_time, feet, preloads, clutches, wrecks, race_time, points: 0, unlocked: [0; SHOP_CATEGORIES] }
     }
     /// An amount the stat add may be handed: any float, whole numbers either side of 16 bits,
     /// fractions, a race's seconds or feet.
@@ -813,6 +818,131 @@ fn the_score_commit_matches_the_results_menus_commit() {
 }
 
 #[test]
+fn the_shop_buy_matches_the_unlock_buy_and_profile_unlock() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [buy, unlock] = match addrs(["unlock_buy", "profile_unlock"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    const CATEGORY: u32 = FRONT;
+    const ITEM: u32 = FRONT + 0x200;
+    const LINK: u32 = FRONT + 0x300;
+    const PROFILE: u32 = PROFILES;
+    const TABLE: u32 = PROFILES + 0x1000;
+    let mut p = Pick(0x3a97_c1e2_5d08_f46b);
+    let mut seen = [0usize; 3];
+    let (mut edges, mut free) = (0, 0);
+    for case in 0..10_000 {
+        let mut r = RiderRecord {
+            points: match p.below(5) {
+                0 => p.next() as i32,
+                1 => i32::MIN + p.below(100) as i32,
+                2 => i32::MAX - p.below(100) as i32,
+                3 => -(p.below(1000) as i32),
+                _ => p.below(6_000_000) as i32,
+            },
+            ..RiderRecord::default()
+        };
+        let item = ShopItem {
+            price: match p.below(6) {
+                0 => r.points,
+                1 => r.points.wrapping_add(1),
+                2 => r.points.wrapping_sub(1),
+                3 => p.next() as i32,
+                4 => [100, 500_000, 1_000_000, 2_500_000, 5_000_000, 0, -1][p.below(7) as usize],
+                _ => p.below(6_000_000) as i32,
+            },
+            category: p.below(SHOP_CATEGORIES as u64) as usize,
+            index: p.below(SHOP_ITEMS as u64) as usize,
+            ..ShopItem::default()
+        };
+        edges += usize::from(r.points.wrapping_sub(item.price).unsigned_abs() <= 1);
+        // Other items owned, and this one now and then.
+        for c in 0..SHOP_CATEGORIES {
+            r.unlocked[c] = p.next() & p.next() & ((1 << SHOP_ITEMS) - 1);
+        }
+        r.unlocked[item.category] &= !(1 << item.index);
+        if p.below(5) == 0 {
+            r.unlocked[item.category] |= 1 << item.index;
+        }
+        let pay = p.below(8) != 0;
+        let linked = p.below(3) != 0;
+        let locked = if r.owns(item.category, item.index) { 0 } else { [1, p.next() as u32 | 1][p.below(2) as usize] };
+        zero(&mut ee, CATEGORY, 0x400);
+        zero(&mut ee, PROFILE, 0x100);
+        zero(&mut ee, TABLE, 0x54 + 200 * SHOP_CATEGORIES as u32);
+        for c in 0..SHOP_CATEGORIES {
+            for i in 0..SHOP_ITEMS {
+                ee.set_u32(TABLE + 0x54 + 200 * c as u32 + 4 * i as u32, u32::from(r.owns(c, i)));
+            }
+        }
+        ee.set_u32(CATEGORY + 0xc + 4 * item.index as u32, ITEM);
+        ee.set_u32(ITEM + 8, if linked { LINK } else { 0 });
+        ee.set_u32(LINK + 8, locked);
+        ee.set_u32(ITEM + 0x10, item.price as u32);
+        ee.set_u32(ITEM + 0x14, locked);
+        ee.set_u32(ITEM + 0x18, item.index as u32);
+        ee.set_u32(ITEM + 0x1c, item.category as u32);
+        ee.set_u32(PROFILE + 0xc0, r.points as u32);
+        ee.set_u32(PROFILE + 0xc4, TABLE);
+        let mut want = r;
+        let said = if pay {
+            // The shop's purchase: an owned item never reaches the buy check.
+            let said = want.buy(&item);
+            if locked != 0 {
+                let sx = |v: i32| v as i64 as u64;
+                ee.call(buy, &[u64::from(CATEGORY), sx(item.index as i32), sx(r.points)], &[], BUDGET);
+                let got = ee.r(2) as u32;
+                assert_eq!(got != 0, said == Bought::Bought, "case {case}: {r:?} {item:?}");
+                if got != 0 {
+                    assert_eq!(got, ITEM);
+                    ee.call(unlock, &[u64::from(PROFILE), u64::from(ITEM), 1], &[], BUDGET);
+                }
+            } else {
+                assert_eq!(said, Bought::Owned, "case {case}");
+            }
+            said
+        } else {
+            free += 1;
+            want.unlock(&item, false);
+            ee.call(unlock, &[u64::from(PROFILE), u64::from(ITEM), 0], &[], BUDGET);
+            Bought::Bought
+        };
+        seen[said as usize] += 1;
+        assert_eq!(ee.u32_at(PROFILE + 0xc0) as i32, want.points, "case {case}: points, {r:?} {item:?}");
+        for c in 0..SHOP_CATEGORIES {
+            for i in 0..SHOP_ITEMS {
+                assert_eq!(ee.u32_at(TABLE + 0x54 + 200 * c as u32 + 4 * i as u32) != 0, want.owns(c, i), "case {case}: table {c}:{i}");
+            }
+        }
+        let open = !want.owns(item.category, item.index);
+        assert_eq!(ee.u32_at(ITEM + 0x14) != 0, open, "case {case}: locked word");
+        if linked {
+            assert_eq!(ee.u32_at(LINK + 8) != 0, open, "case {case}: linked record");
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 1_000) && edges > 1_500 && free > 1_000, "{seen:?} bought/owned/short, {edges} at the edge, {free} free");
+}
+
+#[test]
+fn the_store_list_reads_as_the_store_reader_reads_it() {
+    let text = "[Store]\nNumberOfCategories=3\nCategory1=\"Machines\"\nCategory2=Odd\nCategory3=Tracks\n\
+                [Machines]\nType=Machine\nNumberOfItems=2\nItem1=\"Dune Buggy\"\nItem2=Biplane\n\
+                [Dune Buggy]\nPrice=2500000\nTrack=Free11\n[Biplane]\nTrack=Free10\n\
+                [Odd]\nType=Hovercraft\nNumberOfItems=1\nItem1=X\n\
+                [Tracks]\nType=track\nNumberOfItems=1\nItem1=SX01\n[sx01]\nTrackName=sx01\nPrice=1000000\n";
+    let shop = Shop::parse(text);
+    let names: Vec<(&str, usize, usize)> = shop.categories.iter().map(|c| (c.name.as_str(), c.kind, c.items.len())).collect();
+    assert_eq!(names, [("Machines", 3, 2), ("Odd", 5, 0), ("Tracks", 0, 1)]);
+    let m = &shop.categories[0].items;
+    assert_eq!(m[0], ShopItem { key: "Dune Buggy".into(), track: "free11".into(), price: 2_500_000, category: 0, index: 0 });
+    // No Price: the item's 100.
+    assert_eq!((m[1].price, m[1].index), (100, 1));
+    assert_eq!(shop.categories[2].items[0], ShopItem { key: "SX01".into(), track: "sx01".into(), price: 1_000_000, category: 2, index: 0 });
+    assert_eq!(Shop::parse(""), Shop::default());
+}
+
+#[test]
 fn the_fame_marks_match_the_fame_menus_mark() {
     let Some(mut ee) = game_or_skip() else { return };
     let mark = match addr("fame_menu_mark") {
@@ -884,8 +1014,19 @@ fn the_records_read_back_as_they_were_written() {
     let nine = Records::parse("seat.0 = 3 1 42055555 4 00000000 1 2 3 00000000\n");
     assert_eq!((nine.seats[0].races, nine.seats[0].wrecks, nine.seats[0].points), (3, 3, 0));
     assert_eq!(Records::parse("seat.0 = 3 1 42055555 4 00000000 1 2 3 00000000 x\n"), Records::default());
+    // P369: and the items bought, on a line of their own that may come before the record's.
+    let item = ShopItem { price: 1000, category: 3, index: 49, ..ShopItem::default() };
+    assert_eq!(r.seat(1).buy(&item), Bought::Bought);
+    assert_eq!((r.seat(1).buy(&item), r.seats[1].points), (Bought::Owned, 1468));
+    assert_eq!(r.seat(1).buy(&ShopItem { price: 1469, ..item.clone() }), Bought::Owned);
+    assert_eq!(r.seat(1).buy(&ShopItem { price: 1469, index: 0, ..item.clone() }), Bought::NotEnoughPoints);
+    r.seat(1).unlock(&ShopItem { category: 0, index: 0, ..item.clone() }, false);
+    assert_eq!(r.seats[1].points, 1468);
     let text = r.text();
+    assert!(text.contains("unlocked.1 = 0:0 3:49\n"), "{text}");
     assert_eq!(Records::parse(&text), r);
+    let flipped: String = text.lines().rev().map(|l| format!("{l}\n")).collect();
+    assert_eq!(Records::parse(&flipped), r);
     assert_eq!(Records::parse(&format!("junk\nseat.x = 1 2 3\nseat.1 = 1\nseat.0 = 1 2 3 4\n{text}")), r);
     // A line from before P358 holds the first three alone.
     let old = Records::parse("seat.0 = 3 1 42055555\n");

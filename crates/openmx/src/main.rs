@@ -3855,6 +3855,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     // The rider's own 24 (MD77), which the Ride tab's trick pack rows count each pack's extras past.
     let rider_stunts = front_rider_stunts(&mut disc);
     let fame_riders = fame_riders(&mut disc);
+    let shop = shop_list(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
     if sound.live().is_some() {
@@ -3897,6 +3898,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.car_camera_names = car_camera_names;
     // The riders' race records (P330), which a race's win counts in.
     front.menu.race.records = menu::results::Records::load(&front.dir);
+    // P369: the unlock shop's list, the disc's store.dat.
+    front.menu.race.shop = shop;
     // The Hall of Fame (P334): `fame.txt`, or the tables the original makes at boot when there is none.
     front.menu.race.fame = load_fame(&front.dir, &fame_riders);
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
@@ -13402,6 +13405,18 @@ fn own_flier_cameras(rigs: &mut [Rig], fliers: &[vehicle::Fliers], layout: Layou
 /// The disc's camera presets the camera button cycles through (P163), the bike's and the plane's, by
 /// name, for the Camera page's Preset row: free06's files, whose names every track's shares (the
 /// freerides' and the races' read alike). Empty where they cannot be read.
+/// P369: the unlock shop's list: `appstart.res`'s `ui\\store.dat`, empty (and said) when it
+/// cannot be read.
+fn shop_list(disc: &mut Disc) -> menu::results::Shop {
+    match disc.res("appstart.res").and_then(|app| app.read_suffix(menu::results::SHOP_FILE)) {
+        Ok(b) => menu::results::Shop::parse(&game_render::ini::text(&b)),
+        Err(e) => {
+            println!("shop: no store list ({e}), so the unlock shop has nothing for sale");
+            menu::results::Shop::default()
+        }
+    }
+}
+
 /// P334: the riders the Hall of Fame names the entries it makes after: the disc's
 /// `rider\riders.dat`, in its order.
 fn fame_riders(disc: &mut Disc) -> Vec<String> {
