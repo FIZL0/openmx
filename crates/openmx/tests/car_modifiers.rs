@@ -12,6 +12,7 @@
 #[allow(dead_code)]
 mod vehicle;
 
+use game_sim::car::{FRONT_LEFT, FRONT_RIGHT};
 use game_sim::input::{Control, EventQueue, Pad, Report};
 use game_sim::markers::Spot;
 use game_sim::modifiers::{Knob, Mods};
@@ -45,6 +46,8 @@ fn ground_speed(b: &game_sim::biplane::Body) -> f32 {
 struct Tick {
     speed: f32,
     grounded: bool,
+    /// Both front tires off the floor.
+    fronts_up: bool,
     boost: F,
     timer: F,
     time: F,
@@ -66,7 +69,7 @@ fn drive(machines: &game_render::disc::Res, machine: vehicle::Machine, mods: &Mo
             pad.poll(F(DT), &Report::from_buttons(held(t)), &mut events);
             car.step(&pad, &table, &tables.ride, F(DT), &mut floor);
             let m = car.driven.as_ref().unwrap();
-            Tick { speed: ground_speed(&m.body), grounded: m.wheels.iter().any(|w| w.s.grounded), boost: m.drivetrain.launch_boost, timer: m.launch.timer, time: m.launch.time }
+            Tick { speed: ground_speed(&m.body), grounded: m.wheels.iter().any(|w| w.s.grounded), fronts_up: !m.wheels[FRONT_LEFT].s.grounded && !m.wheels[FRONT_RIGHT].s.grounded, boost: m.drivetrain.launch_boost, timer: m.launch.timer, time: m.launch.time }
         })
         .collect()
 }
@@ -148,9 +151,8 @@ fn a_taken_car_lands_at_once() {
 /// as fast as at 100% a second in and 0.9 times two seconds in. Held, the baja was at 11.7 against
 /// 28 ft/s a second in at every value, and the monster truck at 21 against 35 from 180%; the slowest
 /// now (the baja at 200%, about 25 against 37) spins its rear wheels on the torque it is given.
-/// P370b left that: raising the driven tires' forward grip with k (as Knob::AtvAccel does for the
-/// quad) put the baja at 0.84 times or better, but tipped the monster truck onto its tail and off the
-/// floor from 280% (from 300% with the raise held to 1.2).
+/// P373: the driven tires' forward grip goes up with k, held under the fronts' lift, and every car
+/// is at least 0.8 times as fast a second in (the slowest the baja at 120%, 31 against 36).
 #[test]
 fn a_car_taken_on_the_gas_over_100_is_not_held() {
     let Some(machines) = machines() else { return println!("skipped: no disc") };
@@ -162,7 +164,27 @@ fn a_car_taken_on_the_gas_over_100_is_not_held() {
         for pct in (110..=Knob::CarAccel.most()).step_by(10) {
             let b = drive(&machines, machine, &with(Knob::CarAccel, pct), 60, &gas);
             println!("{machine:?} {pct}%: {} / {} ft/s 1 / 2 s in (100%: {one} / {two})", b[29].speed, b[59].speed);
-            assert!(b[29].speed >= one * 0.5 && b[59].speed >= two * 0.9, "{machine:?} held at {pct}%: {} {}", b[29].speed, b[59].speed);
+            assert!(b[29].speed >= one * 0.8 && b[59].speed >= two * 0.9, "{machine:?} held at {pct}%: {} {}", b[29].speed, b[59].speed);
+        }
+    }
+}
+
+/// P373: on the gas from the take for 3 s, every 20% from 120 to the knob's top, no car goes over:
+/// all four tires never leave the floor together, the fronts are up at most 8 ticks after the
+/// landing, and the car is faster at 3 s than at 2. Held only by its file's grip, the monster truck
+/// reared 7 to 26 ticks from 240 to 480% and went over onto its tail at 500% (86 ft/s at 3 s against
+/// 106 at 2); its forward grip over 100% is now held at the fronts' lift, under the file's.
+#[test]
+fn a_car_on_the_gas_over_100_keeps_its_nose_down() {
+    let Some(machines) = machines() else { return println!("skipped: no disc") };
+    for machine in CARS {
+        for pct in (120..=Knob::CarAccel.most()).step_by(20) {
+            let ride = drive(&machines, machine, &with(Knob::CarAccel, pct), 90, &|_| Control::Cross.mask());
+            let after = &ride[7..];
+            let up = after.iter().filter(|t| t.fronts_up).count();
+            let off = after.iter().filter(|t| !t.grounded).count();
+            println!("{machine:?} {pct}%: fronts up {up}, off {off}, {} / {} ft/s 2 / 3 s in", ride[59].speed, ride[89].speed);
+            assert!(off == 0 && up <= 8 && ride[89].speed > ride[59].speed, "{machine:?} over at {pct}%: fronts up {up}, off {off}, {} / {}", ride[59].speed, ride[89].speed);
         }
     }
 }

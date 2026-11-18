@@ -513,7 +513,7 @@ impl Knob {
             Knob::KiowaTurn => "kiowa [Flight Controller] MaxRateCommand (yaw, roll), MinRateCommand (roll) x k; [Main/Tail Rotor] MaxRotorMoment (yaw, roll) x k",
             Knob::KiowaCeiling => "kiowa [Flight Controller] MaxAltitude x k",
             Knob::CarSpeed => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] AeroSurfaceArea / k^2",
-            Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
+            Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k; the driven tires' forward force x k, held under the grip that lifts the fronts",
             Knob::CarGrip => "car every tire surface's FrictionPeak x k",
             Knob::CarSuspension => "car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
             Knob::AtvSpeed => {
@@ -1037,10 +1037,16 @@ impl Mods {
     /// Player `seat`'s car, any of the three, on its loaded `.phy` before it is taken (P272).
     pub fn car(&self, seat: usize, car: &mut car::Car) {
         self.car_knobs(seat, [Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension], car);
-        // Over 100% the driven tires keep the file's grip, though the baja spins its rear tires on the
-        // extra torque and is slower a second in than at 100% (P370b): the car's tire has one
-        // FrictionPeak for both directions, and a forward-only raise with k tipped the monster truck,
-        // already rearing on the torque alone from 240%, onto its tail and off the floor from 280%.
+        // Over 100% the driven tires' forward grip goes up with the torque, as Knob::AtvAccel's does
+        // for the quad, or the baja spins its rear tires on it (P370b). The tire has one FrictionPeak
+        // for both directions, so the raise is the tire's own (`car::Tire::drive_grip`), held under the
+        // grip that would lift the fronts: the monster truck's file is past that already and gets
+        // none (P373; a raise of k tipped it onto its tail from 280%).
+        if let Some(k) = self.factor(seat, Knob::CarAccel).filter(|&k| k > F::ONE) {
+            for t in car.engine.driven.into_iter().flatten() {
+                car.tires[t].drive_grip = k;
+            }
+        }
         // The world's (P290): the gravity the car is taken with, and every wing's drag, read off the
         // file each substep (lift and downforce left alone).
         if let Some(k) = self.factor(seat, Knob::Gravity) {
