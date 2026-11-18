@@ -290,6 +290,10 @@ fn a_woken_prop_ticks_with_the_ride_and_rolls_back() {
         alone.tick(dt, &tables);
         // The object's place on the node's list is the set's to give (S242).
         alone.objects[0].filed_at = sim.traffic.props.collections[0].objects[0].filed_at;
+        // So are the ridden bikes its gathers saw (S239): the collection alone has none.
+        if let (Some(a), Some(r)) = (alone.objects[0].collision.as_mut(), sim.traffic.props.collections[0].objects[0].collision.as_ref()) {
+            a.gathered_bikes.clone_from(&r.gathered_bikes);
+        }
         assert_eq!(sim.traffic.props.collections[0], alone, "tick {t}: the ride's prop and the collection alone");
         if t < 5 {
             assert_ne!(hash::of(&sim), before, "tick {t}: a swinging prop moves the hash");
