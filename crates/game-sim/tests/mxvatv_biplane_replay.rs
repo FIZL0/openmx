@@ -130,11 +130,17 @@ fn diff(ee: &Ee, plane: u32, row: &Row) -> Vec<String> {
     out
 }
 
-/// F31's hooks: the kernel's DIntr/EIntr, the vehicle's network snapshot send, every syscall stub.
+/// F31's hooks: the kernel's DIntr/EIntr, the stunt packet's counter read, every syscall stub.
 fn hooked(mut ee: Ee) -> Ee {
     ee.hooks.insert(0x0034_8fa0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     ee.hooks.insert(0x0034_8ff0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
-    ee.hooks.insert(0x004e_7e70, Box::new(|_: &mut Ee| {}));
+    // F50: the stunt packet runs; its read of RCNT0's count (`lui $2, 0x1000` .. `lw $16, 0($2)`)
+    // reads a stand-in word of 0 instead, as tests/mxvatv_bike_ride.rs's.
+    let at = ee.scratch(250);
+    assert_eq!([ee.u32_at(0x004e_7f44), ee.u32_at(0x004e_7f50)], [0x3c02_1000, 0x8c50_0000], "the stunt packet's counter read");
+    ee.set_u32(0x004e_7f44, 0x3c02_0000 | (at.wrapping_add(0x8000) >> 16));
+    ee.set_u32(0x004e_7f50, 0x8c50_0000 | (at & 0xffff));
+    ee.set_u32(at, 0);
     // The kernel's thread delay (it reads Status, then waits on an alarm): 0, no wait.
     ee.hooks.insert(0x0033_ff58, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     // The sound driver's call to the IOP: it waits on flags only the IOP's reply sets.

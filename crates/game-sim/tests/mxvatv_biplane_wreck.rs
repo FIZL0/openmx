@@ -354,12 +354,18 @@ fn hex_words(s: &str) -> Vec<u32> {
         .collect()
 }
 
-/// tests/mxvatv_biplane_replay.rs's hooks: the kernel's DIntr/EIntr, the network send, the thread
+/// tests/mxvatv_biplane_replay.rs's hooks: the kernel's DIntr/EIntr, the stunt packet's counter read, the thread
 /// delay, the sound driver's IOP call and every syscall stub.
 fn hooked(ee: &mut Ee) {
     ee.hooks.insert(0x0034_8fa0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     ee.hooks.insert(0x0034_8ff0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
-    ee.hooks.insert(0x004e_7e70, Box::new(|_: &mut Ee| {}));
+    // F50: the stunt packet runs; its read of RCNT0's count (`lui $2, 0x1000` .. `lw $16, 0($2)`)
+    // reads a stand-in word of 0 instead, as tests/mxvatv_bike_ride.rs's.
+    let at = ee.scratch(250);
+    assert_eq!([ee.u32_at(0x004e_7f44), ee.u32_at(0x004e_7f50)], [0x3c02_1000, 0x8c50_0000], "the stunt packet's counter read");
+    ee.set_u32(0x004e_7f44, 0x3c02_0000 | (at.wrapping_add(0x8000) >> 16));
+    ee.set_u32(0x004e_7f50, 0x8c50_0000 | (at & 0xffff));
+    ee.set_u32(at, 0);
     ee.hooks.insert(0x0033_ff58, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     ee.hooks.insert(0x0018_2c90, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     for a in (0x0030_0000..0x0036_0000u32).step_by(4) {

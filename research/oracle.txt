@@ -11578,6 +11578,9 @@ atv_heap_free               atv 0x001b76d0 = free
 #   flags a4 == 0 ? sender+0x10 : a5; -> 0x00282190(conn 0x0084ada0, &header, flags) (queue 0x00282ea0
 #   copies 2 header bytes and len data). ride-2's record pass runs 46 stunt, 15 whole, 138 change ports
 #   (a temporary count).
+#   F50: the stunt's do-nothing hook is gone from every test file; each redirects the RCNT0 pair
+#   (0x004e7f44 / 0x004e7f50, asserted 0x3c021000 / 0x8c500000) to a scratch word of 0, so the stunt
+#   runs in mxvatv_bike_ground/step/biplane_replay/biplane_wreck/kiowa_replay/car_replay too.
 # F31b5k — the connection's queue the sender's send ends in (game_sim::handling::update::{net_queue,
 # queue_push}; tests/mxvatv_bike_ride.rs the_connections_queue_is_the_originals). Journal:
 # research/journal/2026-11-09-f31b5k-net-queue/.
