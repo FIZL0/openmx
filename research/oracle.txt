@@ -12093,6 +12093,11 @@ results_score_commit        boot 0x002041a0 (app) for k < event +0x114 with (app
 #                                           player's own profile (the stats commit uses player 0's);
 #                                           a null profile skips. menu::results::Records::commit_score
 #                                           (P364; tests/race_results.rs runs it whole).
+#                                           C42, live (research/c42): sx01 race, no-hander tape, card 0
+#                                           +0xdc banked 31690 by tick 3167 and held it through the
+#                                           finish and the results; the results' Cross (Restart) put
+#                                           profile 0x56fea0 +0xc0 from 0 to 31690 in the row the race
+#                                           reset zeroed every card's +0xdc. AI cards bank too (2490s).
 # P364 — who reads profile +0xc0 (the points; objdump of every lw/sw +0xc0, then the profile code read):
 #   the unlock shop's purchase 0x002f0da0 calls unlock_buy 0x0037d1b0 (unlocks, index, player 0's
 #   +0xc0): an item (+0x14 locked) costing +0x10 <= points is unlocked and returned, else 0 and the

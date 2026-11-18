@@ -1,0 +1,88 @@
+# c42.toml -- written by hand. C42: the human's race card bank and player 0's profile points (README.md).
+# Cards sit at 0x8fc760 + id * 0x1e0 in the c31 start state's session (C31); player 0's profile is
+# (app+0x3f4)[0] = 0x56fea0 in it, its points word +0xc0.
+
+[watch]
+name        = "c42-sx01-trick-bank"
+description = "sx01 race from c31-sx01-race-start: card banks per rider, card 0's combo, profile 0's points"
+every       = 1
+start       = "in_game == 1"
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "in_game"
+addr = "0x004e2650"
+type = "u32"
+
+[[field]]
+name = "points"
+addr = "0x0056ff60"
+type = "s32"
+
+[[field]]
+name = "mgr_flags"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xac"
+type = "u32"
+
+[[field]]
+name = "mgr_laps"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xe4"
+type = "s32"
+
+[[field]]
+name = "c0_flags"
+addr = "0x008fc768"
+type = "u32"
+
+[[field]]
+name = "c0_laps"
+addr = "0x008fc790"
+type = "s32"
+
+[[field]]
+name = "c0_on_track"
+addr = "0x008fc7a0"
+type = "s32"
+
+[[field]]
+name = "c0_nodes"
+addr = "0x008fc82c"
+type = "u32"
+
+[[field]]
+name = "c0_combo_s"
+addr = "0x008fc838"
+type = "f32"
+
+[[field]]
+name = "c0_bank"
+addr = "0x008fc83c"
+type = "f32"
+
+[[field]]
+name = "c0_combo"
+addr = "0x008fc840"
+type = "f32"
+
+[[field]]
+name = "c1_bank"
+addr = "0x008fca1c"
+type = "f32"
+
+[[field]]
+name = "c2_bank"
+addr = "0x008fcbfc"
+type = "f32"
+
+[[field]]
+name = "c3_bank"
+addr = "0x008fcddc"
+type = "f32"
+
