@@ -4107,7 +4107,7 @@ impl<R: Moto + Default> Ride<R> {
     /// ([`Bike::untamed`]), its scene nodes go through Untamed's node update
     /// ([`crate::atv_moto::Scene::update_untamed`]), its tail hands the hazard clock Untamed's
     /// grounded word ([`Tail::untamed`]), and its stunt ids are Untamed's, 8 up (the backflip 49, the
-    /// 360s 52 and 53, as MD147's spawn image holds them). Everything else is SLUS-21104's step on
+    /// 360s 52 and 53, and with a tail the wheelie 50 and stoppie 51, as MD147's spawn image holds them). Everything else is SLUS-21104's step on
     /// the same fields (MD81b's static diff).
     pub fn untamed(&mut self) {
         self.bike.parts.scene.untamed = true;
@@ -4116,6 +4116,7 @@ impl<R: Moto + Default> Ride<R> {
         (s.stunt_right, s.stunt_left) = (SPIN_STUNTS.0 + UNTAMED_STUNT_SHIFT as u32, SPIN_STUNTS.1 + UNTAMED_STUNT_SHIFT as u32);
         if let Some(t) = self.tailed.as_mut() {
             t.tail.untamed = true;
+            (t.tail.wheelie_stunt, t.tail.stoppie_stunt) = (ONE_PAIR_STUNTS.0 + UNTAMED_STUNT_SHIFT as u32, ONE_PAIR_STUNTS.1 + UNTAMED_STUNT_SHIFT as u32);
             let at = self.body.position;
             let heading = t.tail.node_forward;
             t.untamed = Some(crate::handling::untamed::PutBack { saved_position: at, saved_orientation: heading, saved_up: Vf::new(0.0, 1.0, 0.0, 1.0), has_ground: true, ..Default::default() });
@@ -5692,6 +5693,10 @@ impl<R: Moto + Default> Ride<R> {
 const SPAWN_MAX_SPEED: f32 = 300.0;
 const NO_STUNT: i32 = 0xff;
 const SPIN_STUNTS: (u32, u32) = (44, 45);
+/// MD207: the wheelie's and the stoppie's stunt ids the tail hands on ([`Tail::wheelie_stunt`],
+/// [`Tail::stoppie_stunt`]), as C28's spawn image holds them (`+0x13c4`, `+0x13c8`). The init looks
+/// them up by name in the stunt table, as it does the backflip's and the 360s'.
+const ONE_PAIR_STUNTS: (u32, u32) = (42, 43);
 
 /// The wreck test's words (MD133): the vehicle state's mode a driven quad has (the spawn's
 /// [`SPAWN_VEHICLE_MODE`]); no control (14) and out of bounds (13); a rider's stunt id under
@@ -5968,8 +5973,9 @@ impl<R: Moto + Default> Ride<R> {
     ///   with its parts ([`Ride::build_wreck`]), the wreck rays' file asked of `read` by its name
     ///   ([`WRECK_FILE`]) as the init's load asks for it, and the trigger probe shaped on the loaded
     ///   wheels ([`Ride::shape_trigger`]).
-    /// - The tail has the vehicle state's mode [`SPAWN_VEHICLE_MODE`] and the stunt speed
-    ///   [`SPAWN_STUNT_SPEED`], every surface no hazard; the wreck the `.phy`'s `MaxWreckTime` and the
+    /// - The tail has the vehicle state's mode [`SPAWN_VEHICLE_MODE`], the stunt speed
+    ///   [`SPAWN_STUNT_SPEED`] and the wheelie's and stoppie's ids [`ONE_PAIR_STUNTS`], every surface
+    ///   no hazard; the wreck the `.phy`'s `MaxWreckTime` and the
     ///   struck class [`SPAWN_STRUCK_CLASS`].
     pub fn rig_on(&mut self, load: &Load, riding: &crate::track::Rays, read: &mut ReadRays<'_>) {
         use crate::handling::record;
@@ -6021,7 +6027,8 @@ impl<R: Moto + Default> Ride<R> {
         let body = WreckBody { riding: Col::made(RIDING_RAYS), ..WreckBody::default() };
         self.build_wreck(&body, read, TRIGGER_PROBE, WRECK_RAYS, QUAD_ACTOR, |_| 0);
         self.shape_trigger(&load.tires);
-        let tail = Tail { vehicle_state: Some(SPAWN_VEHICLE_MODE), stunt_speed: F(SPAWN_STUNT_SPEED), ..Tail::default() };
+        let (wheelie_stunt, stoppie_stunt) = ONE_PAIR_STUNTS;
+        let tail = Tail { vehicle_state: Some(SPAWN_VEHICLE_MODE), stunt_speed: F(SPAWN_STUNT_SPEED), wheelie_stunt, stoppie_stunt, ..Tail::default() };
         self.tailed = Some(Tailed { tail, ..Tailed::default() });
         self.wrecked = Some(Wrecked {
             max_time: load.max_wreck_time,

@@ -156,6 +156,8 @@ fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
     let tail = quad::Tail {
         vehicle_state: (state != 0).then(|| pre.u32_at(state + 0x28)),
         stunt_speed: f(0x174c),
+        wheelie_stunt: pre.u32_at(q + 0x13c4),
+        stoppie_stunt: pre.u32_at(q + 0x13c8),
         surfaces: std::array::from_fn(|i| {
             let a = q + 0xdf4 + 0xc * i as u32;
             quad::Surface { hazard: pre.u32_at(a) != 0, time: F(pre.f32_at(a + 4)) }
@@ -617,7 +619,8 @@ fn quad_cols() -> Option<(game_sim::track::Rays, game_sim::track::Rays)> {
 
 /// The quad made from its files with its rigs from its files is MD123a's image-seeded rigs in every
 /// word the ride does not move: the collision record's flags and tuning, its resolution's fields, the
-/// riding and the wreck rays bit for bit, the tail's mode, stunt speed and surfaces, and the wreck's
+/// riding and the wreck rays bit for bit, the tail's mode, stunt speed, surfaces and wheelie and
+/// stoppie ids (MD207), and the wreck's
 /// time and class. The record's last sweep and contacts, and its resolution's speeds, are state; its
 /// inverse inertia is bit for bit too, read at the start spot as MD134 found.
 #[test]
@@ -654,7 +657,7 @@ fn the_quad_rigged_from_its_files_is_md123as() {
     same("riding rays", &bits(&a.riding), &bits(&b.riding), &mut diffs);
     same("wreck rays", &bits(&a.wreck), &bits(&b.wreck), &mut diffs);
     same("rays active", &(a.rays.active == a.rays.riding, a.rays.wreck != a.rays.riding), &(b.rays.active == b.rays.riding, b.rays.wreck != b.rays.riding), &mut diffs);
-    let tail = |t: &quad::Tailed| (t.tail.vehicle_state, t.tail.stunt_speed, t.tail.surfaces);
+    let tail = |t: &quad::Tailed| (t.tail.vehicle_state, t.tail.stunt_speed, t.tail.surfaces, t.tail.wheelie_stunt, t.tail.stoppie_stunt);
     same("tail", &tail(ours.tailed.as_ref().unwrap()), &tail(img.tailed.as_ref().unwrap()), &mut diffs);
     same("wreck", &ours.wrecked, &img.wrecked, &mut diffs);
     assert!(diffs.is_empty(), "the files' rigs are not MD123a's:\n{}", diffs.join("\n"));
