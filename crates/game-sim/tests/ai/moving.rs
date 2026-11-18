@@ -359,3 +359,275 @@ fn s326_the_feelers_meet_another_riders_bike() {
     assert!(meeting < placements, "every placement met the moved bike");
 }
 
+
+// ---------------------------------------------------------------------------------------------------
+// S336 — the map's own moving meshes in the lane's scene: free09's path cars and its windmill
+// ---------------------------------------------------------------------------------------------------
+//
+// Ahead of the riders' bikes, the original's moving structure holds the map's moving things: on free09
+// its six path cars (three trailer cabs and their trailers, category 0x48, the `.toy`'s order), the
+// rustic windmill toy's mesh (0x20a), and the parked biplane (a mesh, its rays and a sphere). None is
+// of the AI_IGNORE class, so the avoidance sweeps them and a feeler can stop on one. The port's Sim
+// holds the cars and the toy meshes at the end of its world's props, told how they move each tick
+// (`Prop::moving`), and the plane's world files every such prop in its moving list, so the lane's walk
+// hands them out after the static tree's things, wherever they are, in the props' order. The parked
+// plane the Sim does not hold.
+//
+// The test reads where each stands off recording2's image, then puts the first cab across the first
+// AI rider's way at a grid of spots, as S326's test does with a bike, and runs one rider tick on each
+// side: the walks must hand out the same things, every sweep at a car or the windmill must be alike,
+// feeler by feeler, and the tick that follows must be alike, meeting or not.
+
+/// The parked biplane's frame mesh's category: in the original's moving list, not in the port's Sim.
+const PARKED_PLANE: u32 = 0x52058;
+
+/// free09's path cars and its animated toys' meshes as the Sim attaches them to its props
+/// ([`game_sim::traffic::Traffic::attach`]): the cars in the `.toy`'s order, then the toys'.
+fn free09_moving() -> Option<Vec<game_sim::world::Prop>> {
+    let mut disc = Disc::open_configured().map_err(|w| skip(&w)).ok()?;
+    let mut parts: Vec<game_render::disc::Res> = ["Tracks\\free09.res", "Tracks\\free09_2.res"].iter().filter_map(|n| disc.res(n).ok()).collect();
+    let mut flat = |p: game_render::mat::V3| (p, game_render::mat::v3(0.0, 1.0, 0.0));
+    let mut traffic = game_render::toy::Traffic::load(&parts, "free09", &mut flat).sim(&parts);
+    traffic.toys = game_render::animated_toy::Animated::load(&mut parts, "free09").sim;
+    let mut props = game_sim::world::Props::default();
+    traffic.attach(&mut props);
+    Some(props.props)
+}
+
+/// A walked object that is one of the map's moving meshes the Sim holds: a mesh (class 0) of the
+/// moving structure's (type 2) that is neither a riding bike's frame nor the parked plane's.
+fn is_map_mover(ee: &Ee, o: u32) -> bool {
+    ee.u8_at(o + 2) == 2 && ee.u32_at(o + 0x68) == 0 && ![BIKE, PARKED_PLANE].contains(&ee.u32_at(o + 0x84))
+}
+
+/// Stand the port's moving props where the image's objects stand (their `+0x120`), each told it is
+/// still, and check each sphere is the object's, bit for bit.
+fn stand_movers(ee: &Ee, movers: &mut [game_sim::world::Prop], objects: &[u32]) {
+    assert_eq!(movers.len(), objects.len(), "the map's moving meshes: the port's against the original's");
+    for (p, &o) in movers.iter_mut().zip(objects) {
+        let m = matrix(ee, o);
+        p.stand(&m);
+        p.moving = Some(game_sim::traffic::Moving::of(&m, &m, F(30.0)));
+        let (centre, _) = game_sim::flight_search::prop_box(p);
+        assert_eq!(centre.map(|c| c.to_bits()), got(ee, o + 0x40), "mover {o:#x}'s centre");
+        assert_eq!(p.radius.to_bits(), ee.u32_at(o + 0x60), "mover {o:#x}'s reach");
+        assert_eq!(ee.u8_at(o + 0x31) & 1, 1, "mover {o:#x} is collidable");
+    }
+}
+
+/// **An AI rider's feelers meet free09's path cars as the original's do.** From recording2's image,
+/// the map's six path cars and its windmill are read where they stand and stood there in the port's
+/// world (their spheres the original's, bit for bit). Then the first trailer cab is stood across the
+/// first AI rider's way — 6 to 110 feet along its heading and up to 20 across — and one tick is run
+/// on each side. Per spot: the original's walk hands out the cars and the windmill, none of them
+/// AI_IGNORE, after its static things and before the bikes, and the port's walk hands out the same
+/// props there; every sweep at one of them is the original's, met or not and feeler by feeler; the
+/// parked plane, which the port has not got, is swept by the original and never met; and the tick
+/// after is the original's. Some spots must meet the cab, and some must not.
+#[test]
+fn s336_the_feelers_meet_a_path_car() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let path = kit.ctx("states").join(S12E_STATE);
+    if !path.exists() {
+        return skip(&format!("{} is not there: `./kit state ram` of recording2.p2m2_SaveState.p2s", path.display()));
+    }
+    let ram = std::fs::read(&path).expect("the image");
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let Some(at) = named(&[
+        "ai_update",
+        "rand_state",
+        "ai_iface_walk_begin",
+        "ai_iface_walk_next",
+        "ai_iface_walk_end",
+        "bundle_sweep_object",
+        "class_bit",
+    ]) else {
+        return;
+    };
+    let [update, rand_state, begin, next, end, sweep, class_bit] = at[..] else { unreachable!() };
+    let Some(col) = bike_col() else { return };
+    let Some(mut movers) = free09_moving() else { return };
+    let Some((terrain_bytes, scene, props, trees)) = s323_free09(&kit, &ee) else { return };
+    let terrain = Terrain::parse(&terrain_bytes).expect("free09's terrain");
+    let tables: Tables = controls::tables(&ee);
+    let dt = F(f32::from_bits(S12E_DT));
+    let statics = props.props.len();
+
+    let (b, r) = S12E_RIDERS[0];
+    let walked = walk(&mut ee, &[begin, next, end], r);
+    let objects: Vec<u32> = walked.iter().copied().filter(|&o| is_map_mover(&ee, o)).collect();
+    let bikes: Vec<u32> = walked.iter().copied().filter(|&o| is_bike(&ee, o)).collect();
+    let plane: Vec<u32> = walked.iter().copied().filter(|&o| ee.u8_at(o + 2) == 2 && ee.u32_at(o + 0x68) == 0 && ee.u32_at(o + 0x84) == PARKED_PLANE).collect();
+    assert_eq!(bikes.len(), 4, "recording2's four riders' bikes");
+    assert_eq!(plane.len(), 1, "free09's parked plane");
+    assert_eq!(objects.len(), 7, "free09's six path cars and its windmill");
+    assert!(objects.iter().take(6).all(|&o| ee.u32_at(o + 0x84) == game_sim::flight_search::TOY), "the cars first, of the toys' category");
+    let pos = |o: u32| walked.iter().position(|&w| w == o).unwrap();
+    assert!(pos(objects[6]) < pos(plane[0]) && pos(plane[0]) < pos(bikes[0]), "the cars and windmill, the plane, then the bikes");
+    stand_movers(&ee, &mut movers, &objects);
+    let moved = objects[0];
+    let cab = movers[0].mesh.clone();
+    let mut props = props;
+    props.props.extend(movers);
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let mut world = Wooded { world: Place { ground, props }, trees };
+
+    let position = s12e_vf(&ee, b + 0xc0);
+    let heading = s12e_vf(&ee, b + 0x1d0);
+    let flat = (heading.x() * heading.x() + heading.z() * heading.z()).sqrt();
+    let (fx, fz) = (heading.x() / flat, heading.z() / flat);
+
+    let theirs: Rc<RefCell<Swept>> = Rc::default();
+    {
+        let t = theirs.clone();
+        s12e_pass_through(&mut ee, next, |_| {}, move |e| {
+            if e.v0() != 0 {
+                t.borrow_mut().walked.push(e.v0() as u32);
+            }
+        });
+        let t = theirs.clone();
+        s12e_pass_through(&mut ee, class_bit, |_| {}, move |e| t.borrow_mut().ignore_bit = e.v0() as u32);
+        let (t, swept) = (theirs.clone(), Rc::new(Cell::new((0u32, 0u32))));
+        let s2 = swept.clone();
+        s12e_pass_through(&mut ee, sweep, move |e| s2.set((e.r(4) as u32, e.r(5) as u32)), move |e| {
+            let (bundle, o) = swept.get();
+            let mut t = t.borrow_mut();
+            let hits = e.u32_at(e.u32_at(bundle + 0x6c) + 0xa4);
+            let hits = (0..t.feelers).map(|k| e.u32_at(hits + 4 * k) != 0).collect();
+            t.sweeps.push((o, e.v0() != 0, hits));
+        });
+    }
+
+    let filler = ai::spawn(&mut Rng::from_seed(0), 0, None, 2);
+    let (mut placements, mut meeting, mut mover_sweeps) = (0, 0, 0);
+    for along in [6.0f32, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 80.0, 95.0, 110.0] {
+        for across in [-20.0f32, -10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0, 20.0] {
+            let what = format!("cab {along} ft ahead, {across} ft across");
+            ee.load(0, &ram);
+            ee.set(28, u64::from(addr("boot_gp").unwrap()));
+            // Stand the cab there, on the rider's level: its matrix's translation moved, and its
+            // sphere's centre as the port's prop puts it (proved where the image stands it, above).
+            let m = matrix(&ee, moved);
+            let t = m.0[3];
+            let to = Vf::new(position.x() + fx * along - fz * across, position.y(), position.z() + fz * along + fx * across, t.w());
+            let m = Mat4([m.0[0], m.0[1], m.0[2], to]);
+            for (k, v) in to.to_bits().into_iter().enumerate() {
+                ee.set_u32(moved + 0x150 + 4 * k as u32, v);
+            }
+            let (centre, _) = game_sim::flight_search::prop_box(&game_sim::world::Prop::on(cab.clone(), &m));
+            for (k, v) in centre.into_iter().enumerate() {
+                ee.set_u32(moved + 0x40 + 4 * k as u32, v.to_bits());
+            }
+            world.world.props.props[statics].stand(&m);
+
+            let Some((mut seek_world, lists)) = s12e_seek_world(&kit, &ee) else { return };
+            let racer = s12e_racer(&ee, &lists, b, r);
+            let bike = s12e_bike(&ee, b, r);
+            let mut pilot = Pilot {
+                racer,
+                character: filler.character,
+                wander: filler.wander,
+                levers: bike.levers,
+                recovery: bike.recovery,
+                card: bike.card,
+                seat: Seat {
+                    speed_scale: bike.speed_scale,
+                    slow_radius: bike.slow_radius,
+                    slow_speed: bike.slow_speed,
+                    player: bike.player,
+                    air_cone: bike.air_cone,
+                    look_ahead: bike.rider.look_ahead,
+                    bump_chance: bike.rider.bump_chance,
+                    race_phase: bike.race_phase,
+                    path_net: bike.path_net,
+                    live: bike.live,
+                },
+                ignore: Vec::new(),
+            };
+            let ridden: Vec<Ridden> = bikes.iter().map(|&o| Ridden { col: col.clone(), at: matrix(&ee, o) }).collect();
+            let (mut yaw_rate, mut velocity) = (bike.yaw_rate, bike.velocity);
+            let cofg = s12e_vf(&ee, ee.u32_at(r + 0x7a4) + 0x60);
+            let mut rng = Rng::from_state(s12e_u64(&ee, rand_state));
+
+            *theirs.borrow_mut() = Swept { feelers: ee.u32_at(b + 0x2a4), ..Swept::default() };
+            ee.call(update, &[u64::from(b)], &[dt.to_f32()], S12E_BUDGET);
+            let answer = ee.v0() as u32;
+            let t = std::mem::take(&mut *theirs.borrow_mut());
+
+            let mount = Mount { rider: ai::Rider { velocity, ..bike.rider }, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
+            let thought = pilot.think_among(mount, &mut world, &ridden, &mut seek_world, &tables, &bike.others, None, None, &mut rng, dt);
+
+            // The walk: the cars and the windmill, none AI_IGNORE, then (theirs) the plane, then the
+            // bikes; the port's the same props by their place, then its bikes.
+            let theirs_movers: Vec<u32> = t.walked.iter().copied().filter(|&o| is_map_mover(&ee, o)).collect();
+            assert_eq!(theirs_movers, objects, "{what}: the movers walked");
+            for &o in &objects {
+                assert_eq!(ee.u32_at(o + 0x84) & t.ignore_bit, 0, "{what}: mover {o:#x} is not AI_IGNORE");
+            }
+            let id = |k: usize| (game_sim::flight_search::FIRST + statics + k) as u32;
+            let tail: Vec<Thing> = thought.walked.iter().copied().filter(|th| matches!(th, Thing::Solid { id: i, .. } if *i >= id(0))).collect();
+            let want: Vec<Thing> = (0..objects.len())
+                .map(|k| Thing::Solid { id: id(k), collidable: true, ai_ignore: false })
+                .chain((0..4).map(|k| Thing::Solid { id: ai::MOVING + k, collidable: true, ai_ignore: true }))
+                .collect();
+            assert_eq!(tail, want, "{what}: the port's moving world");
+
+            // Every sweep at a mover alike; the plane's and every other never met.
+            let ours_movers: Vec<(u32, Option<Vec<bool>>)> = thought.swept.iter().filter(|(i, _)| (id(0)..id(objects.len())).contains(i)).cloned().collect();
+            let theirs_swept: Vec<(u32, Option<Vec<bool>>)> = t
+                .sweeps
+                .iter()
+                .filter_map(|(o, met, hits)| Some((id(objects.iter().position(|x| x == o)?), met.then(|| hits.clone()))))
+                .collect();
+            assert_eq!(ours_movers, theirs_swept, "{what}: the sweeps at the movers");
+            assert!(t.sweeps.iter().any(|(o, _, _)| *o == plane[0]), "{what}: the original swept its parked plane");
+            assert!(t.sweeps.iter().filter(|(o, _, _)| !objects.contains(o)).all(|(_, m, _)| !m), "{what}: the original met something else");
+            assert!(thought.swept.iter().filter(|(i, _)| !(id(0)..id(objects.len())).contains(i)).all(|(_, h)| h.is_none()), "{what}: the port met something else");
+            mover_sweeps += theirs_swept.len();
+            if theirs_swept.iter().any(|(i, h)| *i == id(0) && h.is_some()) {
+                meeting += 1;
+            }
+
+            // The tick that follows.
+            let told = &thought.told;
+            assert_eq!(answer, u32::from(told.answer), "{what}: the answer");
+            assert_eq!(s12e_u64(&ee, rand_state), rng.state(), "{what}: the generator");
+            let racer = &pilot.racer;
+            assert_eq!(s12e_u64(&ee, b + 0x30), racer.brain.flags, "{what}: flags");
+            assert_eq!(s12e_u64(&ee, b + 0x38), racer.moves, "{what}: second flags");
+            let body = ee.u32_at(r + 0x7a4);
+            assert_eq!(got(&ee, body + 0x260), velocity.to_bits(), "{what}: body velocity");
+            let br = &racer.brain;
+            let words = [
+                ("speed", b + 0x80, br.speed),
+                ("steer", b + 0xf0, br.steer),
+                ("pitch", b + 0xf4, br.pitch),
+                ("throttle", b + 0xe0, br.throttle),
+                ("brake", b + 0xe4, br.brake),
+                ("target speed", b + 0x1e0, racer.seeker.speed),
+                ("lever steer", r + 0x628, pilot.levers.steer),
+                ("lever lean", r + 0x62c, pilot.levers.lean),
+                ("lever gas", r + 0x63c, pilot.levers.gas),
+                ("lever brake", r + 0x640, pilot.levers.brake),
+                ("back-up", r + 0x14c0, pilot.recovery.back_up),
+                ("swerve bar", r + 0x14c4, pilot.recovery.swerve_bar),
+                ("swerve", r + 0x14c8, pilot.recovery.swerve),
+                ("yaw rate", body + 0x284, yaw_rate),
+            ];
+            let off: Vec<String> = words
+                .into_iter()
+                .filter(|&(_, at, ours)| ee.u32_at(at) != ours.to_bits())
+                .map(|(name, at, ours)| format!("{name}: theirs {} ours {}", ee.f32_at(at), ours.to_f32()))
+                .collect();
+            assert!(off.is_empty(), "{what}:\n{}", off.join("\n"));
+            placements += 1;
+        }
+    }
+    println!("{placements} placements: {mover_sweeps} sweeps at the cars and the windmill, alike; {meeting} met the cab; the ticks alike");
+    assert!(meeting > 0, "no placement put the cab on a feeler");
+    assert!(meeting < placements, "every placement met the cab");
+}
