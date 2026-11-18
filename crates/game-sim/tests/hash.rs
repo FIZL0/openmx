@@ -605,7 +605,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 12304 since S328c: the bikes' particle emitters (`Sim::dust`), the same way.
     // 12328 since MD167: the props struck across a seam this tick (`PropSet::across`), made by the
     // strike and used up by the props' step inside one tick, so not walked and not on the wire.
+    // 12344 since MD167a: the world's seams as the props' collide pass found them
+    // (`PropSet::seams`), read again from the world every pass, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12328, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12344, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

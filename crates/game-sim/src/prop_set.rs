@@ -78,6 +78,11 @@ pub struct PropSet {
     /// [`crate::prop_contact::Across`]), from the strike to the props' step. Not state: made and used
     /// up inside one tick.
     pub across: Vec<crate::prop_contact::Across>,
+    /// The world's seams as the last collide pass in a world found them (MD167a,
+    /// [`PropSet::search_in_among`]): which axes wrap and the world's sides, `None` on a world that
+    /// does not wrap. The step wraps a body that rolls past one ([`Collection::close_seams`]). Not
+    /// state: the world's, read again every pass.
+    pub seams: Option<([bool; 2], [F; 2])>,
 }
 
 impl PropSet {
@@ -216,6 +221,7 @@ impl PropSet {
             listeners: Vec::new(),
             bike_frame: None,
             across: Vec::new(),
+            seams: None,
         };
         (set, said)
     }
@@ -343,7 +349,8 @@ impl PropSet {
         if self.tables.is_none() {
             return (out, strikes);
         }
-        let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
+        self.seams = world.area().filter(|_| world.wrap() != [false, false]).map(|a| (world.wrap(), [a.width, a.depth]));
+        let rayed = crate::prop_wreck::wreck_rays_first_in(self, wrecks, &*world);
         self.stamp_filed();
         self.heard_afresh();
         // The collections that searched, in order: each puts its listeners on after its search.
@@ -437,7 +444,11 @@ impl PropSet {
         let Some(tables) = &self.tables else { return };
         let tables = Arc::clone(tables);
         for k in 0..self.collections.len() {
+            let kept = self.seams.map(|(wrap, _)| self.collections[k].open_seams(wrap));
             crate::prop_props::step_named(self, k, dt, &tables, movers.of(k), strikers);
+            if let (Some(kept), Some((wrap, side))) = (kept, self.seams) {
+                self.collections[k].close_seams(kept, wrap, side);
+            }
         }
         self.walk_listeners(dt);
     }

@@ -585,6 +585,8 @@ impl Down {
         if let (Some(b), Some(probe), true) = (&mut bike_scene, self.search.stood, self.search.built) {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
+            // The seams the bones reach across on a world that wraps (MD167a).
+            let seams = crate::tiles::seam_shifts(&*world, probe, reach);
             // And the static props it listed (S165), the plants' trunks among them (S206), measured
             // again from the same probe, in the set they were gathered in.
             let (_, props, trees) = world.wooded_near(self.search.centre);
@@ -599,6 +601,7 @@ impl Down {
                 let first = Statics::knock_from(props, trees);
                 b.knocked = crate::ragdoll_scene::KnockedProp::resting(set, &self.statics, first, probe, reach);
                 b.knocked.extend(crate::ragdoll_scene::KnockedProp::near(set, probe, reach));
+                b.knocked.extend(crate::ragdoll_scene::KnockedProp::across(set, probe, reach, &seams));
             }
         }
         // The bones' segments are offered the bike through its collidable's sphere (S166).

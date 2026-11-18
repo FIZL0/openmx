@@ -17,6 +17,8 @@
 //! [`crate::Sim::frame_held_wrecked`]): [`Shared::take`] keeps each downed seat's hull where it stands
 //! before any seat steps, the set's collide pass has them all in every prop's world, and each seat's
 //! step hands its wreck bike what the props' rays struck on it ([`Shared::wreck_struck`]).
+//! A seat's strike across a wrapped world's seam (MD167) is read by the set's step as a Sim's own
+//! step reads it (MD167a, [`crate::prop_contact::across_moved`]).
 //! Between ticks every seat holds the same set, so the hash, the snapshot and
 //! a rollback's copy carry it as they did, and seat 0's is the one the shell draws.
 
@@ -183,6 +185,9 @@ impl Shared {
         drop(riders);
         let sides: Vec<Option<(Collider, Body, F)>> = sims.iter().map(|s| s.wreck_sides()[0]).collect();
         let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
+        // A seat that struck across a seam is seen by the bodies it struck, one width over, as in a
+        // Sim's own step (MD167a, `Sim::props_step`).
+        let moved = crate::prop_contact::across_moved(std::mem::take(&mut self.set.across), &mut bump.vehicles, &mut wrecks);
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
         flights.resize_with(sims.len(), || None);
         let mut planes: Vec<Option<(&mut Collider, Weighed<'_>)>> = flights
@@ -204,6 +209,7 @@ impl Shared {
         drop(others);
         drop(planes);
         drop(bodies);
+        crate::prop_contact::across_back(moved, &mut wrecks);
         for ((s, side), w) in sims.iter_mut().zip(&sides).zip(wrecks) {
             s.wrecks_pushed(&[side.map(|_| w)]);
         }

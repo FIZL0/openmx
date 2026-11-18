@@ -46,6 +46,9 @@
 //! On a world that wraps (MD167, MD29) every step path strikes in the world's seams too
 //! ([`strike_wrapped`]): a prop by the far side of a seam the bike's rays reach across has a copy one
 //! width over, by the bike, in the same search, and a copy's hit is its prop's.
+//! The wreck bike's rays do the same since MD167a ([`crate::prop_wreck::wreck_rays_wrapped`]), noted
+//! as its side's ([`PropSet::strike_as`]); the props' step, a Sim's and the shared seats', moves each
+//! striker to the bodies it struck ([`across_moved`]).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -460,12 +463,7 @@ impl PropSet {
         }
         // One struck across a seam is pushed a width back, by the bike (MD167).
         if let Some((player, _)) = strike.by {
-            self.across.retain(|a| a.player != player);
-            for &(at, by) in &strike.across {
-                let Some(p) = pushed.iter_mut().find(|p| (p.collection, p.object) == (strike.struck[at].0, strike.struck[at].1)) else { continue };
-                crate::seam::body(&mut p.body, [F::ZERO - by[0], F::ZERO - by[1]]);
-                self.across.push(Across { collection: p.collection, object: p.object, player, by, pushed: false });
-            }
+            self.across_struck(strike, &mut pushed, player);
         }
         // The bodies only the props' probes' mirrors name (B29), after the struck.
         for &(c, o) in &strike.probed {
@@ -475,6 +473,29 @@ impl PropSet {
             pushed.push(Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass });
         }
         pushed
+    }
+
+    /// **A strike by any striker** (MD167a): [`PropSet::strike`], where a body `strike` met across a
+    /// seam ([`Strike::across`]) is handed to the striker's frame a width back, by the striker, and
+    /// noted in [`PropSet::across`] as `player`'s, the other side the props' step reads it as, as a
+    /// riding bike's strike does. The wreck bike's rays (`players + i`) put theirs on this way.
+    pub fn strike_as(&mut self, strike: &Strike, player: usize) -> Vec<Pushed> {
+        let mut pushed = self.strike(strike);
+        if strike.by.is_none() {
+            self.across_struck(strike, &mut pushed, player);
+        }
+        pushed
+    }
+
+    /// The bodies `strike` met across a seam, among `pushed`, moved a width back for the striker's
+    /// frame and noted as `player`'s (its earlier ones this tick forgotten).
+    fn across_struck(&mut self, strike: &Strike, pushed: &mut [Pushed], player: usize) {
+        self.across.retain(|a| a.player != player);
+        for &(at, by) in &strike.across {
+            let Some(p) = pushed.iter_mut().find(|p| (p.collection, p.object) == (strike.struck[at].0, strike.struck[at].1)) else { continue };
+            crate::seam::body(&mut p.body, [F::ZERO - by[0], F::ZERO - by[1]]);
+            self.across.push(Across { collection: p.collection, object: p.object, player, by, pushed: false });
+        }
     }
 
     /// The struck bodies as the bike's frame left them, written back: the body and the centre its
@@ -566,18 +587,11 @@ impl crate::Sim {
             return;
         }
         let mut bump = self.bump(0, Vec::new());
-        // A striker that struck across a seam is seen by the bodies it struck, one width over (MD167).
-        let mut moved = Vec::new();
-        for a in std::mem::take(&mut self.traffic.props.across) {
-            if !moved.contains(&a.player)
-                && let Some(v) = bump.vehicles.get_mut(a.player)
-            {
-                v.node.origin = crate::seam::moved(v.node.origin, a.by);
-                moved.push(a.player);
-            }
-        }
         let sides = self.wreck_sides();
         let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
+        // A striker that struck across a seam is seen by the bodies it struck, one width over (MD167,
+        // a wreck bike's since MD167a).
+        let moved = across_moved(std::mem::take(&mut self.traffic.props.across), &mut bump.vehicles, &mut wrecks);
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
         let mut others: Vec<Other<'_>> = bump
             .colliders
@@ -589,7 +603,46 @@ impl crate::Sim {
         self.traffic.props.step_with(dt, movers, &mut others);
         drop(others);
         drop(bodies);
+        across_back(moved, &mut wrecks);
         let pushed: Vec<_> = sides.iter().zip(wrecks).map(|(s, w)| s.map(|_| w)).collect();
         self.wrecks_pushed(&pushed);
+    }
+}
+
+/// **The strikers that struck across a seam, by the bodies they struck** (MD167, MD167a): for the
+/// props' step each [`Across`]'s striker, once, stands `by` over — by its place among the step's
+/// other sides, `vehicles` then the wreck bikes' `bodies`: a riding bike's vehicle copy (its node's
+/// origin; nothing writes it back) or a wreck bike's body (its centre now and at the last substep).
+/// Answers each wreck body moved, by its place in `bodies`, with the shift and its places before and
+/// after the move, for [`across_back`].
+pub fn across_moved(across: Vec<Across>, vehicles: &mut [crate::contact::Vehicle], bodies: &mut [(Collider, Body, F)]) -> Vec<(usize, [F; 2], Body, Body)> {
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for a in across {
+        if seen.contains(&a.player) {
+            continue;
+        }
+        seen.push(a.player);
+        if let Some(v) = vehicles.get_mut(a.player) {
+            v.node.origin = crate::seam::moved(v.node.origin, a.by);
+        } else if let Some((k, (_, body, _))) = a.player.checked_sub(vehicles.len()).and_then(|k| Some((k, bodies.get_mut(k)?))) {
+            let before = *body;
+            crate::seam::body(body, a.by);
+            out.push((k, a.by, before, *body));
+        }
+    }
+    out
+}
+
+/// The wreck bodies [`across_moved`] moved, back their width after the step: a place the step left
+/// as the move made it is the one it had, word for word (a small coordinate plus a width is
+/// rounded, so moving it back would not be); one the step changed is moved back.
+pub fn across_back(moved: Vec<(usize, [F; 2], Body, Body)>, bodies: &mut [(Collider, Body, F)]) {
+    let same = |a: Vf, b: Vf| a.0.map(f32::to_bits) == b.0.map(f32::to_bits);
+    for (k, by, before, after) in moved {
+        let b = &mut bodies[k].1;
+        let back = [F::ZERO - by[0], F::ZERO - by[1]];
+        b.position = if same(b.position, after.position) { before.position } else { crate::seam::moved(b.position, back) };
+        b.last_position = if same(b.last_position, after.last_position) { before.last_position } else { crate::seam::moved(b.last_position, back) };
     }
 }
