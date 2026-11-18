@@ -280,6 +280,69 @@ fn vu0_macro_mode_runs_a_cross_product() {
 }
 
 #[test]
+fn vclip_shifts_its_six_bits_into_the_clip_flags() {
+    // The render's visibility test: vclipw then cfc2 from vi18 (the clip flag register).
+    let mut ee = prog(&[
+        i(0x36, 4, 10, 0), // lqc2  vf10, 0(a0)
+        0x4bca_51ff,       // vclipw.xyz vf10, vf10w
+        0x4842_9000,       // cfc2  v0, vi18
+        JR_RA,
+        NOP,
+    ]);
+    let a = ee.scratch(0);
+    let mut clip = |ee: &mut Ee, v: [f32; 4]| {
+        for (k, x) in v.iter().enumerate() {
+            ee.set_f32(a + 4 * k as u32, *x);
+        }
+        ee.call(CODE, &[a as u64], &[], 100);
+        ee.v0()
+    };
+    // x above +|w|, y below -|w|, z inside: bits 0 and 3
+    assert_eq!(clip(&mut ee, [2.0, -3.0, 0.5, -1.0]), 0x09);
+    // the next test shifts the last one up six; on the bound is inside
+    assert_eq!(clip(&mut ee, [1.0, -1.0, 0.0, 1.0]), 0x09 << 6);
+    // only the last four tests are kept
+    ee.clip = 0xff_ffff;
+    assert_eq!(clip(&mut ee, [0.0, 0.0, -5.0, 1.0]), 0xff_ffc0 | 0x20);
+}
+
+#[test]
+fn madd_adds_a_product_to_hi_lo_and_rd() {
+    // The R5900's three-operand mult, then maddu: a sum of two squares as the render's distance test
+    // makes it.
+    let mut ee = prog(&[
+        r(4, 5, 2, 0, 0x18),   // mult  v0, a0, a1
+        mmi(6, 7, 2, 0, 0x01), // maddu v0, a2, a3
+        JR_RA,
+        NOP,
+    ]);
+    ee.call(CODE, &[300, 400, 500, 600], &[], 100);
+    assert_eq!(ee.v0(), 420_000);
+    // past 32 bits: the carry goes into HI, LO is sign-extended
+    ee.call(CODE, &[0x1_0000, 0x1_0000, 0x8000, 0xffff], &[], 100);
+    let sum = 0x1_0000u64 * 0x1_0000 + 0x8000 * 0xffff;
+    assert_eq!(ee.v0(), sum as u32 as i32 as i64 as u64);
+    assert_eq!(ee.hi, (sum >> 32) as u32 as i32 as i64 as u64);
+}
+
+#[test]
+fn hardware_registers_are_storage_when_turned_on() {
+    let mut ee = prog(&[
+        i(0x0f, 0, 8, 0x1001),       // lui   t0, 0x1001
+        i(0x2b, 8, 4, -0x7000),      // sw    a0, 0x9000-0x10000(t0): VIF1's CHCR
+        i(0x2b, 8, 5, 0x0010),       // sw    a1, 0x10(t0)
+        i(0x23, 8, 2, -0x7000),      // lw    v0, CHCR
+        i(0x23, 8, 3, 0x0010),       // lw    v1
+        JR_RA,
+        NOP,
+    ]);
+    ee.io = Some(Default::default());
+    ee.call(CODE, &[0x145, 0x1234_5678], &[], 100);
+    assert_eq!(ee.v0(), 0x45, "a channel's start bit reads clear: the transfer is over at once");
+    assert_eq!(ee.r(3), 0x1234_5678);
+}
+
+#[test]
 fn a_hook_replaces_a_function_the_interpreter_should_not_run() {
     // `jal` to a routine that would need hardware (or that you have not identified yet); the hook stands
     // in for it. This is also how you trace: a hook that only records its arguments.

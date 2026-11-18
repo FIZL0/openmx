@@ -13652,3 +13652,17 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   through vt +0x98 from 0x004fe1e4 in the Linked effects item step 0x004fe010 (post-wreck; the in-frame
 #   calls come from 0x00128b68). Before the wreck's first frame these sum to 22 (race-jump, row 66) and 50
 #   (race-wheelie-launch, row 80), the lags R37/R41 found by inverting the spin.
+# S328d — C33's render-pass draws (crates/game-sim/tests/ai/draws.rs runs the render in Ee each frame:
+#   Ee::io holds the hardware registers, the kernel calls return 0, the three waits below are hooked).
+#   The render's only draws on the shared generator are track_strip_add's row height jitter (return
+#   0x003d9044), one per row a tyre track lays; with them the whole frame's draws are exactly C33's steps
+#   on ticks 4-63 and the generator agrees through 63.
+app_render boot 0x0016a7c0 the application's vt +0x38 (app): the frame's render, after the second marker
+dma_channel_sync boot 0x00177fe0 (channel bits, mode): waits on VIF1/GIF/VIF1 FIFO; hooked, returns 0
+dma_vif1_drain boot 0x00179cf0 (gfx, mode): waits for VIF1's tag address to leave the ring and/or GS
+#                                   FINISH; hooked
+vblank_wait boot 0x00191040 (count): spins on Timer 0 until the vblank counter 0x0048a520 reaches it; hooked
+vehicle_fx_tracks_walk boot 0x003d5a00 the vehicle fx manager's render walk (vtable 0x0045e828 slot): each
+#                                   entry with +8 == 1 (a tyre track; C33's entries 12 front, 13 rear) through
+#                                   its +0x10 object's vt +0xc (vehicle_fx_track_update), then the node's own
+#                                   (0x001333e0). So tyre tracks lay rows in the render, not in the sim half

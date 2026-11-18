@@ -28,11 +28,9 @@ fn through(ee: &mut Ee) {
     (ee.steps, ee.stack, ee.pc) = (steps, stack, pc);
 }
 
-/// One whole frame of the original, as the engine tick runs it after the pad read: the frame marker,
-/// the counter's step, the simulation, the second marker. The render is not run: it needs VU0's clip
-/// flags, which the interpreter lacks.
-fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
-    let dt = dt.0;
+/// Stub the interrupt mask, the SIF DMA and the cache write-back around a frame, and patch Timer 0's
+/// register reads to RAM; the stubs are returned for [`unstub_hardware`].
+fn stub_hardware(ee: &mut Ee) -> [u32; 6] {
     let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE, addr("sceSifCheckStatRpc").unwrap()];
     ee.hooks.insert(stubs[0], Box::new(|ee: &mut Ee| ee.set(2, 1)));
     ee.hooks.insert(stubs[1], Box::new(|_: &mut Ee| {}));
@@ -53,6 +51,20 @@ fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
         assert!(word & 0xffe0_ffff == 0x3c00_1000 || word & 0xffe0_ffff == 0x3c00_0000, "{at:#x} is not a `lui $r, 0x1000`: a different build");
         ee.set_u32(at, word & 0xffff_0000);
     }
+    stubs
+}
+
+fn unstub_hardware(ee: &mut Ee, stubs: [u32; 6]) {
+    for at in stubs {
+        ee.hooks.remove(&at);
+    }
+}
+
+/// One whole frame of the original, as the engine tick runs it after the pad read: the frame marker,
+/// the counter's step, the simulation, the second marker. The render after it is [`render`].
+fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
+    let dt = dt.0;
+    let stubs = stub_hardware(ee);
     *clock += f64::from(dt) * 1000.0;
     let wall = (*clock / 100.0).floor();
     ee.set_u32(addr("wall_ticks").unwrap(), wall as u32);
@@ -72,9 +84,7 @@ fn whole_frame(ee: &mut Ee, dt: F, clock: &mut f64) {
     assert_ne!(ee.v0(), 0, "the simulation asked to stop");
     ee.set_u32(app + 0x32c, 0);
     ee.call(marker, &[u64::from(app), 2], &[], 4_000_000_000);
-    for at in stubs {
-        ee.hooks.remove(&at);
-    }
+    unstub_hardware(ee, stubs);
 }
 
 /// Where a draw on the shared generator came from, by its return address.
@@ -88,11 +98,13 @@ enum Site {
     Dust,
     /// The AI's own draws (ported in `crate::ai`).
     Ai,
+    /// A tyre track laying a row (in the render pass).
+    Track,
     Other,
 }
 
 /// The named functions and their lengths in bytes (from `./kit fn`).
-const SITES: [(&str, u32, Site); 11] = [
+const SITES: [(&str, u32, Site); 12] = [
     ("ai_feed", 704, Site::Ai),
     ("ai_habits", 2404, Site::Ai),
     ("rider_animation", 2068, Site::Look),
@@ -104,6 +116,7 @@ const SITES: [(&str, u32, Site); 11] = [
     ("engine_note_rev", 768, Site::Note),
     ("emit", 3424, Site::Dust),
     ("emit_other", 2748, Site::Dust),
+    ("track_strip_add", 1776, Site::Track),
 ];
 
 /// The original's human holds a neutral analog pad in C33; the image's buffers still hold an old
@@ -184,6 +197,31 @@ pub(crate) fn c33_dust(tick: u64) -> Vec<(&'static str, usize)> {
     v
 }
 
+/// S328d: the tyre tracks that lay a row in C33's render pass, one draw each (the row's height
+/// jitter): each run is a rider, its entry in its manager's list (12 the front tyre's track, 13 the
+/// rear's) and the first and last ticks it lays one. The manager's render walk updates its tracks in
+/// rider order ai1, ai0, ai2, human; a track lays a row each 2 ft its tyre moves, so a slow tick
+/// lays none. The human (no throttle) never lays one here.
+pub(crate) const C33_TRACKS: [(&str, usize, u64, u64); 10] = [
+    ("ai0", 12, 57, 60),
+    ("ai0", 13, 17, 26),
+    ("ai0", 13, 28, 35),
+    ("ai0", 13, 37, 42),
+    ("ai0", 13, 62, 63),
+    ("ai1", 13, 21, 28),
+    ("ai1", 13, 30, 63),
+    ("ai2", 13, 17, 26),
+    ("ai2", 13, 28, 38),
+    ("ai2", 13, 40, 54),
+];
+
+/// The tracks [`C33_TRACKS`] has laying a row at `tick`, sorted.
+pub(crate) fn c33_tracks(tick: u64) -> Vec<(&'static str, usize)> {
+    let mut v: Vec<(&'static str, usize)> = C33_TRACKS.iter().filter(|r| (r.2..=r.3).contains(&tick)).map(|r| (r.0, r.1)).collect();
+    v.sort();
+    v
+}
+
 /// A body's animation object: its look-around clock (`+0xa30`), and the request block it reads
 /// (`+0x488`) with the gate's cut flag at `+0x140`.
 const BODY_LOOK: u32 = 0xa30;
@@ -195,8 +233,9 @@ const REQUEST_CUT: u32 = 0x140;
 /// generator through tick 16. The draws that are not the AI's are the body look timers (tick 7: the
 /// three AI riders, tick 8: the human), the engine note (tick 15: two each for ai0 and ai2), and the
 /// dust emitters from 17 (S328a: each re-armed look clock is the port's remap of its draw, the
-/// bodies drawing in the game's player order). From 17 the capture steps further than the frame's sim half: the rest is in
-/// the render, which is not run here.
+/// bodies drawing in the game's player order). S328d: the render runs after each frame too, and its
+/// draws are the tyre tracks' rows; with them the frame draws exactly what the capture steps on every
+/// tick, and the generator agrees through the window's end.
 #[test]
 fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     let kit = match Kit::load() {
@@ -272,11 +311,26 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     }
     let look_owner = |ee: &Ee, obj: u32| C33_RIDERS.iter().position(|&(r, _, _)| ee.u32_at(r + 0xdb4) == obj).map_or("?", |k| C33_NAMES[k]);
     let mut clock = f64::from(ee.u32_at(wall_ticks)) * 100.0;
+    render_setup(&mut ee);
+    // S328d: each tyre track's update, by its rider and its entry in the rider's manager.
+    let entries: Vec<(u32, &str, usize)> = c33_entries(&ee);
+    let laid: Rc<RefCell<Vec<(u32, usize)>>> = Rc::default();
+    let (t, l) = (Rc::clone(&laid), Rc::clone(&log));
+    ee.hooks.insert(
+        addr("vehicle_fx_track_update").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let (before, a0) = (l.borrow().len(), ee.r(4) as u32);
+            through(ee);
+            t.borrow_mut().push((a0, l.borrow().len() - before));
+        }),
+    );
     let mut generator_through = rows[0].0;
     for w in rows.windows(2) {
         let tick = w[1].0;
         neutral_pad(&mut ee);
         whole_frame(&mut ee, w[0].1, &mut clock);
+        let sim_draws = log.borrow().len();
+        render(&mut ee);
         for (k, &(_, body, _)) in C33_RIDERS.iter().enumerate() {
             let mine: String = (0..0x2c0).map(|i| format!("{:02x}", ee.read(body + i, 1) as u8)).collect();
             for (o, what) in [(0x60usize, "centre"), (0x1a0, "quat"), (0x260, "velocity"), (0x280, "spin")] {
@@ -288,11 +342,12 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         let count = |s: Site| calls.iter().filter(|&&ra| site(ra) == s).count();
         let theirs = steps_between(w[0].2, w[1].2);
         println!(
-            "tick {tick}: look {} {looks:?}, note {}, dust {}, ai {}, other {}; the capture steps {theirs:?}",
+            "tick {tick}: look {} {looks:?}, note {}, dust {}, ai {}, track {}, other {}; the capture steps {theirs:?}",
             count(Site::Look),
             count(Site::Note),
             count(Site::Dust),
             count(Site::Ai),
+            count(Site::Track),
             count(Site::Other)
         );
         assert_eq!(count(Site::Other), 0, "tick {tick}: a draw from an unnamed site: {calls:x?}");
@@ -339,26 +394,70 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         if generator_through + 1 == tick && s12e_u64(&ee, rand_state) == w[1].2 {
             generator_through = tick;
         }
-        // The generator parts at 17 only because the render's draws are missing: the capture always
-        // steps at least as far as this frame's sim half.
-        if let Some(t) = theirs {
-            assert!(t >= calls.len(), "tick {tick}: the capture steps {t}, the frame draws {}", calls.len());
+        // S328d: the render's draws are the tyre tracks' rows, one draw each, as C33_TRACKS says,
+        // and nothing in the sim half lays a row.
+        assert!(calls[..sim_draws].iter().all(|&ra| site(ra) != Site::Track), "tick {tick}: a track row in the sim half");
+        assert!(calls[sim_draws..].iter().all(|&ra| site(ra) == Site::Track), "tick {tick}: a render draw that is not a track row: {:x?}", &calls[sim_draws..]);
+        let mut rows_laid = Vec::new();
+        for (en, n) in std::mem::take(&mut *laid.borrow_mut()) {
+            let &(_, name, entry) = entries.iter().find(|e| e.0 == en).unwrap_or_else(|| panic!("tick {tick}: track {en:#x} is no rider's"));
+            assert!(n <= 1, "tick {tick}: {name}'s entry {entry} drew {n}");
+            if n == 1 {
+                rows_laid.push((name, entry));
+            }
         }
+        rows_laid.sort();
+        assert_eq!(rows_laid, c33_tracks(tick), "tick {tick}: the tracks that laid a row");
+        assert_eq!(rows_laid.len(), count(Site::Track), "tick {tick}: the track draws are the rows'");
+        // The sim half and the render together are the whole frame's draws: exactly the capture's.
+        assert_eq!(theirs, Some(calls.len()), "tick {tick}: the capture's steps against the frame's draws");
     }
-    assert_eq!(generator_through, 16, "the generator agrees through");
+    assert_eq!(generator_through, rows[TICKS].0, "the generator agrees through");
 }
 
 
 /// Every rider's emitters: the emitter, its rider and its entry in the rider's manager (`+0x1490`,
 /// the entries' count at `+0x34` and their list at `+0x3c`; an entry's emitter at `+0x14`).
 pub(crate) fn c33_emitters(ee: &Ee) -> Vec<(u32, &'static str, usize)> {
+    c33_entries(ee).into_iter().map(|(entry, name, i)| (ee.u32_at(entry + 0x14), name, i)).collect()
+}
+
+/// Every rider's manager entries (`+0x1490`): the entry, its rider and its place in the list.
+pub(crate) fn c33_entries(ee: &Ee) -> Vec<(u32, &'static str, usize)> {
     let mut out = Vec::new();
     for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
         let m = ee.u32_at(r + 0x1490);
         for i in 0..ee.u32_at(m + 0x34) {
-            let entry = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
-            out.push((ee.u32_at(entry + 0x14), C33_NAMES[k], i as usize));
+            out.push((ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i), C33_NAMES[k], i as usize));
         }
     }
     out
+}
+
+/// The render's waits on the hardware, stubbed to return 0.
+const RENDER_WAITS: [&str; 3] = ["dma_channel_sync", "dma_vif1_drain", "vblank_wait"];
+
+/// Make the render runnable in the interpreter: the hardware registers as storage (DMA over at
+/// once), the kernel's calls returning 0, and the render's waits stubbed.
+fn render_setup(ee: &mut Ee) {
+    ee.io = Some(Default::default());
+    for at in (0x0010_0000..0x0041_0000).step_by(4) {
+        let (li, sys) = (ee.u32_at(at), ee.u32_at(at + 4));
+        if li >> 16 == 0x2403 && sys == 0xc && !ee.hooks.contains_key(&at) {
+            ee.hooks.insert(at, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+        }
+    }
+    for name in RENDER_WAITS {
+        ee.hooks.insert(addr(name).unwrap(), Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    }
+}
+
+/// The frame's render (the application's vt+0x38 after the second marker).
+fn render(ee: &mut Ee) {
+    let stubs = stub_hardware(ee);
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let at = ee.u32_at(ee.u32_at(app + 0x3c4) + 0x38);
+    assert_eq!(at, addr("app_render").unwrap(), "the application's render is not where it was");
+    ee.call(at, &[u64::from(app)], &[], 4_000_000_000);
+    unstub_hardware(ee, stubs);
 }
