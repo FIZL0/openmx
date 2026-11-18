@@ -385,6 +385,13 @@ impl PackFlier {
         self.read(&self.phy)
     }
 
+    /// The plane's SLUS-21104 collision record off the pack (MD110a1, [`mxvatv_record`]): its `.phy`,
+    /// the skin's model and its ray probe. `None` where the pack lacks one of them or one does not
+    /// read (said on stderr).
+    pub fn mxvatv_record(&self) -> Option<flight::MxvatvRecord> {
+        mxvatv_record(&self.phy_bytes()?, &self.psg()?, &self.rays()?).map_err(|e| eprintln!("{}: {}: {e}", self.id, self.skin)).ok()
+    }
+
     /// The kind's own follow-camera file's bytes (MD108), `None` where the pack has none.
     pub fn camera_bytes(&self) -> Option<Vec<u8>> {
         Some(&self.cameras).filter(|c| !c.is_empty()).and_then(|c| self.read(c))
@@ -460,6 +467,29 @@ pub fn mxvatv_flight(phy: &[u8], model_one: bool, modify: impl FnOnce(&mut game_
     let mut plane = game_sim::phy::Plane::read_mxvatv_bytes(phy, model_one);
     modify(&mut plane.plane);
     Flight::new_mxvatv(&plane)
+}
+
+/// **SLUS-21104's plane record off a pack's files** (MD110a1, [`flight::MxvatvRecord::read`], which
+/// MD110a proved against biplane3's image): the `.phy`, the skin's `.psg` and its `…M.col`.
+pub fn mxvatv_record(phy: &[u8], psg: &[u8], rays: &[u8]) -> Result<flight::MxvatvRecord, String> {
+    flight::MxvatvRecord::read(phy, psg, rays, &game_sim::camera::CurveTable::build())
+}
+
+/// Whether a plane flown over `world` takes SLUS-21104's record (MD110a1): only where the world is
+/// SLUS-21104's terrain ([`World::mxvatv_terrain`]). The record's pass then stands in for MX
+/// Unleashed's search and resolution, and it asks nothing but that terrain, so over any other world
+/// a plane with it would meet neither the ground nor the track's meshes.
+pub fn takes_mxvatv_record(world: &dyn World) -> bool {
+    world.mxvatv_terrain().is_some()
+}
+
+/// `flight` with `record` where the world it flies is SLUS-21104's terrain (`on_mxvatv_ground`,
+/// [`takes_mxvatv_record`]), so its hull strikes that ground; as it was otherwise.
+pub fn with_mxvatv_record_on(flight: Flight, record: Option<&flight::MxvatvRecord>, on_mxvatv_ground: bool) -> Flight {
+    match record.filter(|_| on_mxvatv_ground) {
+        Some(r) => flight.with_mxvatv_record(r.clone()),
+        None => flight,
+    }
 }
 
 /// How many liveries the disc has of each machine: the factory's skins 0 and 1. Its 2 and 3 are the
@@ -4078,6 +4108,30 @@ mod tests {
         assert!(atv.mxvatv.is_some() && atv.built(at, forward, &mut floor).mxvatv.is_some());
         let mxu = KiowaRide::new(heli.as_bytes(), 0, None);
         assert!(mxu.mxvatv.is_none() && mxu.built(at, forward, &mut floor).mxvatv.is_none());
+    }
+
+    #[test]
+    fn a_pack_plane_takes_slus_21104s_record_only_over_its_terrain() {
+        // MD110a1: the record's pass asks only SLUS-21104's terrain, so a world without it keeps MX
+        // Unleashed's search and resolution.
+        use game_sim::world::Flat;
+        let terrain = game_sim::atv_ground::Terrain {
+            map: None,
+            min: Vf::ZERO,
+            max: Vf::ZERO,
+            margin: F::ZERO,
+            per_sample: F::ONE,
+            height_scale: F::ONE,
+            coarse: false,
+            split_one_way: true,
+        };
+        assert!(takes_mxvatv_record(&game_sim::handling::ground::Under(terrain)));
+        assert!(!takes_mxvatv_record(&Flat::default()));
+        let record = flight::MxvatvRecord::default();
+        let plane = || mxvatv_flight(b"[Aero]\nChord = 4\n", true, |_| {});
+        assert!(with_mxvatv_record_on(plane(), Some(&record), true).record_mxvatv.is_some());
+        assert!(with_mxvatv_record_on(plane(), Some(&record), false).record_mxvatv.is_none());
+        assert!(with_mxvatv_record_on(plane(), None, true).record_mxvatv.is_none());
     }
 
     #[test]

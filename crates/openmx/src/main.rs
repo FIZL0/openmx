@@ -5729,6 +5729,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .collect();
     // What it reads its own (P127): it outlives the load's thread.
     let plane_files = Arc::new(std::sync::Mutex::new(plane_files));
+    // Whether the ground the plane flies is SLUS-21104's terrain, where a pack plane takes its record (MD110a1).
+    let mxvatv_ground = vehicle::takes_mxvatv_record(&sim_world::Ground::new(&sim_terrain, &place.terrain));
     let flight_for = {
         let (files, bike_box, t) = (plane_files.clone(), bike_box.clone(), place.terrain.clone());
         let wreck_hull = wreck_hull.clone();
@@ -5740,7 +5742,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             f.phy.as_ref().map(|bytes| {
                 let mut flight = match f.mxvatv {
                     // MX vs. ATV's (MD80e), on SLUS-21104's steps
-                    Some(one) => vehicle::mxvatv_flight(bytes, one, |plane| mods.plane(seat, plane)),
+                    Some(one) => vehicle::with_mxvatv_record_on(vehicle::mxvatv_flight(bytes, one, |plane| mods.plane(seat, plane)), f.record.as_ref(), mxvatv_ground),
                     None => {
                         let mut plane = phy::Plane::read_bytes(bytes);
                         mods.plane(seat, &mut plane);
