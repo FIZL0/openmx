@@ -1,7 +1,8 @@
 //! MD75c1 — the world's spatial database move (`atv_spatial_move`), proved against SLUS-21104.
 //!
 //! The oracle is MD37a's RAM image of Desert Oasis Free Ride (`context/mxvatv-ps2/md37a/atv-r-spawn.ee.bin`,
-//! as in `tests/atv_quad.rs`). Its database has three cells and no portal between them, so the walk,
+//! as in `tests/atv_quad.rs`), and for the image's own database C28's four too
+//! (`c28-atv-{r,s}-{spawn,air}.ee.bin`, MD116a), what they read found in each. Its database has three cells and no portal between them, so the walk,
 //! the overlaps and the link pool never run on its own data. The tests:
 //!
 //! - **generated databases**: 12,000 of them laid in the image's free RAM — a tree of cells joined by
@@ -74,21 +75,60 @@ const IMAGE_HEAP: u32 = AREA + 0x1000;
 
 const BUDGET: u64 = 4_000_000;
 
+/// MD37a's image and C28's four, as in `tests/atv_gather.rs` (MD116a). The tests of the image's own
+/// database run on each; those that only lay their own databases in its free RAM run on the first.
+const IMAGES: [&str; 5] = ["atv-r-spawn", "c28-atv-r-spawn", "c28-atv-r-air", "c28-atv-s-spawn", "c28-atv-s-air"];
+
+/// MD37a's image, for the tests that bring their own databases.
 fn image() -> Option<Ee> {
+    image_of(IMAGES[0])
+}
+
+fn image_of(name: &str) -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let path = kit.ctx("mxvatv-ps2/md37a").join(format!("atv-r-spawn.ee{}", ".bin"));
+    let path = kit.ctx("mxvatv-ps2/md37a").join(format!("{name}.ee{}", ".bin"));
     if !path.exists() {
         skip(&format!(
-            "{} is not there: it is MD37a's (eeMemory.bin of atv-r-spawn.p2s; memory: md37a ATV states live in s2)",
+            "{} is not there: it is MD37a's or C28's (eeMemory.bin of the state; memory: md37a ATV states live in s2)",
             path.display()
         ));
         return None;
     }
     let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
-    if ee.u32_at(0x0065_52b0 + 4) != LIST_VT || ee.u32_at(0x0065_4680 + 4) != CELL_VT {
-        panic!("{} is not the MX vs. ATV image these addresses are from", path.display());
-    }
+    spots(&ee, name);
     Some(ee)
+}
+
+/// A quad's and a bike's vtables (at `+4`).
+const QUAD_VT: u32 = 0x003c_e250;
+const BIKE_VT: u32 = 0x003d_0450;
+
+/// What the image tests read, found in the image, not pinned (C28's heap is not MD37a's): the
+/// database's cells (every object with the cell's vtable, lowest first: three in Desert Oasis); the
+/// entries of the player's quad's riding probe (`+0xd8`) and frame mesh (`+0xd0`); the vehicles —
+/// the player's quad (the lowest quad), the idle quad and the lowest bike — and the space's tree.
+struct Spots {
+    cells: Vec<u32>,
+    entries: [u32; 2],
+    vehicles: [u32; 3],
+    tree: u32,
+}
+
+/// Every object in the image with `vt` at `+4`, lowest first.
+fn with_vt(ee: &Ee, vt: u32) -> Vec<u32> {
+    let vt = vt.to_le_bytes();
+    (0x0010_0000..ee.ram.len() - 8).step_by(4).filter(|&a| ee.ram[a + 4..a + 8] == vt).map(|a| a as u32).collect()
+}
+
+fn spots(ee: &Ee, name: &str) -> Spots {
+    let (cells, quads, bikes) = (with_vt(ee, CELL_VT), with_vt(ee, QUAD_VT), with_vt(ee, BIKE_VT));
+    assert_eq!([cells.len(), quads.len(), bikes.len()], [3, 2, 4], "{name}: Desert Oasis Free Ride's cells, quads and bikes");
+    let probe = ee.u32_at(quads[0] + 0xd8);
+    let tables = ee.u32_at(ee.u32_at(probe + 0x20) + 4);
+    assert!(cells.contains(&tables), "{name}: the probe's space is one of the cells");
+    let (tree, moving) = (ee.u32_at(tables + 0x28), ee.u32_at(tables + 0x2c));
+    assert_eq!([ee.u32_at(tree + 4), ee.u32_at(moving + 4)], [TREE_VT, LIST_VT], "{name}: the space's tree and list");
+    Spots { cells, entries: [probe + 0x18, ee.u32_at(quads[0] + 0xd0) + 0x18], vehicles: [quads[0], quads[1], bikes[0]], tree }
 }
 
 // --- the heap the original's allocations are served from ------------------------------------------------
@@ -1194,9 +1234,6 @@ fn the_spatial_move_is_the_originals() {
     }
 }
 
-/// The image's three cells, and the records of the quad's trigger probe and of the frame mesh.
-const IMAGE_CELLS: [u32; 3] = [0x0065_45c0, 0x0065_4680, 0x0084_d8b0];
-const IMAGE_ENTRIES: [u32; 2] = [0x0159_c518, 0x0162_7388];
 
 /// The image's entries, numbered as they are met.
 #[derive(Default)]
@@ -1229,9 +1266,9 @@ fn read_image(ee: &Ee, map: &Map, items: &RefCell<Items>, entry: u32) -> (Databa
     (db, rec)
 }
 
-fn image_map(ee: &Ee, portals: Vec<u32>) -> Map {
+fn image_map(ee: &Ee, cells: &[u32], portals: Vec<u32>) -> Map {
     let mut subs = vec![];
-    for &c in &IMAGE_CELLS {
+    for &c in cells {
         for o in [0x28, 0x2c] {
             let s = ee.u32_at(c + o);
             if s != 0 && !subs.contains(&s) {
@@ -1239,28 +1276,35 @@ fn image_map(ee: &Ee, portals: Vec<u32>) -> Map {
             }
         }
     }
-    Map { cells: IMAGE_CELLS.to_vec(), portals, subs, pool: ee.u32_at(POOL_AT) }
+    Map { cells: cells.to_vec(), portals, subs, pool: ee.u32_at(POOL_AT) }
 }
 
 #[test]
 fn the_images_own_database_moves_as_the_original() {
-    let Some(base) = image() else { return };
+    for name in IMAGES {
+        let Some(base) = image_of(name) else { return };
+        own_database_moves(&base, name);
+    }
+}
+
+fn own_database_moves(base: &Ee, name: &str) {
+    let Spots { cells, entries, .. } = spots(base, name);
     let mut tally = vec![];
-    for (e, &entry) in IMAGE_ENTRIES.iter().enumerate() {
+    for (e, &entry) in entries.iter().enumerate() {
         for laid in [false, true] {
             let mut ee = Ee::with_ram(base.ram.clone());
             let heap: Shared = Rc::new(RefCell::new(Heap { next: IMAGE_HEAP, end: AREA_END, sizes: BTreeMap::new() }));
             hook_heap(&mut ee, &heap);
             let rec_at = ee.u32_at(entry + 8);
             let home = ee.u32_at(rec_at + 4);
-            assert!(IMAGE_CELLS.contains(&home), "entry {entry:#x}'s record is in cell {home:#x}");
+            assert!(cells.contains(&home), "{name}: entry {entry:#x}'s record is in cell {home:#x}");
             let last = vf_at(&ee, rec_at + 0x10);
             let (centre, reach);
             let mut portals = vec![];
             if laid {
                 // A portal a foot along +x of the last centre, between the entry's cell and another of
                 // the image's, and the centre moved through it, its sphere reaching back.
-                let other = *IMAGE_CELLS.iter().find(|&&c| c != home && ee.u32_at(c + 0x2c) != 0).unwrap();
+                let other = *cells.iter().find(|&&c| c != home && ee.u32_at(c + 0x2c) != 0).unwrap();
                 let l = v3(last);
                 let at = add(l, [1.0, 0.0, 0.0]);
                 let corners = [[0.0, -4.0, -4.0], [0.0, 4.0, -4.0], [0.0, 4.0, 4.0], [0.0, -4.0, 4.0]].map(|c| vf(add(at, c), 1.0));
@@ -1285,7 +1329,7 @@ fn the_images_own_database_moves_as_the_original() {
                 centre = vf(add(v3(last), [0.0, 0.125, 0.0]), last.w());
                 reach = F::ZERO;
             }
-            let map = image_map(&ee, portals);
+            let map = image_map(&ee, &cells, portals);
             let items = Items::new(entry);
             let (mut db, mut rec) = read_image(&ee, &map, &items, entry);
             let was = rec.clone();
@@ -1295,14 +1339,14 @@ fn the_images_own_database_moves_as_the_original() {
             ee.call(MOVE, &[entry as u64, CENTRE as u64, HALF as u64], &[reach.0], BUDGET);
             let (want_db, want_rec) = read_image(&ee, &map, &items, entry);
             atv_spatial::spatial_move(&mut db, &mut rec, 0, centre, vf([1.0, 1.0, 1.0], 0.0), reach);
-            assert_eq!((&db, &rec), (&want_db, &want_rec), "entry {entry:#x} (portal laid: {laid}): the port's move is not the original's");
+            assert_eq!((&db, &rec), (&want_db, &want_rec), "{name}: entry {entry:#x} (portal laid: {laid}): the port's move is not the original's");
             assert_eq!(rec.last.to_bits(), want_rec.last.to_bits());
             if laid {
-                assert_ne!(was.cell, rec.cell, "entry {entry:#x} did not walk through the laid portal");
-                assert_eq!(rec.extras.len(), 1, "entry {entry:#x} does not reach back into its old cell");
+                assert_ne!(was.cell, rec.cell, "{name}: entry {entry:#x} did not walk through the laid portal");
+                assert_eq!(rec.extras.len(), 1, "{name}: entry {entry:#x} does not reach back into its old cell");
             }
             tally.push(format!(
-                "entry {e} portal {laid}: cell {:?} -> {:?}, slot {:?} -> {:?}, extras {}, pool chunks {}",
+                "{name}: entry {e} portal {laid}: cell {:?} -> {:?}, slot {:?} -> {:?}, extras {}, pool chunks {}",
                 was.cell,
                 rec.cell,
                 was.slot,
@@ -1317,9 +1361,6 @@ fn the_images_own_database_moves_as_the_original() {
     }
 }
 
-/// The vehicles' bodies: the player's quad, then two parked at the origin.
-const IMAGE_VEHICLES: [u32; 3] = [0x015e_0690, 0x0165_7090, 0x019b_87f0];
-
 /// The vehicles' spheres moved in the image's own tree (shared by two of its cells; 4264 nodes):
 /// the player's, its key `0x780900f5`, to its last centre a little higher (the same key: its nodes
 /// widened), a long way off (out of four corners and into others, nodes made) and far up (the root
@@ -1327,14 +1368,21 @@ const IMAGE_VEHICLES: [u32; 3] = [0x015e_0690, 0x0165_7090, 0x019b_87f0];
 /// out, put nowhere) and to the player's place. The moves' half and reach are the vehicles' (40).
 #[test]
 fn the_images_tree_moves_as_the_original() {
-    let Some(base) = image() else { return };
+    for name in IMAGES {
+        let Some(base) = image_of(name) else { return };
+        tree_moves(&base, name);
+    }
+}
+
+fn tree_moves(base: &Ee, name: &str) {
+    let Spots { cells, vehicles, tree, .. } = spots(base, name);
     let mut tally = vec![];
-    for (v, &vehicle) in IMAGE_VEHICLES.iter().enumerate() {
+    for (v, &vehicle) in vehicles.iter().enumerate() {
         let entry = base.u32_at(vehicle + 0xd80) + 0x18;
         let rec_at = base.u32_at(entry + 8);
-        assert_eq!(base.u32_at(rec_at + 8), 0x0065_47c0, "vehicle {vehicle:#x}'s sphere is not in the tree");
-        let last = v3(vf_at(&base, rec_at + 0x10));
-        let player = v3(vf_at(&base, base.u32_at(IMAGE_VEHICLES[0] + 0xd80) + 0x160));
+        assert_eq!(base.u32_at(rec_at + 8), tree, "{name}: vehicle {vehicle:#x}'s sphere is not in the tree");
+        let last = v3(vf_at(base, rec_at + 0x10));
+        let player = v3(vf_at(base, base.u32_at(vehicles[0] + 0xd80) + 0x160));
         let tos: Vec<V3> = if v == 0 {
             vec![add(last, [0.0, 0.5, 0.0]), add(last, [300.0, 20.0, -150.0]), add(last, [0.0, 900.0, 0.0])]
         } else {
@@ -1344,7 +1392,7 @@ fn the_images_tree_moves_as_the_original() {
             let mut ee = Ee::with_ram(base.ram.clone());
             let heap: Shared = Rc::new(RefCell::new(Heap { next: IMAGE_HEAP, end: AREA_END, sizes: BTreeMap::new() }));
             hook_heap(&mut ee, &heap);
-            let map = image_map(&ee, vec![]);
+            let map = image_map(&ee, &cells, vec![]);
             let items = Items::new(entry);
             let (mut db, mut rec) = read_image(&ee, &map, &items, entry);
             let was = rec.clone();
@@ -1357,12 +1405,12 @@ fn the_images_tree_moves_as_the_original() {
             atv_spatial::spatial_move(&mut db, &mut rec, 0, centre, half, reach);
             assert!(
                 (&db, &rec) == (&want_db, &want_rec),
-                "vehicle {vehicle:#x} to {to:?}: the port's move is not the original's (record {rec:?}, want {want_rec:?})"
+                "{name}: vehicle {vehicle:#x} to {to:?}: the port's move is not the original's (record {rec:?}, want {want_rec:?})"
             );
             assert_eq!(rec.last.to_bits(), want_rec.last.to_bits());
             let Sub::Tree(t) = &db.subs[rec.sub] else { panic!("the sphere left the tree") };
             tally.push(format!(
-                "vehicle {v} to {to:?}: {:x?} -> {:x?}, tree nodes {} (count {}), stamp {}, root height {:?} ± {:?}",
+                "{name}: vehicle {v} to {to:?}: {:x?} -> {:x?}, tree nodes {} (count {}), stamp {}, root height {:?} ± {:?}",
                 was.slot,
                 rec.slot,
                 t.nodes.iter().flatten().count(),
@@ -1633,11 +1681,11 @@ fn the_spatial_move_on_ram_is_the_originals() {
 
 /// The portal [`the_images_own_database_moves_as_the_original`] lays a foot along +x of `entry`'s last
 /// centre, linking its cell and another; the centre beyond it and the reach back.
-fn lay_image_portal(ee: &mut Ee, entry: u32) -> (Vf, F) {
+fn lay_image_portal(ee: &mut Ee, cells: &[u32], entry: u32) -> (Vf, F) {
     let rec_at = ee.u32_at(entry + 8);
     let home = ee.u32_at(rec_at + 4);
     let last = vf_at(ee, rec_at + 0x10);
-    let other = *IMAGE_CELLS.iter().find(|&&c| c != home && ee.u32_at(c + 0x2c) != 0).unwrap();
+    let other = *cells.iter().find(|&&c| c != home && ee.u32_at(c + 0x2c) != 0).unwrap();
     let l = v3(last);
     let at = add(l, [1.0, 0.0, 0.0]);
     let corners = [[0.0, -4.0, -4.0], [0.0, 4.0, -4.0], [0.0, 4.0, 4.0], [0.0, -4.0, 4.0]].map(|c| vf(add(at, c), 1.0));
@@ -1665,7 +1713,14 @@ fn lay_image_portal(ee: &mut Ee, entry: u32) -> (Vf, F) {
 /// (tests/mxvatv_bike_ride.rs).
 #[test]
 fn the_images_moves_on_ram_are_the_originals() {
-    let Some(base) = image() else { return };
+    for name in IMAGES {
+        let Some(base) = image_of(name) else { return };
+        moves_on_ram(&base, name);
+    }
+}
+
+fn moves_on_ram(base: &Ee, name: &str) {
+    let Spots { cells, entries, vehicles, .. } = spots(base, name);
     let keep = [(0, base.ram.len() as u32)];
     let fresh = || {
         let mut ee = Ee::with_ram(base.ram.clone());
@@ -1677,13 +1732,13 @@ fn the_images_moves_on_ram_are_the_originals() {
     let mut tally = vec![];
     let mut check = |what: String, r: Result<(usize, Vec<(u32, Vec<u32>)>), String>| match r {
         Ok((n, calls)) => tally.push(format!("{what}: {n} bytes, heap calls {calls:x?}")),
-        Err(e) => panic!("{what}: the port on RAM is not the original: {e}"),
+        Err(e) => panic!("{name}: {what}: the port on RAM is not the original: {e}"),
     };
-    for &entry in &IMAGE_ENTRIES {
+    for &entry in &entries {
         for laid in [false, true] {
             let (mut ee, heap, calls) = fresh();
             let (centre, reach) = if laid {
-                lay_image_portal(&mut ee, entry)
+                lay_image_portal(&mut ee, &cells, entry)
             } else {
                 let last = vf_at(&ee, ee.u32_at(entry + 8) + 0x10);
                 (vf(add(v3(last), [0.0, 0.125, 0.0]), last.w()), F::ZERO)
@@ -1692,10 +1747,10 @@ fn the_images_moves_on_ram_are_the_originals() {
             check(format!("entry {entry:#x} portal {laid}"), r);
         }
     }
-    let vehicles: Vec<u32> = IMAGE_VEHICLES.iter().map(|&v| base.u32_at(v + 0xd80) + 0x18).collect();
-    let player = v3(vf_at(&base, base.u32_at(IMAGE_VEHICLES[0] + 0xd80) + 0x160));
+    let player = v3(vf_at(base, base.u32_at(vehicles[0] + 0xd80) + 0x160));
+    let vehicles: Vec<u32> = vehicles.iter().map(|&v| base.u32_at(v + 0xd80) + 0x18).collect();
     for (v, &entry) in vehicles.iter().enumerate() {
-        let last = v3(vf_at(&base, base.u32_at(entry + 8) + 0x10));
+        let last = v3(vf_at(base, base.u32_at(entry + 8) + 0x10));
         let tos = if v == 0 {
             vec![add(last, [0.0, 0.5, 0.0]), add(last, [300.0, 20.0, -150.0]), add(last, [0.0, 900.0, 0.0])]
         } else {

@@ -1,7 +1,8 @@
 //! MD76a2 — the quad's wheel-ray search, proved against SLUS-21104.
 //!
-//! The oracle is MD37a's RAM image of Desert Oasis Free Ride with the quad at its spawn
-//! (`context/mxvatv-ps2/md37a/atv-r-spawn.ee.bin`, as in `tests/atv_gather.rs`). It holds the quad's
+//! The oracle is each of five RAM images of Desert Oasis Free Ride, as in `tests/atv_gather.rs` (MD116a):
+//! MD37a's with the atv_ quad at its spawn (`context/mxvatv-ps2/md37a/atv-r-spawn.ee.bin`) and C28's
+//! `c28-atv-{r,s}-{spawn,air}.ee.bin`, the quad found in each, not pinned. Each holds the quad's
 //! trigger probe (quad `+0x1430`) with its four wheel rays, its record, and the world the gather fills
 //! the quad's list (quad `+0xc4`) from. The tests run the original's own code, nothing hooked:
 //!
@@ -40,10 +41,8 @@ const GATHER: u32 = 0x001d_6a60;
 const SEARCH_FN: u32 = 0x0011_51c0;
 const STAND: u32 = 0x001b_cfe0;
 /// The quad, its list, the gather's probe (quad `+0xd8`) and the trigger probe (quad `+0x1430`).
-const QUAD: u32 = 0x015e_0690;
-const LIST: u32 = 0x0162_7a40;
-const PROBE_AT: u32 = 0x0159_c500;
-const SEARCH: u32 = 0x0162_cd30;
+/// A quad's vtable (at `+4`).
+const QUAD_VTABLE: u32 = 0x003c_e250;
 const ECO_AT: u32 = 0x0052_cd88;
 const MESH_VTABLE: u32 = 0x003b_6d00;
 /// MC02's species, as loaded (its file's slot 0 is empty).
@@ -120,8 +119,35 @@ enum Id {
     Other(u32),
 }
 
+/// MD37a's image and C28's four, as in `tests/atv_gather.rs`: the R quad (`atv_`) or the S (`atv_s_`), at
+/// the spawn or in the air.
+const IMAGES: [&str; 5] = ["atv-r-spawn", "c28-atv-r-spawn", "c28-atv-r-air", "c28-atv-s-spawn", "c28-atv-s-air"];
+
+/// What the tests read in an image, found from the player's quad (the lowest object with the quad's
+/// vtable), not pinned, C28's heap not being MD37a's: its list (`+0xc4`), riding probe (`+0xd8`) and
+/// trigger probe (`+0x1430`); the world's tree (the probe's space's tables, `+0x28`).
+#[derive(Clone, Copy)]
+struct Layout {
+    list: u32,
+    probe: u32,
+    search: u32,
+    tree: u32,
+}
+
+fn layout(ee: &Ee, name: &str) -> Layout {
+    let vt = QUAD_VTABLE.to_le_bytes();
+    let quad = (0x0010_0000..ee.ram.len() - 8).step_by(4).find(|&a| ee.ram[a + 4..a + 8] == vt).unwrap_or_else(|| panic!("{name}: no quad")) as u32;
+    let probe = ee.u32_at(quad + 0xd8);
+    let tree = ee.u32_at(ee.u32_at(ee.u32_at(probe + 0x20) + 4) + 0x28);
+    let l = Layout { list: ee.u32_at(quad + 0xc4), probe, search: ee.u32_at(quad + 0x1430), tree };
+    assert_eq!(ee.u32_at(l.search + at::VTABLE), RAY_VTABLE, "{name}: the quad's trigger probe is a ray probe");
+    l
+}
+
 struct Data {
     ee: Ee,
+    name: &'static str,
+    at: Layout,
     world: World,
     props: Vec<Prop>,
     eco: Ecosystem,
@@ -144,14 +170,15 @@ struct Row {
     wheels: [(u32, [u32; 4], [u32; 4]); 4],
 }
 
-fn data() -> Option<Data> {
+/// The world built beside image `name` (one of [`IMAGES`]).
+fn data_of(name: &'static str) -> Option<Data> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
-    let image = dir.join(format!("atv-r-spawn.ee{}", ".bin"));
+    let image = dir.join(format!("{name}.ee{}", ".bin"));
     let res = dir.join("mc02.res");
     let esb = dir.join("MC02.esb");
     for (p, what) in [
-        (&image, "MD37a's eeMemory.bin of atv-r-spawn.p2s (memory: md37a ATV states live in s2)"),
+        (&image, "MD37a's or C28's eeMemory.bin of the state (memory: md37a ATV states live in s2)"),
         (&res, "Desert Oasis's mc02.res off MX vs. ATV's disc (Env/MC02)"),
         (&esb, "Env\\MC02\\MC02.esb out of MXVSATV.PSR on MX vs. ATV's disc"),
     ] {
@@ -162,9 +189,7 @@ fn data() -> Option<Data> {
     }
     let mut ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
     ee.set(28, GP);
-    if ee.u32_at(QUAD + 0xc4) != LIST || ee.u32_at(QUAD + 0xd8) != PROBE_AT || ee.u32_at(QUAD + 0x1430) != SEARCH {
-        panic!("{} is not the MX vs. ATV quad image these addresses are from", image.display());
-    }
+    let l = layout(&ee, name);
     let file = std::fs::read(&res).unwrap();
     let archive = Res::parse(&file).unwrap();
     let read = |name: &str| -> Result<Vec<u8>, String> {
@@ -179,15 +204,15 @@ fn data() -> Option<Data> {
     let field = atv_world::terrain_box(&scene.terrain);
     let (trees, missed) = Trees::new(&eco, atv_world::plant_cell(field), &CurveTable::build());
     assert!(missed.is_empty(), "MC02's plant solids not built: {missed:?}");
-    let mut world = World::new(collidable(&ee, PROBE_AT), &props.props, &groups, models, atv_world::plant_cell(field), field);
+    let mut world = World::new(collidable(&ee, l.probe), &props.props, &groups, models, atv_world::plant_cell(field), field);
     let search = world.objects.len();
-    world.objects.push(collidable(&ee, SEARCH));
+    world.objects.push(collidable(&ee, l.search));
     let first_part = world.objects.len();
     world.objects.extend(atv_search::part_collidables(&eco));
     let slots = Plants::new(&trees, &eco, &world, first_part).slots;
     let rows = capture_rows(&kit.ctx("capture/md37a"))?;
-    let rays = image_rays(&ee);
-    Some(Data { ee, world, props: props.props, eco, trees, search, slots, rays, rows })
+    let rays = image_rays(&ee, l.search);
+    Some(Data { ee, name, at: l, world, props: props.props, eco, trees, search, slots, rays, rows })
 }
 
 /// The image's collidable at `c` as the port's: its reach, flags and filter. The collidables its
@@ -237,10 +262,10 @@ fn words(ee: &Ee, a: u32) -> [u32; 4] {
 /// The trigger probe's four rays as the quad hands them over (left front, right front, left rear,
 /// right rear: `x` below zero the left, `z` above it the front), out of the image's tree order, and
 /// the port's tree of them.
-fn image_rays(ee: &Ee) -> Rays {
-    let n = ee.u32_at(SEARCH + at::RAYS);
+fn image_rays(ee: &Ee, search: u32) -> Rays {
+    let n = ee.u32_at(search + at::RAYS);
     assert_eq!(n, 4, "the trigger probe has a ray a wheel");
-    let segs = ee.u32_at(SEARCH + at::SEGMENTS);
+    let segs = ee.u32_at(search + at::SEGMENTS);
     let mut by_wheel = [None; 4];
     for k in 0..n {
         let s = ray_probe::Segment { from: quad_at(ee, segs + 0x20 * k), to: quad_at(ee, segs + 0x20 * k + 0x10) };
@@ -433,13 +458,19 @@ fn record_from_image(ee: &Ee, r: u32) -> Record {
 
 #[test]
 fn the_trigger_probe_is_the_images() {
-    let Some(d) = data() else { return };
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        trigger_probe(&d);
+    }
+}
+
+fn trigger_probe(d: &Data) {
     let ee = &d.ee;
-    let p = SEARCH;
+    let p = d.at.search;
     assert_eq!(ee.u32_at(p + at::VTABLE), RAY_VTABLE, "the trigger probe is a ray probe");
     assert_eq!([ee.u32_at(p + at::SMOOTH), ee.u32_at(p + at::FILTER)], [0, 0], "no smooth normals, no per-ray filter");
     assert_eq!([ee.u32_at(p + at::LISTENERS), ee.u32_at(p + at::ON_HIT), ee.u32_at(p + at::ON_STRUCK), ee.u32_at(p)], [0; 4]);
-    assert_eq!(ee.u32_at(LIST + 0x40), 0, "the quad's list carries no terrain grid");
+    assert_eq!(ee.u32_at(d.at.list + 0x40), 0, "the quad's list carries no terrain grid");
     // The tree, node for node and ray for ray.
     assert_eq!(ee.u16_at(p + at::ROOT), d.rays.root, "the root");
     let nodes = ee.u32_at(p + at::NODES);
@@ -522,7 +553,7 @@ fn the_trigger_probe_is_the_images() {
     let flat = solids.iter().flat_map(|s| &s.solids).filter(|s| s.kind == eco::CYLINDER).all(|s| s.height == F::ZERO);
     assert!(flat, "MC02's cylinders have no height");
     let mut checked = 0;
-    for_each_image_mesh(ee, &mut |c| {
+    for_each_image_mesh(ee, d.at.tree, &mut |c| {
         let id = image_id(ee, c);
         let o = w.meshes.clone().find(|&o| port_id(w, &d.slots, o as u32) == id).expect("every image mesh is a port mesh");
         let prop = &d.props[o - w.meshes.start];
@@ -539,15 +570,15 @@ fn the_trigger_probe_is_the_images() {
     });
     assert_eq!(checked, w.meshes.len(), "every port mesh is one of the image's");
     println!(
-        "the trigger probe: {} rays, {} nodes, word for word; {checked} meshes' frames; {cylinders} cylinders' trees, {spheres} spheres",
+        "{}: the trigger probe: {} rays, {} nodes, word for word; {checked} meshes' frames; {cylinders} cylinders' trees, {spheres} spheres",
+        d.name,
         d.rays.segments.len(),
         d.rays.nodes.len()
     );
 }
 
 /// Every scene mesh in the image's tree, once.
-fn for_each_image_mesh(ee: &Ee, f: &mut dyn FnMut(u32)) {
-    let tree = 0x0065_47c0;
+fn for_each_image_mesh(ee: &Ee, tree: u32, f: &mut dyn FnMut(u32)) {
     let mut seen = std::collections::BTreeSet::new();
     let mut stack = vec![ee.u32_at(tree + 0x8c)];
     while let Some(node) = stack.pop() {
@@ -600,22 +631,23 @@ struct Outcome {
 
 /// The original and the port, the probe stood at `t` and the list gathered round its node.
 fn run(d: &mut Data, record: &mut Record, t: &Matrix) -> Outcome {
+    let Layout { list: list_at, probe, search, .. } = d.at;
     let ee = &mut d.ee;
     for (i, row) in t.iter().enumerate() {
         for k in 0..4 {
-            ee.set_f32(SEARCH + at::TRANSFORM + 0x10 * i as u32 + 4 * k, row.0[k as usize]);
+            ee.set_f32(search + at::TRANSFORM + 0x10 * i as u32 + 4 * k, row.0[k as usize]);
         }
     }
-    ee.call(STAND, &[u64::from(SEARCH), u64::from(SEARCH + at::TRANSFORM)], &[], 1_000_000);
+    ee.call(STAND, &[u64::from(search), u64::from(search + at::TRANSFORM)], &[], 1_000_000);
     for k in 0..3 {
-        ee.set_f32(PROBE_AT + at::CENTRE + 4 * k, t[3].0[k as usize]);
+        ee.set_f32(probe + at::CENTRE + 4 * k, t[3].0[k as usize]);
     }
-    ee.call(GATHER, &[u64::from(LIST), u64::from(PROBE_AT), 3], &[], 50_000_000);
-    let groups = (0..ee.u32_at(LIST + 4)).any(|i| ee.u8_at(ee.u32_at(ee.u32_at(LIST) + 8 * i) + 2) == 3);
-    ee.call(SEARCH_FN, &[u64::from(SEARCH), u64::from(LIST), 1], &[], 200_000_000);
+    ee.call(GATHER, &[u64::from(list_at), u64::from(probe), 3], &[], 50_000_000);
+    let groups = (0..ee.u32_at(list_at + 4)).any(|i| ee.u8_at(ee.u32_at(ee.u32_at(list_at) + 8 * i) + 2) == 3);
+    ee.call(SEARCH_FN, &[u64::from(search), u64::from(list_at), 1], &[], 200_000_000);
     let want_hit = ee.v0() != 0;
-    assert_eq!(want_hit, ee.u8_at(SEARCH + at::FLAGS) & 0x20 != 0);
-    let r = ee.u32_at(SEARCH + at::RECORD);
+    assert_eq!(want_hit, ee.u8_at(search + at::FLAGS) & 0x20 != 0);
+    let r = ee.u32_at(search + at::RECORD);
     let want = image_record(ee, r);
     let want_part = ee.u32_at(r + rec::PART);
 
@@ -627,7 +659,7 @@ fn run(d: &mut Data, record: &mut Record, t: &Matrix) -> Outcome {
     let mut wheels = Wheels::new(&d.rays, *t, &d.props, w.meshes.start, plants);
     wheels.record = std::mem::take(record);
     let hit = atv_search::collide(&mut w.objects, d.search, &list.found, &mut wheels);
-    assert_eq!(w.objects[d.search].radius.0.to_bits(), d.ee.u32_at(SEARCH + at::RADIUS), "the probe's reach");
+    assert_eq!(w.objects[d.search].radius.0.to_bits(), d.ee.u32_at(search + at::RADIUS), "the probe's reach");
     *record = wheels.record;
     // The record's part is only written by a hierarchy's pair, which Desert Oasis has none of.
     let got = port_record(&d.world, &d.slots, record, want_part);
@@ -636,8 +668,15 @@ fn run(d: &mut Data, record: &mut Record, t: &Matrix) -> Outcome {
 
 #[test]
 fn the_quads_search_is_the_originals() {
-    let Some(mut d) = data() else { return };
-    let mut record = record_from_image(&d.ee, d.ee.u32_at(SEARCH + at::RECORD));
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        quads_search(d);
+    }
+}
+
+fn quads_search(mut d: Data) {
+    let image = d.name;
+    let mut record = record_from_image(&d.ee, d.ee.u32_at(d.at.search + at::RECORD));
     let mut g = Gen(0x4d44_3736_6132);
     // Frames that put one wheel's ray across a mesh: a triangle's centre, a wheel picked, the probe
     // moved so the ray's middle is there (give or take 0.6 ft), turned any way about up and tipped a
@@ -677,15 +716,15 @@ fn the_quads_search_is_the_originals() {
         }
     }
     // And the image's own frame, at the spawn.
-    frames.push(("spawn".into(), [0, 1, 2, 3].map(|i| quad_at(&d.ee, SEARCH + at::TRANSFORM + 0x10 * i))));
+    frames.push(("the image's".into(), [0, 1, 2, 3].map(|i| quad_at(&d.ee, d.at.search + at::TRANSFORM + 0x10 * i))));
 
     let (mut hits, mut contacts, mut with_groups, mut hit_only) = (0, 0, 0, 0);
     let mut per_mesh: BTreeMap<Id, usize> = BTreeMap::new();
     let mut by_count = [0usize; 13];
     for (name, t) in &frames {
         let o = run(&mut d, &mut record, t);
-        assert_eq!(o.got, o.want, "{name}: the record");
-        assert_eq!(o.hit.1, o.hit.0, "{name}: the hit bit");
+        assert_eq!(o.got, o.want, "{image} {name}: the record");
+        assert_eq!(o.hit.1, o.hit.0, "{image} {name}: the hit bit");
         // A plant's sphere struck alone: the hit bit with no contact, a group in the list.
         hit_only += usize::from(o.hit.0 && o.want.contacts.is_empty() && o.groups);
         hits += usize::from(o.hit.1);
@@ -700,12 +739,12 @@ fn the_quads_search_is_the_originals() {
     let on_parts: usize = per_mesh.iter().filter(|(id, _)| matches!(id, Id::Part(..))).map(|(_, n)| n).sum();
     let meshes = per_mesh.keys().filter(|id| matches!(id, Id::Mesh(_))).count();
     println!(
-        "{} frames: {hits} struck, {contacts} contacts ({on_parts} on trunks) on {meshes} meshes, by count {by_count:?}; \
+        "{image}: {} frames: {hits} struck, {contacts} contacts ({on_parts} on trunks) on {meshes} meshes, by count {by_count:?}; \
          {with_groups} lists held plants; {hit_only} struck only a plant's sphere",
         frames.len(),
     );
-    assert!(contacts > 1000 && meshes == d.props.len(), "the rays struck every mesh");
-    assert!(hit_only > 100, "the frames strike plants' spheres alone");
+    assert!(contacts > 1000 && meshes == d.props.len(), "{image}: the rays struck every mesh");
+    assert!(hit_only > 100, "{image}: the frames strike plants' spheres alone");
 }
 
 /// A quaternion turning by `yaw` about up, then `pitch` about across and `roll` about along.
@@ -726,8 +765,15 @@ fn euler_quat(yaw: f32, pitch: f32, roll: f32) -> [f32; 4] {
 
 #[test]
 fn the_captured_swept_contacts_are_the_searchs() {
-    let Some(mut d) = data() else { return };
-    let mut record = record_from_image(&d.ee, d.ee.u32_at(SEARCH + at::RECORD));
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        captured_contacts(d);
+    }
+}
+
+fn captured_contacts(mut d: Data) {
+    let image = d.name;
+    let mut record = record_from_image(&d.ee, d.ee.u32_at(d.at.search + at::RECORD));
     let rows = d.rows.clone();
     let (mut checked, mut reproduced, mut searched) = (0, 0, 0);
     for (k, row) in rows.iter().enumerate() {
@@ -755,7 +801,7 @@ fn the_captured_swept_contacts_are_the_searchs() {
         frames.extend((0..=8).map(|e| (format!("{e}/8 of the way from the row before"), blend(before, row, e as f32 / 8.0))));
         for (when, t) in frames {
             let o = run(&mut d, &mut record, &t);
-            assert_eq!(o.got, o.want, "{}@{} at {when}: the record", row.name, row.frame);
+            assert_eq!(o.got, o.want, "{image} {}@{} at {when}: the record", row.name, row.frame);
             searched += 1;
             let cs = atv_search::contacts(&record);
             let mut wheels = [WheelContact::default(); 4];
@@ -787,16 +833,16 @@ fn the_captured_swept_contacts_are_the_searchs() {
         }
         let (far, text) = best.unwrap();
         if far < 0.25 {
-            println!("{}@{} reproduced at {text}", row.name, row.frame);
+            println!("{image} {}@{} reproduced at {text}", row.name, row.frame);
             reproduced += 1;
         } else {
-            println!("{}@{} not reproduced; nearest {text}", row.name, row.frame);
+            println!("{image} {}@{} not reproduced; nearest {text}", row.name, row.frame);
         }
         checked += 1;
     }
-    println!("{checked} captured rows with a swept contact, {} frames searched on both sides, {reproduced} rows reproduced", searched);
-    assert!(checked >= 8, "the palm rows of race-jump and race-wheelie-launch");
+    println!("{image}: {checked} captured rows with a swept contact, {} frames searched on both sides, {reproduced} rows reproduced", searched);
+    assert!(checked >= 8, "{image}: the palm rows of race-jump and race-wheelie-launch");
     // The capture does not say which frame between its rows the search ran at; the rows where no
     // blended frame gives the contact are in the journal's not-verified list.
-    assert!(reproduced >= 3, "the captured contacts reproduced");
+    assert!(reproduced >= 3, "{image}: the captured contacts reproduced");
 }
