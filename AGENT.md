@@ -90,3 +90,5 @@ Read one only when the task touches it: `docs/PCSX2.md` (emulator), `PROVING.md`
 branch; the runner merges, tests and pushes the shared one (`docs/agent/TASKS.md`). A worktree of another repo
 (an openmx-mods branch for your task) or other ad-hoc work goes in `$(agent-runner home)/wt/<slug>`, never beside
 the checkouts in `~/repos` (`../openmx-mods-<id>`); `git worktree remove` it once its branch is pushed.
+
+Tasks: this repo is worked by agent-runner. Use the agent-runner skill (or run `./kit guide`): queue work with `./kit plan add`, never edit the plan's TODO.md by hand, never merge task/* or wip/* branches.
