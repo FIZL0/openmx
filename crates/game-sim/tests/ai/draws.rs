@@ -145,6 +145,16 @@ pub(crate) fn c33_looks(tick: u64, rng: u64) -> Vec<(&'static str, F)> {
     C33_LOOKS.iter().filter(|(t, _)| *t == tick).flat_map(|(_, names)| names.iter()).map(|&n| (n, p.rearm(g.unit()))).collect()
 }
 
+/// S328b: the engine notes C33 switches on before 16, by tick: the rider's update counts the delay its
+/// loader drew (rider `+0x14a4`) down and switches the note (rider `+0x1494`) on, its `+0x29` bit 0.
+/// The human's and ai1's run out later.
+pub(crate) const C33_NOTES_ON: [(u64, &str); 2] = [(9, "ai2"), (14, "ai0")];
+
+/// S328b: the notes' picks through 16: at 15 ai0 and ai2 open the throttle, and each picks the low
+/// acceleration's sample 1 (its one draw) and draws its pitch (the other). The note's state is at
+/// `+0x2d8`, its last low pick at `+0x2c4`.
+pub(crate) const C33_NOTE_PICKS: (u64, [&str; 2], usize) = (15, ["ai0", "ai2"], 1);
+
 /// A body's animation object: its look-around clock (`+0xa30`), and the request block it reads
 /// (`+0x488`) with the gate's cut flag at `+0x140`.
 const BODY_LOOK: u32 = 0xa30;
@@ -256,6 +266,18 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         if tick >= 17 {
             assert!(count(Site::Dust) > 0, "tick {tick}: no dust");
         }
+        // S328b: the notes switch on, and pick, as C33_NOTES_ON and C33_NOTE_PICKS say.
+        if tick <= 16 {
+            for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
+                let (name, note) = (C33_NAMES[k], ee.u32_at(r + 0x1494));
+                if let Some(&(on, _)) = C33_NOTES_ON.iter().find(|(_, n)| *n == name) {
+                    assert_eq!(ee.read(note + 0x29, 1) & 1 != 0, tick >= on, "tick {tick}: {name}'s note switched on");
+                }
+                let (at, picked, index) = C33_NOTE_PICKS;
+                let want = if tick >= at && picked.contains(&name) { (2, index as i32) } else { (1, -1) };
+                assert_eq!((ee.i32_at(note + 0x2d8), ee.i32_at(note + 0x2c4)), want, "tick {tick}: {name}'s note and its last low pick");
+            }
+        }
         // S328a: each re-armed body's clock holds the port's remap of its own draw, in that order.
         for (name, look) in c33_looks(tick, w[0].2) {
             let k = C33_NAMES.iter().position(|n| *n == name).unwrap();
@@ -272,3 +294,4 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     }
     assert_eq!(generator_through, 16, "the generator agrees through");
 }
+

@@ -600,7 +600,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // state while one is out).
     // 12288 since MD112: the MX vs. ATV plane's posted messages counted (`Flight::posts`), for the
     // shell's rumble, so not walked and not on the wire.
+    // 12296 since S328b: the players' engine notes (`Sim::notes`), boxed, None unless a ride builds
+    // them, walked as `note` only while present, so the leaves do not move; not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12288, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12296, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

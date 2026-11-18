@@ -555,6 +555,22 @@ impl State for Sim {
         if let Some(race) = &self.race {
             w.field("race", &**race);
         }
+        // The engine notes (S328b), on a Sim that runs them: a walk without them is what it was.
+        if let Some(notes) = &self.notes {
+            for n in &notes.riders {
+                w.group("note", |w| {
+                    w.u32("state", n.brain.note as u32);
+                    w.u32("next", n.brain.next as u32);
+                    w.u32("list", n.brain.current.list as u32);
+                    w.u32("index", n.brain.current.index as u32);
+                    w.f("delay", n.delay);
+                    w.bool("on", n.on);
+                    for &l in &n.brain.last {
+                        w.i32("last", l);
+                    }
+                });
+            }
+        }
     }
 }
 
