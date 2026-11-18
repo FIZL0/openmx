@@ -13642,13 +13642,19 @@ fn r24_ride(dir: &str, name: &str, ticks: usize, draws: u32) -> Option<(Vec<S211
 ///
 /// The worst bone off the csv (ft), each seed added in turn:
 ///
-/// | tick | neither | skeleton | both |
-/// |---|---|---|---|
-/// | 11 | 2.26 | 0.93 | 0.30 |
-/// | 23 | 4.45 | 2.37 | 0.71 |
+/// | tick | neither | skeleton | both | and R40's frame |
+/// |---|---|---|---|---|
+/// | 11 | 2.26 | 0.93 | 0.30 | 0.11 |
+/// | 23 | 4.45 | 2.37 | 0.71 | 0.54 |
 ///
-/// What remains is ~0.7 ft/s low in y, built up while the throw pulls (ticks 3–8) and then held: a
-/// follow-up. No bone touches the ground in these 24 ticks.
+/// **R40: the frame the throw is turned by.** With both seeds the bones were still ~0.7 ft/s low in
+/// y, built while the throw pulled (ticks 3–9) and then held: the bones' momentum fell short by a
+/// vector of a tenth of the pull, turning with it, a quarter of a tick's spin behind. The original
+/// turns the pull by its request's quaternion, taken from the bike node's matrix, and the wreck
+/// bike's node is the pose before the frame's last substep; the port turned it by the body as the
+/// step left it. Turned by the node, the gap no longer moves while the throw pulls. What is left
+/// (~0.13 ft/s low in y) is there before the wreck, on the riding ticks, with the skeleton held at
+/// the image's pose. No bone touches the ground in these 24 ticks.
 #[test]
 fn the_windmill_throws_the_bones_with_the_originals_draws() {
     let Some(rows) = columns_capture("r14", "south-bones") else { return };
@@ -13659,6 +13665,7 @@ fn the_windmill_throws_the_bones_with_the_originals_draws() {
     let force = force.expect("the wreck entered");
     assert_eq!(force.to_bits()[..3], drawn.to_bits()[..3], "the port drew {force:?}, the original {drawn:?}");
     let col = |r: &std::collections::HashMap<String, f32>, k: &str| [r[&format!("{k}x")], r[&format!("{k}y")], r[&format!("{k}z")]];
+    let mut throw_dy = Vec::new();
     for (i, b) in bones.iter().enumerate() {
         let t = i + 1;
         let row = &rows[t + 1];
@@ -13671,9 +13678,14 @@ fn the_windmill_throws_the_bones_with_the_originals_draws() {
             }
         }
         println!("t{t:2} down {} worst {worst:.3} mean dv ({:+.2},{:+.2},{:+.2})", b.down, dv[0], dv[1], dv[2]);
-        let bound = if t <= 2 { 0.05 } else if t <= 11 { 0.4 } else { 0.9 };
+        let bound = if t <= 2 { 0.05 } else if t <= 11 { 0.15 } else { 0.6 };
         assert!(worst < bound, "tick {t}: a bone {worst} ft off the csv (bound {bound})");
-        assert!(dv[0].abs() < 0.3, "tick {t}: the bones' x velocity is {} ft/s off", dv[0]);
-        assert!(dv[1].abs() < 1.2 && dv[2].abs() < 0.6, "tick {t}: mean dv {dv:?}");
+        assert!(dv[0].abs() < 0.2, "tick {t}: the bones' x velocity is {} ft/s off", dv[0]);
+        assert!(dv[1].abs() < 0.35 && dv[2].abs() < 0.3, "tick {t}: mean dv {dv:?}");
+        if t == 3 || t == 9 {
+            throw_dy.push(dv[1]);
+        }
     }
+    // R40: the throw pulls on ticks 3 to 9; turned by the right frame, it adds nothing to the y gap.
+    assert!((throw_dy[1] - throw_dy[0]).abs() < 0.05, "the throw moved the bones' y velocity gap {throw_dy:?}");
 }
