@@ -969,28 +969,55 @@ impl Rider {
             frozen: false,
             progress: tricks.progress,
         };
+        let (was_trick, was_held) = (tricks.current, tricks.held);
         let clocked = tricks.update(dt, set, bike, false, ride::noise);
         // The clocks' three calls on the rider, which score (S79). The wheels are this frame's, the
         // wreck is the one the rider was in before this frame's machine.
         let at_clocks = Self::score_sense(ride, slow, state.wreck.is_some());
-        if clocked.stopped_before {
-            score.finished();
-        }
-        if let Some(id) = clocked.started {
-            score.start(id.0, &at_clocks);
-        }
-        if clocked.stopped {
-            score.finished();
-        }
-        // MX vs. ATV's 360 come round this frame (MD16), scored flat under its own id.
         if let (Some(moves), Some(t)) = (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
+            // MX vs. ATV's way with a pack on (S358): a trick pushes its node at its start, off the
+            // ground and riding, grows while it is in its hold, and ends with its clock.
+            if clocked.stopped_before {
+                score.atv_end(was_trick.0);
+            }
+            if let Some(id) = clocked.started {
+                if at_clocks.airborne && !at_clocks.wrecked {
+                    let name = set.stunt(id).map_or("", |s| s.name.as_str());
+                    score.atv_start(&t.score, id.0, moves.values(name, score::ATV_TRICK), false);
+                }
+            } else if tricks.in_progress {
+                score.atv_mark(tricks.current.0, was_held < tricks.held);
+            }
+            if clocked.stopped {
+                score.atv_end(tricks.current.0);
+            }
+        } else {
+            if clocked.stopped_before {
+                score.finished();
+            }
+            if let Some(id) = clocked.started {
+                score.start(id.0, &at_clocks);
+            }
+            if clocked.stopped {
+                score.finished();
+            }
+        }
+        // MX vs. ATV's 360 (MD16): its stunt starts, held, as its clip does and ends when it comes
+        // round (S358).
+        if let (Some(moves), Some(t)) = (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
+            let (id, name) = if t.spin.dir >= 1 {
+                (score::THREE_SIXTY_RIGHT, "threesixtyR")
+            } else {
+                (score::THREE_SIXTY_LEFT, "threesixtyL")
+            };
+            // A clip that stops ends it too: come round, or cut short with no wreck to lose it.
+            let live = score.nodes.iter().any(|n| n.id == id && n.flags & score::atv_flag::LIVE != 0);
+            if t.spin.clip != 0 && !live {
+                score.atv_start(&t.score, id, moves.values(name, score::ATV_THREE_SIXTY), true);
+            } else if t.spin.clip == 0 && live {
+                score.atv_end(id);
+            }
             if std::mem::take(&mut t.spin.came_round) {
-                let (id, points) = if t.spin.dir >= 1 {
-                    (score::THREE_SIXTY_RIGHT, moves.three_sixty_points.1)
-                } else {
-                    (score::THREE_SIXTY_LEFT, moves.three_sixty_points.0)
-                };
-                score.start_flat(id, points);
                 // Told as a start, so the shell names it: it has no clip of its own to show it.
                 out.started = out.started.or(Some(if t.spin.dir >= 1 { Trick::THREE_SIXTY_RIGHT } else { Trick::THREE_SIXTY_LEFT }));
             }
@@ -1334,16 +1361,24 @@ impl Rider {
         let sensed = Self::score_sense(ride, slow, state.wreck.is_some());
         match (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
             (Some(moves), Some(t)) => {
-                let was = t.front_watch;
-                score.frame_with(dt, &sensed, Some((&mut t.front_watch, moves.front_flip_points)));
+                // MX vs. ATV's way (S358).
+                let rows = score::AtvRows {
+                    backflip: moves.values("backflip", score::ATV_BACKFLIP),
+                    wheelie: moves.values("wheelie", score::ATV_WHEEL),
+                    stoppie: moves.values("stoppie", score::ATV_WHEEL),
+                    trick_running: tricks.in_progress,
+                };
                 // A front flip come round, told as a start as the 360 is.
-                if was != 3 && t.front_watch == 3 {
+                if score.atv_frame(&mut t.score, dt, &sensed, rows, &mut t.front_watch) {
                     out.started = out.started.or(Some(Trick::FRONTFLIP));
                 }
+                score.atv_grow(dt);
             }
-            _ => score.frame(dt, &sensed),
+            _ => {
+                score.frame(dt, &sensed);
+                score.grow(dt);
+            }
         }
-        score.grow(dt);
         if let Some(h) = hidden {
             crate::traffic::show(world, h);
         }

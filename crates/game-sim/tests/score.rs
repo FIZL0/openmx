@@ -1157,3 +1157,80 @@ fn a_backflip_stopped_short_scores_nothing_as_the_original() {
         assert_eq!(p.banks, banks, "{name}: the banks");
     }
 }
+
+/// S358: a trick pack's ride scores MX vs. ATV's way, on the numbers `tests/mxvatv_stunt_score.rs`
+/// pins on the original (and runs this card beside it on): the backflip's node at its start, grown
+/// half a second to 6999, ended, banked ×1, its repeat scale down to 0.8 and the next one opening at
+/// 1600 and 8000; two stunts banked × 2; and a wreck that adds nothing.
+#[test]
+fn a_pack_ride_scores_stunts_as_mx_vs_atv() {
+    const DT: u32 = 0x3d08_850a;
+    let flip = score::Values { point: F(2000.0), hold: F(10000.0) };
+    let wheel = score::Values { point: F(1000.0), hold: F(1000.0) };
+    let mut card = Score::default();
+    let mut atv = score::Atv::default();
+    card.atv_start(&atv, score::BACKFLIP, flip, true);
+    let n = card.nodes[0];
+    assert_eq!((n.flags, n.points, n.base, n.rate, n.mult, n.granularity), (0x3d, F(2000.0), F(2000.0), F(10000.0), F(1.0), F(1.0)));
+    for _ in 0..15 {
+        card.atv_grow(F::from_bits(DT));
+    }
+    assert_eq!(card.nodes[0].points, F(6999.0), "half a second's flip, floored");
+    card.atv_end(score::BACKFLIP);
+    assert_eq!(card.nodes[0].flags, 0x0d, "ended: live and held off");
+    card.atv_grow(F::from_bits(DT));
+    assert_eq!(card.nodes[0].points, F(6999.0), "an ended node does not grow");
+    card.atv_bank(&mut atv);
+    assert_eq!((card.total, card.nodes.len(), card.combo), (F(6999.0), 0, false), "one stunt banks ×1");
+    assert_eq!(Score::atv_scale(&atv, score::BACKFLIP), F(0.8));
+    card.atv_start(&atv, score::BACKFLIP, flip, true);
+    assert_eq!((card.nodes[0].base, card.nodes[0].rate), (F(1600.0), F(8000.0)), "a repeated backflip");
+    card.atv_end(score::BACKFLIP);
+    card.atv_bank(&mut atv);
+
+    // A backflip and a wheelie, 30 ticks each, bank (p0 + p1) × 2.
+    let before = card.total;
+    card.atv_start(&atv, score::BACKFLIP, flip, true);
+    for _ in 0..30 {
+        card.atv_grow(F::from_bits(DT));
+    }
+    card.atv_end(score::BACKFLIP);
+    card.atv_start(&atv, score::WHEELIE, wheel, true);
+    for _ in 0..30 {
+        card.atv_grow(F::from_bits(DT));
+    }
+    card.atv_end(score::WHEELIE);
+    let sum = card.nodes[0].points + card.nodes[1].points;
+    card.atv_bank(&mut atv);
+    assert_eq!(card.total, before + sum * F(2.0), "a combo of two");
+
+    // A wreck loses the combo, and repeats nothing.
+    let before = (card.total, atv.clone());
+    card.atv_start(&atv, score::BACKFLIP, flip, true);
+    card.atv_grow(F::from_bits(DT));
+    card.atv_cancel(&mut atv);
+    assert_eq!((card.total, card.nodes.len()), (before.0, 0), "a wreck adds nothing");
+    assert_eq!(atv, before.1, "nor repeats");
+}
+
+/// S358: the frame's own bank — a stunt landed waits 0.2 s on the ground, then banks.
+#[test]
+fn a_pack_ride_banks_after_a_fifth_of_a_second_down() {
+    let flip = score::Values { point: F(2000.0), hold: F(10000.0) };
+    let wheel = score::Values { point: F(1000.0), hold: F(1000.0) };
+    let rows = score::AtvRows { backflip: flip, wheelie: wheel, stoppie: wheel, trick_running: false };
+    let mut card = Score::default();
+    let mut atv = score::Atv::default();
+    let mut front = 0;
+    let air = Sense { airborne: true, up_y: F(1.0), ..Sense::default() };
+    card.atv_start(&atv, 3, score::Values { point: F(1000.0), hold: F(1000.0) }, false);
+    card.atv_frame(&mut atv, F(0.1), &air, rows, &mut front);
+    card.atv_end(3);
+    let down = Sense { front: true, rear: true, up_y: F(1.0), ..Sense::default() };
+    card.atv_frame(&mut atv, F(0.1), &down, rows, &mut front);
+    assert_eq!(card.total, F::ZERO, "a tenth of a second down: not yet");
+    card.atv_frame(&mut atv, F(0.1), &down, rows, &mut front);
+    card.atv_frame(&mut atv, F(0.1), &down, rows, &mut front);
+    assert_eq!(card.total, F(1000.0), "banked");
+    assert_eq!(Score::atv_scale(&atv, 3), F(0.8));
+}

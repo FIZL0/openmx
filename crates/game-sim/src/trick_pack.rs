@@ -16,6 +16,7 @@
 
 use crate::air::SpinTuning;
 use crate::phy::{Ini, Phy};
+use crate::score::Values;
 use crate::trick::{EXTRA_SLOTS, Set, Stunt};
 use ps2_float::F;
 
@@ -30,16 +31,26 @@ pub struct Row {
     pub hold_point_value: F,
 }
 
-/// What a pack gives the air code and the points: the 360's numbers and the two flat scores.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What a pack gives the air code and the points: the 360's numbers, the table's scores, and the two
+/// flat numbers the trick menu shows.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Moves {
     pub spin: SpinTuning,
-    /// MX vs. ATV's backflip `HoldPointValue` — the flat score its backflip is worth (MX Unleashed's
-    /// backflip is a flat 10000, [`crate::score::BACKFLIP_POINTS`], and so is MX vs. ATV's row) — which
-    /// the front flip, scored like a backflip, is worth too.
+    /// MX vs. ATV's backflip `HoldPointValue`, which the trick menu shows as the front flip's worth.
+    /// The ride does not score it flat: it scores MX vs. ATV's way off [`Moves::values`] (S358).
     pub front_flip_points: F,
-    /// The 360 rows' `HoldPointValue`, scored flat when the 360 comes round: one each way.
+    /// The 360 rows' `HoldPointValue`, one each way: the trick menu's, as `front_flip_points`.
     pub three_sixty_points: (F, F),
+    /// Every row's `PointValue` and `HoldPointValue` by its name (S358): what each stunt scores on a
+    /// ride with the pack on ([`crate::score::Score::atv_start`]).
+    pub values: Vec<(String, Values)>,
+}
+
+impl Moves {
+    /// The scores of the row of that name (case-insensitively), or `or` when the table has none.
+    pub fn values(&self, name: &str, or: Values) -> Values {
+        self.values.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or(or, |(_, v)| *v)
+    }
 }
 
 /// The report's controls the two extra trick buttons ride, Cross's then Square's (MD16): R2 and L2,
@@ -157,6 +168,7 @@ pub fn moves(phy: &Ini, rows: &[Row]) -> Option<Moves> {
         spin,
         front_flip_points: points("backflip", crate::score::BACKFLIP_POINTS),
         three_sixty_points: (points("threesixtyL", F::ZERO), points("threesixtyR", F::ZERO)),
+        values: rows.iter().map(|r| (r.stunt.name.clone(), Values { point: r.point_value, hold: r.hold_point_value })).collect(),
     })
 }
 
@@ -182,7 +194,7 @@ pub fn phy_name_for(bike_file: &str) -> String {
 
 /// The per-ride state MX vs. ATV's moves keep, on [`crate::ride::Ride::tricks`] — `None` on every ride
 /// on the original's tricks, which is why their hashes do not move.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct State {
     /// The 360's own state.
     pub spin: crate::air::Spin,
@@ -193,6 +205,8 @@ pub struct State {
     pub side_flick: F,
     /// The front flip watch, the backflip's mirrored ([`crate::score::Score::front_flip_watch`]).
     pub front_watch: u8,
+    /// MX vs. ATV's card beside the rider's [`crate::score::Score`] (S358).
+    pub score: crate::score::Atv,
 }
 
 impl crate::hash::State for State {
@@ -221,6 +235,7 @@ impl crate::hash::State for State {
         }
         w.f("side_flick", self.side_flick);
         w.u8("front_watch", self.front_watch);
+        crate::hash::State::walk(&self.score, w);
     }
 }
 
