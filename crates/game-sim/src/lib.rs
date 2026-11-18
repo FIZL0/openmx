@@ -383,9 +383,19 @@ impl Sim {
             // bikes' frame collidables owned by their records in biplane.p2m2's state): the plane's
             // own rays name the bike they strike, its resolve pushes that bike's chassis, and the
             // mirrors go to the bike's record. Player 1's own bike is never one of them.
+            // And the plane's hull is in the bikes' world, as split's is (N22a): their contacts and
+            // its mirrors gathered from where the last tick left them all, before anyone is stepped,
+            // player 1's bike out (B9a).
+            let hulls: Vec<rider_contact::Hull<'_>> = self.plane.as_ref().and_then(|p| p.hull(0)).into_iter().collect();
+            let seated: Vec<(&Rider, bool)> = std::iter::once((&self.rider, false)).chain(self.others.iter().map(|p| (&p.rider, true))).collect();
+            let (lists, mirrors) = match rider_contact::contacts_met(&seated, &hulls, dt, &*world) {
+                Some((lists, mirrors)) => (Some(lists), mirrors.into_iter().next().unwrap_or_default()),
+                None => (None, Vec::new()),
+            };
+            drop((seated, hulls));
             let riders: Vec<(&Rider, &Phy)> =
                 std::iter::once((&self.rider, &*self.phy)).chain(self.others.iter().map(|p| (&p.rider, &*p.phy))).collect();
-            let mut met = rider_contact::met_plane(&riders, 0, riders.len(), Vec::new(), flying, &*world);
+            let mut met = rider_contact::met_plane(&riders, 0, riders.len(), mirrors, flying, &*world);
             drop(riders);
             let plane = self.plane.as_mut().expect("a plane ride");
             // In a race the plane draws on the race's generator, the original's one `rand()` (S387).
@@ -394,9 +404,8 @@ impl Sim {
             }
             // The plane's input step: the player's pad, through I6's mapping, into the five fields the
             // controls read. The bike's `controls` are not the plane's: the plane reads the pad itself.
-            // What the bikes' struck listeners kept is for their wreck tests, which only run when
-            // they are stepped — not while a plane flies — and which never wreck on a plane's probe
-            // ([`flight_search::struck_wreck`]), so it goes no further.
+            // What the bikes' struck listeners kept is for their wreck tests, which never wreck on a
+            // plane's probe ([`flight_search::struck_wreck`]), so it goes no further.
             // The input slot runs before the frame, and the reset chord with it (S193: the shell's
             // `Plane::step` ran it, this lane did not, so a replay waited out a wreck the original's
             // L1+R1 had already put back).
@@ -404,7 +413,8 @@ impl Sim {
             let pad = flight::pad_through(self.input.pad(0), &self.phy.stick);
             // A downed rider's wreck bike meets the plane (S276, [`wreck_plane`]): its search with the
             // hull in its world before the plane's frame, its mirrors on the plane's list, and its
-            // step, the plane's body on its resolve, after. The downed rider is not stepped otherwise.
+            // step, the plane's body on its resolve, after, which the rider's own step below does not
+            // repeat.
             let mut riders: Vec<&mut crate::rider::Rider> = self.others.iter_mut().map(|p| &mut p.rider).collect();
             let downed = wreck_plane::search_downed(&mut riders, plane, dt, world, &mut met);
             let meets = Some(&mut met);
@@ -416,11 +426,10 @@ impl Sim {
                 // A prop it wakes searches in the props' pass (B34).
                 plane.frame_props_in(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0, &mut prop_movers)
             };
-            wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, false);
+            wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, true);
             drop(riders);
-            // The bikes the plane's resolve pushed take their chassis back. Its mirrors on their
-            // records (`met.struck`) wait for a bike resolve that does not run here: while player 1
-            // flies, the other riders are not stepped (B9a).
+            // The bikes the plane's resolve pushed take their chassis back; its mirrors on their
+            // records (`met.struck`) go ahead of their own lists in their steps, below.
             let mut riders: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
             rider_contact::pushed_riders(&mut riders, &met);
             drop(riders);
@@ -429,6 +438,9 @@ impl Sim {
             if let (Some(plane), Some(race)) = (self.plane.as_mut(), self.race.as_deref_mut()) {
                 std::mem::swap(&mut plane.rng, &mut race.rng);
             }
+            // The original steps its bike world after the plane's post every tick (S99's clock), so
+            // the other riders ride on while player 1 flies (B9a).
+            self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
@@ -803,6 +815,68 @@ impl Sim {
         self.feed_cards();
         self.ticks += 1;
         frames
+    }
+
+    /// **The other riders while player 1 flies** (B9a): each one's whole frame, the last player
+    /// first, as [`Sim::step_all`] walks them, after the plane's frame — the original steps its bike
+    /// world after the plane's post (S99's clock). Each bike's list is the plane's mirrors on its
+    /// record (`struck`, by player) ahead of its own `lists` entry ([`rider_contact::struck_first`]),
+    /// then its strikes on the cars; its resolve has the plane's body among its others, written back
+    /// to the plane after. Player 1's bike is out of the world: nobody's rival. An AI rider rides its
+    /// brain's levers and its brain thinks after its frame; anyone else rides their own pad. The
+    /// bikes do not strike the knockable props here: the plane lane's props' step has the plane for
+    /// its one striker ([`Sim::hear_ridden`]).
+    fn step_flown_riders(&mut self, dt: F, struck: Vec<Vec<contact::Contact>>, mut lists: Option<Vec<Vec<contact::Contact>>>, world: &mut dyn World) {
+        if self.others.is_empty() {
+            return;
+        }
+        if self.ai.as_ref().is_some_and(|l| l.cards.is_empty()) {
+            self.feed_cards();
+        }
+        let pads = self.pad_controls();
+        let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| if i == 0 { Vec::new() } else { self.car_contacts(i, world, dt) }).collect();
+        for i in (1..self.players()).rev() {
+            let at = self.rider_of(i).ride.transform().0[3];
+            let firsts = [struck.get(i).cloned().unwrap_or_default()];
+            let own = lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default();
+            let list = mover_contact::merged(rider_contact::struck_first(&firsts, own, at, &*world), std::mem::take(&mut cars[i]));
+            let mut bump = Some(list).filter(|l| !l.is_empty()).map(|l| {
+                let mut b = self.bump_in(i, l, &*world);
+                b.planes = self.plane.as_ref().map(|p| p.flown(0, at, &*world)).into_iter().collect();
+                b
+            });
+            let rivals: Vec<ride::Rival> = (1..self.players())
+                .filter(|&j| j != i)
+                .map(|j| self.rider_of(j))
+                .filter(|r| r.state.wreck.is_none() && !r.ghost.on)
+                .map(|r| r.ride.rival())
+                .map(|mut r| {
+                    r.centre = nearest_copy(&*world, self.rider_of(i).ride.chassis.cofg_world, r.centre);
+                    r
+                })
+                .collect();
+            self.lend_props(i);
+            let c = self.levers_of(i).unwrap_or(pads[i]);
+            let kept = self.lend_rng(i);
+            let p = &mut self.others[i - 1];
+            p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());
+            self.rng_back(i, kept);
+            self.props_back(i);
+            self.think(i, dt, world);
+            self.dust_frame(i, dt);
+            self.race_bike(i, c.clutch);
+            if let Some(b) = &bump {
+                self.bumped(b);
+                if let (Some(plane), Some(flown)) = (self.plane.as_mut(), b.planes.first()) {
+                    plane.pushed(flown);
+                }
+            }
+            self.wreck_pushed_back(i);
+        }
+        for p in &mut self.others {
+            p.rider.wrap_round(&*world);
+        }
+        self.feed_cards();
     }
 
     /// Advance one frame from a fixture's own input, over a flat floor.

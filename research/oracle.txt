@@ -9682,6 +9682,17 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   and every mirror bit for bit, in order.
 # Not checked: the original steps its bike world after the plane every tick (S99's clock); the port's
 #   one-player plane ride does not step the other riders (B9a).
+# --- B9a: the AI riders ride on while player 1 flies (crates/game-sim/src/lib.rs Sim::step's plane branch,
+#   Sim::step_flown_riders; tests/flight_bikes.rs a_bike_the_plane_struck_lists_its_mirrors_ahead_of_its_own,
+#   the_bike_a_one_player_plane_strikes_rides_on; journal 2026-11-18-b9a-ai-riders-ride-while-flying)
+# biplane.p2m2's state: the plane's collision node 0x0060b200 (world +0x78 = 0x0060b278; count +0x30,
+#   records +0x38, accessor 0x00273860, update 0x0026f800) holds [plane 0x01e73b00, 0x018c1bd0, AI bike
+#   0x019a9790, 0x01970060, AI bike 0x007ffdf0]; P1's bike record 0x018bfc30 is not on it. Cleared, then
+#   collided in that order: the plane's mirrors lead a bike's list. At B9's 8 poses the bike's list after
+#   the plane's collide then its own = struck_first(mirrors, own alone) bit for bit (7 struck; own lists
+#   empty: only the collidable was moved, its rays stayed put).
+# Not checked: a capture of the plane flown into an AI bike (C44); the riders' props strikes, bodies,
+#   notes and race tick while flying (S479).
 # --- N22a1: two players' flown planes meet (crates/game-sim/src/flight.rs frames_together/Fly,
 #   flight_search.rs Scene::among_planes/refresh_planes/PLANES; tests/plane_meets_plane.rs;
 #   journal 2026-11-02-n22a1-planes-meet-planes)
