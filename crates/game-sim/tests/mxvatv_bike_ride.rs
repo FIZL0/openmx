@@ -229,9 +229,11 @@ fn tape_of(name: &str) -> &'static str {
 
 /// **F31d — the input object's record off a tape tick**: the bike's input object (the bike's
 /// `+0xbc4`, research/oracle.txt `# F31d`) as the port keeps it, its sample ring and the word a miss
-/// reads taken from the image, the bindings the image's own.
+/// reads taken from the image, the bindings the image's own, the sampler's frames fitted to the
+/// ring's times ([`Pad::of`]).
 struct Pad {
     ring: pad::Ring,
+    sampler: pad::Sampler,
     before: F,
     bindings: pad::Bindings,
 }
@@ -263,19 +265,38 @@ impl Pad {
             ring.at[s] = f(input + INPUT_TIMES + 4 * s32);
             ring.axes[s] = std::array::from_fn(|a| f(input + INPUT_AXES + 0x10 * s32 + 4 * a as u32));
         }
-        ring.now = ring.at[(head + pad::SAMPLES - 1) % pad::SAMPLES];
         let front = ee.u32_at(ee.u32_at(FRONT_END));
         assert_eq!(ee.u32_at(front + FRONT_DEVICES), ee.u32_at(input + INPUT_DEVICE), "the bike's input reads device 0");
         let map = ee.u32_at(front + FRONT_BINDINGS);
         let table = (map != 0).then(|| Box::new(std::array::from_fn(|d| std::array::from_fn(|c| ee.i32_at(map + 0x140 * (d as u32 + 1) + 4 * c as u32)))));
-        Pad { ring, before: f(input + INPUT_BEFORE), bindings: pad::Bindings(table) }
+        let sampler = Pad::frames(&ring);
+        let newest = ring.axes[(head + pad::SAMPLES - 1) % pad::SAMPLES];
+        ring.push(pad::sample_time(sampler.start(sampler.frame)), newest);
+        Pad { ring, sampler, before: f(input + INPUT_BEFORE), bindings: pad::Bindings(table) }
     }
 
-    /// The record for tape tick `tick`: the tick's axes sampled into the ring ([`pad::Ring::sample`],
-    /// the port's stand-in), each held button's control at 1, the flicks the ring's.
+    /// The sampler's frames off the image's ring: a frame starts after a gap of over 15 ms, the first
+    /// whole frame is frame 0, the frames' phase is the middle of those that put every start the ring
+    /// holds on the grid, the later samples are the newest frame's, and the next record is built in the
+    /// frame after the newest (whose first sample [`Pad::of`] pushes, with the newest sample's axes).
+    fn frames(ring: &pad::Ring) -> pad::Sampler {
+        let ms: Vec<i32> = (0..pad::SAMPLES).map(|k| ring.at[(ring.head + k) % pad::SAMPLES]).map(|t| (t.0 as f64 * 1000.0).round() as i32).collect();
+        let starts: Vec<usize> = (1..ms.len()).filter(|&k| ms[k] - ms[k - 1] > 15).collect();
+        let first = ms[starts[0]];
+        let n = |k: usize| ((ms[k] - first) as f64 * 30.0 / 1001.0).round() as i32;
+        let fits: Vec<i32> = (0..30).filter(|&phase| starts.iter().all(|&k| pad::Sampler { first, phase, later: [0; 4], frame: 0 }.start(n(k)) == ms[k])).collect();
+        assert!(!fits.is_empty(), "the image's frames are on the 1001/30 ms grid: {ms:?}");
+        let newest = *starts.last().unwrap();
+        assert_eq!(ms.len() - newest, 5, "the newest frame holds five samples: {ms:?}");
+        let later = std::array::from_fn(|d| ms[newest + 1 + d] - ms[newest]);
+        pad::Sampler { first, phase: fits[fits.len() / 2], later, frame: n(newest) + 1 }
+    }
+
+    /// The record for tape tick `tick`: the tick's axes sampled into the ring ([`pad::Sampler::tick`]),
+    /// each held button's control at 1, the flicks the ring's.
     fn record(&mut self, tick: &Row) -> pad::Record {
         let axes = ["lx", "ly", "rx", "ry"].map(|k| F(tick[k].parse::<f32>().unwrap()));
-        self.ring.sample(axes, F(f32::from_bits(DT)));
+        self.sampler.tick(&mut self.ring, axes);
         let mut values = [F::ZERO; pad::ENTRIES + 1];
         values[0] = self.before;
         for b in tick["buttons"].split(' ').filter(|b| !b.is_empty()) {
@@ -355,10 +376,13 @@ fn hold_clamp(ee: &Ee) -> F {
 
 /// **F31d**: the port's pad reader off the tapes ([`tape_stores`]) gives every reader word of every
 /// row past the first, word for word, on both captures (tick t on row t + 1, run over row t's bike),
-/// and covers every word [`READER`] pokes and the stick's angle and reach. The one word that cannot be
-/// the original's is the flip hold on flip-1's rows 66..71: the original measured the stick's −1 to 1
-/// over two samples 2 ms apart (992.97), the port's stand-in over a tick (60.006); both are past the
-/// clamp every reader of the hold puts on it ([`hold_clamp`]), and every other row's hold is the row's.
+/// and covers every word [`READER`] pokes and the stick's angle and reach. The ring is sampled as the
+/// original samples it ([`pad::Sampler`], its frames fitted to the image's ring). The one word that is
+/// not the original's is the flip hold on flip-1's rows 66..71: both measure the stick's −1 to 1 over
+/// the 2 ms from a frame's first sample to its second, but the port's grid puts that frame's first at
+/// one millisecond before the original's (1000.55 against 992.97; the original's milliseconds jitter
+/// with how long its work ran); both are past the clamp every reader of the hold puts on it
+/// ([`hold_clamp`]), and every other row's hold is the row's.
 #[test]
 fn the_tape_gives_every_reader_word() {
     let Some(ee) = image() else { return };
@@ -371,7 +395,7 @@ fn the_tape_gives_every_reader_word() {
     for name in ["ride-2", "flip-1"] {
         let (Some(rows), Some(ticks)) = (rows(name), ticks(tape_of(name))) else { return };
         let mut pad = Pad::of(&ee);
-        let mut past = Vec::new();
+        let (mut past, mut crossing) = (Vec::new(), None);
         for r in 1..rows.len() {
             let (before, o) = (obj(&rows[r - 1]), obj(&rows[r]));
             let (mut w, bike) = pad_words(|at| before[at as usize / 4]);
@@ -385,6 +409,9 @@ fn the_tape_gives_every_reader_word() {
                 }
                 let (g, h) = (F::from_bits(got), F::from_bits(row));
                 if at == 0x12b0 && clamp < g.abs() && clamp < h.abs() && (g < F::ZERO) == (h < F::ZERO) {
+                    let m = *crossing.get_or_insert(pad.sampler.start(pad.sampler.frame - 1));
+                    let over = |m: i32| F(2.0) / (pad::sample_time(m + 2) - pad::sample_time(m));
+                    assert_eq!((g, h), (over(m), over(m + 1)), "{name} row {r}: the port's hold is the 2 ms pair from {m} ms, the row's from {} ms", m + 1);
                     past.push(r);
                     continue;
                 }

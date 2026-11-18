@@ -13805,12 +13805,31 @@ atv_input_update            atv 0x00507880 = the input object's frame (a0 input 
 #   The flick scan: ring head +0x94, times +0x98+4s, axes +0x118+0x10s+4a; oldest first, |v| > 0.8 remembered
 #   (time, value); the other sign with a remembered time != 0: time > 0 -> (v - from)/(t - time), any gap,
 #   kept if larger in magnitude; forget. MXU's flick (ride.rs Flick::speed) is the same scan.
-atv_input_sampler           atv 0x00505f80 = the ring's sampler, a callback registered with the front end's +0x2cc object (vtable 0x003b7320, +0x14 0x00125420 registers into list +0x288, +0x18 0x00125480 removes): time f12 into +0x98+4*head, each axis read afresh (0x00117e70, the d-pad override through the binding lookup). Its call sites and times not traced (F31d)
+atv_input_sampler           atv 0x00505f80 = the ring's sampler, a callback registered with the front end's +0x2cc object (vtable 0x003b7320, +0x14 0x00125420 registers into list +0x288, +0x18 0x00125480 removes): time f12 into +0x98+4*head, each axis read afresh (0x00117e70, the d-pad override through the binding lookup). Call sites and times: # F71 below
 atv_binding_lookup          atv 0x00118e10 = (controls *(*0x003eab60), cmd, 2, 10, device): map controls+0x648; no map, cmd > 0x4f or device > 1 -> -1; else *(map + 0x140 + device*0x140 + cmd*4). State 4: both devices left 15, right 13, up 12, down 14, gas 2 (Cross), brake 3 (Square), clutch 4 (L1), tricks 1, 0, 5 (Circle, Triangle, R1)
 #   992.97 (0x44783e10) on flip-1 rows 66..71 = (1 - (-1)) / (264 * 2^-17 s): the ring's last sample at -1
 #   (tape tick 64) and first at +1 (tick 65) 2.014 ms apart; held while that pair stays in the 32 samples.
 #   MD164's -992.97 the same the other way. The port's stand-in (150 samples/s on the sim clock) gives 60.006;
 #   state 4's bike clamps the hold at max_backflip_time +0x11a8 = max_preload_time +0xc68 = 60.
+# F71 — when the sampler runs (pad::Sampler; tests/mxvatv_bike_ride.rs the_tape_gives_every_reader_word). Comment rows
+# only. Journal: research/journal/2026-11-18-f71-input-sampler-timing.
+#   Front end *0x003eab60 = 0x003f9fe0: +0x2cc vtable, callback list +0x288 (first node +0x28c; node {ctx, fn}, next
+#   +8). One listener: the bike's input object, fn 0x00505f80. Walker 0x00127490 = front vt +0x88 (front, phase):
+#   ms = trunc(*0x003fce18 * 100 + RCNT0_COUNT * 256000 / 147456000) (a 100 ms tick plus timer 0); each fn gets
+#   f12 = (float)ms * 0.001f (0x3a83126f), a0 = phase, a1 = ctx.
+#   Callers each frame: 0x00126240 (the main frame, from 0x001cc560) phase 1 just before the app update (front +0x278,
+#   vt 0x003b3940 +0x40 = 0x00128af0, the child tree walk that runs the sim 0x00204040 and the input update
+#   0x00507880), phase 2 right after it; 0x00125c80 (render, per viewport) phases 3 and 4; 0x0017aec0 (vsync wait)
+#   phase 8 once if the wait passed 4 ms. 0x001612f0 calls it with the loop index in a 0x8e-pass loading loop.
+#   Five samples a frame: state 4's ring at +0, +2/3, +5/6, +6/7, +10/11 ms from the frame's first; frames 33/34 ms
+#   (1001/30) apart; first samples 219.595..219.762 s fit 219595 + floor((23 + 1001 n) / 30) ms (phase 19..26/30).
+#   Live (copy 3, sandrail Free Ride state 2, research/f71/ring.toml + crossing.pad): 85 frames, offsets
+#   (0,2,3,4,8) x40, (0,1,3,4,8) x27, (0,2,4,4,8) x12, (0,1,3,3,8) x2, (0,2,4,4,9) x1, 2 cut by missed rows.
+#   The pad's new reading lands between phase 1 and phase 2: a record sees its frame's phase 1 still old; the 5
+#   samples between two records hold one tick's axes.
+#   flip-1 rows 66..71: the pair is frame I+66's phase 1 (-1) and phase 2 (+1), I = the image's newest frame
+#   (219.762 s). 221965 -> 221967 ms gives 0x44783e10 = 992.97 exactly; the grid's 221964 gives 0x447a232d = 1000.55.
+#   The 2 ms pairs that give 992.97 start at 221952, 221965, 221980.. (where the float spacing makes 2 ms = 264 ulps).
 # MD246 — Untamed's (SLUS-21701) quad record resolution against a knockable bale's body (game_sim::atv_contact::
 # Held::bodies/refill_among, quad::Knockable::body; tests/untamed_race_quad.rs untamed_quad_resolves_its_hits_on_
 # the_bale_as_the_original, 10,000 cases + steer tick 197 in the interpreter on MD147's spawn image). Comment rows
