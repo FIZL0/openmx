@@ -947,3 +947,162 @@ fn s331_the_lane_spawns_at_the_load_as_c33_holds_it() {
     assert_eq!(lane.tables.curve, controls::tables(&ee).curve, "the controllers' curve table");
     assert!(wrong.is_empty(), "the lane at the load is not C33's:\n{}", wrong.join("\n"));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S363 — the engine notes' start delays at the load, between the brains
+// ---------------------------------------------------------------------------------------------------
+
+/// The game's generator one draw back: its step is `state × a + 1` with an odd `a`, so it inverts.
+fn s363_back(state: u64) -> u64 {
+    const A: u64 = 0x5851_f42d_4c95_7f2d;
+    // a⁻¹ mod 2⁶⁴ by Newton's iteration: each step doubles the bits that are right.
+    let mut inv: u64 = A;
+    for _ in 0..5 {
+        inv = inv.wrapping_mul(2u64.wrapping_sub(A.wrapping_mul(inv)));
+    }
+    assert_eq!(A.wrapping_mul(inv), 1);
+    state.wrapping_sub(1).wrapping_mul(inv)
+}
+
+/// How far back from C33's image the load's draws are looked for.
+const S363_BACK: usize = 400_000;
+
+/// C33's bikes' model files by player, as its image's vehicle loader holds them (the journal).
+const S363_C33_MODELS: [&str; 4] = ["250SX_THQ_01.sub", "RM250.sub", "250SX.sub", "250SX.sub"];
+
+/// **The load draws each bike's note delay before its brain** (S363), as `Sim::spawn_ai_noted` does:
+/// C33's generator walked back from the image's state to the load, the three AI brains' ten dice
+/// (brain `+0x22c`, as the spawn left them) found in it, and the draw before each brain's first die is
+/// its bike's start delay (rider `+0x14a4`, counted down one tick by the image). The bikes are built
+/// in model-name order (`engine_note::build_order`): ai0, ai1 (both 250SX), the human (250SX_THQ_01),
+/// ai2 (RM250). Each brain's spawn is twelve draws (ten for the brain, two for the reader), so the
+/// next bike's delay comes straight after. Then the Sim's spawn on the generator as it stood before
+/// the first bike's delay builds the same notes and the same dice.
+#[test]
+fn s363_c33s_note_delays_draw_between_the_brains() {
+    use game_sim::ai::{AiRider, Entry, Roster};
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let state = kit.ctx(C33_STATE);
+    if !state.exists() {
+        return skip(&format!("{} is not there: C33's capture", state.display()));
+    }
+    let mut ee = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let Some(at) = named(&["rand_state"]) else { return };
+    // states[n]: the generator n draws before the image's; units[n] the draw that made states[n].
+    let mut states = vec![s12e_u64(&ee, at[0])];
+    for _ in 0..S363_BACK {
+        states.push(s363_back(*states.last().unwrap()));
+    }
+    let unit = |n: usize| Rng::from_state(states[n + 1]).unit();
+    let order = c33_by_player(&ee);
+    let dice = |k: usize| -> [F; 10] { core::array::from_fn(|i| F(ee.f32_at(C33_RIDERS[k].2 + 0x22c + 4 * i as u32))) };
+    // Where each AI rider's first die is, counted back from the image (the farther back, the earlier).
+    let firsts: Vec<usize> = order[1..]
+        .iter()
+        .map(|&k| {
+            let d = dice(k);
+            (9..S363_BACK).find(|&n| (0..10).all(|i| unit(n - i) == d[i])).unwrap_or_else(|| panic!("{}'s dice are not in the last {S363_BACK} draws", C33_NAMES[k]))
+        })
+        .collect();
+    println!("the brains' first dice, draws back from the image: {firsts:?}");
+    // The loader builds by model name: the human's 250SX_THQ_01 after the two 250SX AI riders.
+    let built = engine_note::build_order(&S363_C33_MODELS);
+    assert_eq!(built, [2, 3, 0, 1], "C33's bikes, by model name");
+    // Walk the build from the first bike's delay: each bike's delay, then an AI rider's 12 draws.
+    let n0 = firsts[built[0] - 1] + 1;
+    let mut n = n0;
+    let mut drawn = vec![F::ZERO; 4];
+    for &p in &built {
+        let k = order[p];
+        let (u, left) = (unit(n), F(ee.f32_at(C33_RIDERS[k].0 + 0x14a4)));
+        println!("{} (player {p}): delay drawn {} {n} back, {} left in the image", C33_NAMES[k], u.0, left.0);
+        assert!(left.0 < u.0 && u.0 - left.0 < 0.2, "{}: the draw {n} back ({}) is not its delay ({} left)", C33_NAMES[k], u.0, left.0);
+        drawn[p] = u;
+        n -= 1;
+        if p > 0 {
+            assert_eq!(firsts[p - 1], n, "{}'s brain right after its delay", C33_NAMES[k]);
+            n -= 12;
+        }
+    }
+
+    // The Sim's spawn from the generator before the first bike's delay: the same delays and dice, and
+    // the generator left after the last reader's draws.
+    let Some(retail) = super::character::ch_retail() else {
+        return skip("no MX.PSR (or no Bike\\250sx.res in it): the retail character file is needed");
+    };
+    let character = Ini::parse_bytes(&retail);
+    let tables = Arc::new(Tables::build());
+    let Some(mut bikes) = Bikes::open() else { return };
+    let names = C33_RIDERS.map(|(_, _, b)| track::physics_file(track::Engine::Cc250, false, if b == 0 { C33_HUMAN_TUNING } else { track::Tuning::A }));
+    let phys: Vec<Phy> = names.iter().map(|n| bikes.phy(n, &tables)).collect();
+    let seeded = |k: usize| c33_bike(&ee, C33_RIDERS[k].0, &phys[k], &names[k], &bikes.col);
+    let mut sim = Sim::with_rider(0, Arc::clone(&tables), phys[order[0]].clone(), seeded(order[0]));
+    for &k in &order[1..] {
+        sim.add_player(phys[k].clone(), seeded(k));
+    }
+    let skills: Vec<i32> = order[1..].iter().map(|&k| ee.u32_at(C33_RIDERS[k].0 + 0x10d0 + 0x104) as i32).collect();
+    let roster = Roster {
+        humans: 1,
+        ghost: false,
+        ai: skills.iter().map(|&skill| AiRider { identity: game_sim::ai::FIRST_AI_IDENTITY, skill }).collect(),
+        all_ai: None,
+    };
+    let app = ee.u32_at(named(&["app_pointer"]).unwrap()[0]);
+    let event = ee.u32_at(ee.u32_at(app + 0x3d4) + 0xc);
+    let (difficulty, event_kind) = (ee.read(event + 0x117, 1) as u8, ee.u32_at(event) as i32);
+    let sounds = Arc::new(engine_note::NoteSounds::default());
+    sim.spawn_ai_noted(&roster, Some(&character), difficulty, event_kind, &Entry::default(), Rng::from_state(states[n0 + 1]), &sounds, &S363_C33_MODELS);
+    let notes = &sim.notes.as_ref().expect("notes").riders;
+    assert_eq!(notes.iter().map(|n| n.delay).collect::<Vec<_>>(), drawn, "the notes' delays, by player");
+    let lane = sim.ai.as_deref().expect("a lane");
+    for ((_, pilot), &k) in lane.pilots.iter().zip(&order[1..]) {
+        assert_eq!(pilot.wander.draws, dice(k), "{}'s dice", C33_NAMES[k]);
+    }
+    assert_eq!(lane.rng.state(), states[n + 1], "the generator after the last reader's two draws");
+}
+
+/// **The bikes' build order is the game's sort** (S363): the vehicle loader's `qsort` of its slots
+/// by model name, run in the interpreter on C33's image over many name lists up to the loader's eight
+/// slots (equal names, case differences, prefixes — seven and eight take the partitioning path), and
+/// `engine_note::build_order` answers the same order every time.
+#[test]
+fn s363_the_build_order_is_the_loaders_sort() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let state = kit.ctx(C33_STATE);
+    if !state.exists() {
+        return skip(&format!("{} is not there: C33's capture", state.display()));
+    }
+    let mut ee = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let Some(at) = named(&["libc_qsort", "vehicle_model_order", "vehicle_model_names"]) else { return };
+    let [qsort, order, names] = at[..] else { unreachable!() };
+    // The slot indices go in the block after the loader's eight names.
+    let base = names + 8 * 0x104;
+    const POOL: [&str; 7] = ["250SX.sub", "250sx.SUB", "RM250.sub", "250SX_THQ_01.sub", "CR250.sub", "a", "A_"];
+    let mut seed = 0x5363u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (seed >> 16) as usize
+    };
+    for case in 0..600 {
+        let n = 1 + case % 8;
+        // Some lists all one name: the shell's races, every bike the same model.
+        let models: Vec<&str> = if case % 5 == 0 { vec![POOL[next() % POOL.len()]; n] } else { (0..n).map(|_| POOL[next() % POOL.len()]).collect() };
+        for (i, m) in models.iter().enumerate() {
+            for (j, b) in m.bytes().chain([0]).enumerate() {
+                ee.write(names + i as u32 * 0x104 + j as u32, 1, u128::from(b));
+            }
+            ee.write(base + 4 * i as u32, 4, i as u128);
+        }
+        ee.call(qsort, &[u64::from(base), n as u64, 4, u64::from(order)], &[], 1_000_000);
+        let theirs: Vec<usize> = (0..n).map(|i| ee.u32_at(base + 4 * i as u32) as usize).collect();
+        assert_eq!(engine_note::build_order(&models), theirs, "case {case}: {models:?}");
+    }
+}

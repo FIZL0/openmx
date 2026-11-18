@@ -13726,6 +13726,18 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   C33: ai2's note on at tick 9, ai0's at 14; both pick low accel 1 at 15 (sound_pick + jitter draw),
 #   in actor order; ai1 picks at 30; power chains at 48 (33 ticks after 15: the voice clock starts a
 #   frame after the key-on). The Sim runs it as engine_note::Notes.
+# S363 — the order the load builds the bikes, and so draws their note delays (journal
+#   research/journal/2026-11-18-s363-race-engine-notes-in-the-sim). vehicle_build_load fills one slot per
+#   player (list order: humans, then AI) with the bike's model file at 0x004e0880 + i*0x104, then qsorts
+#   the slot indices (vehicle_model_order) and calls the spawner 0x0020e0b0 in that order: each bike's
+#   builder draws its delay, then an AI rider's brain spawn draws its 10 dice and the reader 2. C33:
+#   models 250SX_THQ_01 (human), RM250, 250SX, 250SX -> built players 2, 3, 0, 1; delays found 658, 645,
+#   632, 631 draws back from the image, each one dt above rider +0x14a4. Engine_note::build_order ports it.
+vehicle_model_order         boot 0x00208bd0 (a, b: int*) strcasecmp of the two slots' model names at
+#                                           vehicle_model_names + i*0x104 (a jump to 0x00410c50)
+vehicle_model_names         boot 0x004e0880 the loader's per-player bike model file names, 0x104 apart
+libc_qsort                  boot 0x0040f338 (base, n, size, cmp) the BSD qsort: insertion sort under 7
+#                                           or after a pass with no swap, med3 (ninther past 40)
 # MD92 — Untamed's (SLUS-21701) MX ride with a wreck, replayed by the original's own frame
 # (tests/untamed_bike_ride.rs; captures wreck-1/wreck-3 off copy 9's state 8, 665 rows each, bit-exact).
 # Comment rows only. Journal: research/journal/2026-11-17-md92-untamed-ride-replay.
