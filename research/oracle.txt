@@ -9578,6 +9578,20 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   (S95's 1p state's bikes were not checked for this).
 # The plane's 4 resolve substeps in 5074 leave P2's chassis velocity unchanged (spring path); P2's own
 #   first-substep resolve moves it. Every call bit-exact with the port's contact::resolve fed RAM's lists.
+# --- B9: the one-player plane's rays name the AI riders' bikes (crates/game-sim/src/lib.rs Sim::step's
+#   plane branch, rider_contact::met_plane; tests/flight_bikes.rs the_one_player_planes_rays_name_the_states_bikes;
+#   journal 2026-11-18-b9-one-player-plane-names-bikes)
+# biplane.p2m2's state: the plane's three bike candidates (found[23..26]: 0x018beb20, 0x019a8940,
+#   0x007fefa0) each have owner +0x80 = a collision record (0x018bfc30, 0x019a9790, 0x007ffdf0) whose
+#   +0x1f8 is that collidable and whose capacity +0x104 is 11 — as split's (N22b). So the plane's ray hit
+#   names the AI bike's record and files the kind-1 mirror on it.
+# With one bike's collidable moved into the plane (+0x120 row 3 poked, mesh_collidable_bounds(c, c+0x40,
+#   spare) for the centre, plane_refresh_search(plane+0x50) for the distances), the original's
+#   vt+0x74 clears then collision_record_collide(plane record): 7 of 8 poses struck, 36 kind-0 entries
+#   naming the bike, mirrors on its record; the port's search with the bikes named gives every entry
+#   and every mirror bit for bit, in order.
+# Not checked: the original steps its bike world after the plane every tick (S99's clock); the port's
+#   one-player plane ride does not step the other riders (B9a).
 # --- N22a1: two players' flown planes meet (crates/game-sim/src/flight.rs frames_together/Fly,
 #   flight_search.rs Scene::among_planes/refresh_planes/PLANES; tests/plane_meets_plane.rs;
 #   journal 2026-11-02-n22a1-planes-meet-planes)
