@@ -36,6 +36,8 @@ const LCG: u64 = 0x5851_f42d_4c95_7f2d;
 /// the trail's sound object (two a frame while it plays) and the wreck clank (after the spin); after
 /// the wreck the trail's linked effects items step their dust emitters, which draw twice per puff.
 /// On race-jump and race-wheelie-launch those callers' draws before the wreck sum to the lags here.
+/// R44 runs those callers ([`between_frames`]), but their counts follow the IOP's voice status, which
+/// the replay does not have, so they miss the lags; these stay fitted.
 const RNG_LAG: [(&str, usize, u64); 7] = [
     ("race-jump-side", 183, 41),
     ("race-jump-side", 226, 1),
@@ -240,14 +242,36 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         list.iter().flat_map(|&(at, len)| (0..len / 4).map(move |i| (C28_QUAD + at + 4 * i, o[(at / 4 + i) as usize]))).collect::<Vec<_>>()
     };
     let after_spot = spot_after(&rows);
+    // R44: `R44_CALLERS` runs the original's between-frame callers instead of the fitted lags
+    // ([`between_frames`]); `R44_RNG` names a re-record with rand()'s state per row (R41's `rng` field)
+    // to report how far the replay's state is off it.
+    let fitted = std::env::var("R44_CALLERS").is_err();
+    let rng_rows = std::env::var("R44_RNG").ok().map(|f| {
+        let text = std::fs::read_to_string(f).unwrap();
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = head.iter().position(|&h| h == "rng").unwrap();
+        lines.map(|l| { let w = hex_words(l.split(',').nth(at).unwrap()); u64::from(w[0]) | u64::from(w[1]) << 32 }).collect::<Vec<u64>>()
+    });
+    let rng_off = RefCell::new(Vec::<String>::new());
+    BETWEEN_ON.with(|b| b.set(!fitted));
+    BETWEEN_DRAWS.with(|d| d.borrow_mut().clear());
     let pre = RefCell::new(HashMap::new());
     let before = |r: usize, ee: &Ee| {
+        if let Some(want) = rng_rows.as_ref().and_then(|w| r.checked_sub(1).map(|q| w[q])) {
+            let got = rng_state(ee);
+            if got != want {
+                let ahead = (0..5000u64).scan(got, |x, k| { let a = (*x == want).then_some(k as i64); *x = x.wrapping_mul(LCG).wrapping_add(1); Some(a) }).flatten().next()
+                    .or_else(|| (0..5000u64).scan(want, |x, k| { let a = (*x == got).then_some(-(k as i64)); *x = x.wrapping_mul(LCG).wrapping_add(1); Some(a) }).flatten().next());
+                rng_off.borrow_mut().push(format!("{}:{ahead:?}", r - 1));
+            }
+        }
         *ee.log.borrow_mut() = Some(Vec::new());
         // The spot frame r reads is row r-1's when the rows are read after the game writes it, row r's
         // when before (s-wheelie-launch's put-back on row 158 lands on row 158's spot).
         let spot = if after_spot { r.checked_sub(1).map_or(Vec::new(), |q| words(&rows[q], &SPOT)) } else { words(&rows[r], &SPOT) };
         let mut rng = Vec::new();
-        for &(_, _, draws) in RNG_LAG.iter().filter(|&&(ride, at, _)| ride == name && at == r) {
+        for &(_, _, draws) in RNG_LAG.iter().filter(|&&(ride, at, _)| fitted && ride == name && at == r) {
             let at = ee.u32_at(REENT) + 0xa8;
             let state = (0..draws).fold(u64::from(ee.u32_at(at)) | u64::from(ee.u32_at(at + 4)) << 32, |x, _| x.wrapping_mul(LCG).wrapping_add(1));
             rng = vec![(at, state as u32), (at + 4, (state >> 32) as u32)];
@@ -305,12 +329,16 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         Vec::new()
     };
     let seen = sim_chain(n, port, None, tail, before, after);
+    BETWEEN_ON.with(|b| b.set(false));
+    let between = BETWEEN_DRAWS.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    let mut sum = 0;
+    let lags: Vec<String> = between.iter().enumerate().filter(|&(_, &n)| n != 0).map(|(k, &n)| { sum += n; format!("{k}:{n}({sum})") }).collect();
     let (torn, mid, ragdoll) = (torn.into_inner(), mid.into_inner(), ragdoll.into_inner());
     let say = format!(
         "MD37b {name} ({n} rows, wrecked from {:?}; rows read mid-frame (row: writes landed of the frame's, at pc): {}; rows matching no instant {torn:?}; rows whose ragdoll copies differ {ragdoll:?})\n",
         wrecked.get(),
         mid.iter().map(|(r, k, of, pc)| format!("{r}: {k}/{of} {pc:#x}")).collect::<Vec<_>>().join(", "),
-    );
+    ) + &if fitted { String::new() } else { format!("R44 {name} between-frame draws (frame: draws(total)): {}\nR44 rows whose rand() state is off the re-record's (row: draws it is behind, negative ahead): {}\n", lags.join(" "), rng_off.borrow().join(" ")) };
     eprint!("{say}");
     if let Ok(log) = std::env::var("MD37B_LOG") {
         use std::io::Write;
@@ -427,3 +455,99 @@ fn an_mxu_sized_landing_rides_out_and_its_face_wrecks_front_by_the_original_and_
     assert_eq!(reason, 1, "the face wrecks front:\n{say}");
     assert!(loads.z() < -front && speed(seen[face - 1].0) > 60.0, "fore-aft {} past −{front} at {} ft/s:\n{say}", loads.z(), speed(v));
 }
+
+
+/// R44: the original's code that runs between two sim frames and draws rand(), run on both machines
+/// before every frame, the first included (the images were saved before a between step: without one
+/// before frame 0, race-jump's engine note lands a frame late):
+/// the sound manager's update (its driver calls, then every sound object under it: the engine note,
+/// the no-repeat crash and landing picks, the random pick from a list, the wreck clank) and the
+/// vehicle's post-update pass (the tree's second, dt-less pass, vt `+0x48`, on the quad's scene node
+/// `+0xc`: the trail's sound objects and the linked effects items' dust emitters under its effects
+/// group). The rest of the tree's two passes draws no rand() on these rides (R41's log) and reaches
+/// the renderer, which the interpreter does not have.
+///
+/// Off by default (`R44_CALLERS` turns it on): the callers' draw counts hang on the sound driver's
+/// voice status (playing or not, and how far in), which the IOP's RPC replies refresh and the image
+/// replay cannot ([`SIF_CALL_RPC`]). With the status frozen at the image's, a sound that ended in the
+/// original never ends (race-jump's list pick on row 61 is missed) and one that played on reads as
+/// done (race-jump-side's engine note swaps its two loops every frame, rows 105-132, one pick each),
+/// so all five wrecks draw the wrong spin; the fitted [`RNG_LAG`] stays.
+const SOUND_MANAGER: u32 = 0x0082_3650;
+const SOUND_MANAGER_VT: u32 = 0x003b_31e0;
+const QUAD_NODE_VT: u32 = 0x003c_e25c;
+/// The kernel's thread delay (an alarm that signals a semaphore, then a wait on it), which the sound
+/// library calls while the IOP works: answered at once (0), as there is no IOP or timer here.
+const DELAY_THREAD: u32 = 0x0033_ff58;
+/// The kernel's RPC call to the IOP (client, number, mode, send, size, receive, size, end function):
+/// answered as done at once, with nothing received (the reply buffer keeps its last reply, which the
+/// sound driver reads as no new voice status) and the end function's one store made. The sound
+/// driver's end functions each set one word to 1 (`addiu a0, zero, 1; lui v1, hi; sw a0, lo(v1)`) and
+/// enable interrupts; the hook decodes that store and makes it, and refuses any other end function.
+const SIF_CALL_RPC: u32 = 0x0034_2e28;
+/// The node's update (vt `+0x40`, with dt) and post-update pass (vt `+0x48`).
+const NODE_UPDATE: u32 = 0x40;
+const NODE_POST: u32 = 0x48;
+
+thread_local! {
+    /// Whether [`sim_chain`] runs [`between_frames`]' code, and the draws it made before each frame.
+    static BETWEEN_ON: Cell<bool> = const { Cell::new(false) };
+    static BETWEEN_DRAWS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// rand()'s state on `ee`.
+fn rng_state(ee: &Ee) -> u64 {
+    let at = ee.u32_at(REENT) + 0xa8;
+    u64::from(ee.u32_at(at)) | u64::from(ee.u32_at(at + 4)) << 32
+}
+
+/// How many LCG steps take rand()'s state `from` to `to`.
+fn draws_between(from: u64, to: u64) -> u64 {
+    (0..100_000u64).scan(from, |x, k| {
+        let at = (*x == to).then_some(k);
+        *x = x.wrapping_mul(LCG).wrapping_add(1);
+        Some(at)
+    })
+    .flatten()
+    .next()
+    .expect("rand() stepped more than 100000 times between two frames")
+}
+
+/// [`SIF_CALL_RPC`]'s answer.
+fn rpc_done(ee: &mut Ee) {
+    let end = ee.r(11) as u32;
+    if end != 0 {
+        let [set, hi, st] = [0, 4, 8].map(|o| ee.u32_at(end + o));
+        assert!(set == 0x2404_0001 && hi >> 16 == 0x3c03 && st >> 16 == 0xac64, "RPC end function {end:#x} is not a one-word flag store");
+        let at = ((hi & 0xffff) << 16).wrapping_add(st as u16 as i16 as i32 as u32);
+        ee.set_u32(at, 1);
+    }
+    ee.set(2, 0);
+}
+
+/// [`sim_chain`]'s step before frame `k`: with [`BETWEEN_ON`], the sound manager's update and the
+/// vehicle's post-update pass on the original's machine and on the twin.
+pub(super) fn between_frames(k: usize, ee: &mut Ee, twin: Option<&mut Ee>) {
+    if !BETWEEN_ON.with(Cell::get) {
+        return;
+    }
+    let node = image::heap().quad + 0xc;
+    let dt = F::from_bits(DT);
+    let from = rng_state(ee);
+    for m in std::iter::once(ee).chain(twin) {
+        assert_eq!(m.u32_at(SOUND_MANAGER + 4), SOUND_MANAGER_VT, "the image's sound manager");
+        assert_eq!(m.u32_at(node + 4), QUAD_NODE_VT, "the quad's scene node");
+        m.hooks.entry(DELAY_THREAD).or_insert_with(|| Box::new(|ee: &mut Ee| ee.set(2, 0)));
+        m.hooks.entry(SIF_CALL_RPC).or_insert_with(|| Box::new(rpc_done));
+        let update = m.u32_at(SOUND_MANAGER_VT + NODE_UPDATE);
+        run(m, update, &[u64::from(SOUND_MANAGER)], dt);
+        let post = m.u32_at(QUAD_NODE_VT + NODE_POST);
+        run(m, post, &[u64::from(node)], dt);
+        BETWEEN_DRAWS.with(|d| {
+            if d.borrow().len() <= k {
+                d.borrow_mut().push(draws_between(from, rng_state(m)));
+            }
+        });
+    }
+}
+
