@@ -260,6 +260,8 @@ mod away;
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
 mod saved_markers;
+// P349: a free ride's progression kept per track, which opens its start zones.
+mod track_progress;
 // MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
 mod shot_pose;
 mod split;
@@ -8251,15 +8253,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The free-ride AI riders' seeker world (S316) on every seat's state: the same `hit.dat`'s
     // databases out of the track's folder, its riders the owners, a done flag per player. A free
     // ride is the original's freestyle activity; a race is a single race, which builds no world
-    // (S331a). Zones open to the human players as a fresh profile's are taken to be — the first of
-    // each progression (S315 reads them off the save); a free ride's players are all humans.
+    // (S331a). Zones open to the human players by the first player's progression on the track
+    // (P349, S315): the one kept beside `settings.txt` on a local ride, a fresh profile's on a tape or
+    // online, where every machine must build the same world; a free ride's players are all humans.
+    // The race zone is closed while the first player starts on a machine.
     let seek_dat = game_sim::phy::Ini::parse(&hit_dat);
     let activity = if race_start.is_some() { game_sim::ai::seek::ACTIVITY_SINGLE_RACE } else { game_sim::ai::seek::ACTIVITY_FREESTYLE };
+    let zones_progress = if args.play.is_some() || args.online.is_some() || front.as_deref().is_some_and(|f| f.menu.lobby.start.is_some()) {
+        track_progress::fresh()
+    } else {
+        let dir = front.as_deref().map_or_else(|| menu::store_dir(Disc::configured_path().ok().as_deref()), |f| f.dir.clone());
+        track_progress::load(&dir, &args.track, &saved_markers::profile(&roster::clean_rider_name(&args.look.name), 0))
+    };
+    let opening = track_progress::opening(seats.first().is_some_and(|s| s.garage.up != Kind::Bike));
     for (i, s) in seats.iter_mut().enumerate().filter(|_| game_sim::ai::seek::loads_world(activity)) {
-        let humans = s.sim.players();
-        let slots = game_sim::ai::seek::slots(humans);
+        let humans: Vec<usize> = (0..s.sim.players()).collect();
+        let slots = game_sim::ai::seek::slots(humans.len());
         let mut read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("{stem}\\{name}")).ok());
-        let open = |p: usize, zone: game_sim::ai::seek::Zone| p < humans && zone.place == Some(0);
+        let open = game_sim::ai::seek::opener(&humans, Some(&zones_progress), opening);
         if s.sim.load_seek(&seek_dat, &mut read, slots, &open, &mut sim) && i == 0 {
             let w = s.sim.seek.as_deref().expect("loaded");
             println!("ai seek: {} targets, {} zones, {} riders, {slots} slots", w.targets.len(), w.groups.len(), w.sets.len());
