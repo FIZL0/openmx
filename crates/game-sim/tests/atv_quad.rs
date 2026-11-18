@@ -6249,3 +6249,7 @@ mod clutch_lever;
 /// MD178a: a remote quad's stick, brake and clutch lever cleared by the vehicle update.
 #[path = "atv_quad/remote_let_go.rs"]
 mod remote_let_go;
+
+/// MD98a: two quads' records resolving their touch, against C38's image.
+#[path = "atv_quad/quads_touch.rs"]
+mod quads_touch;
