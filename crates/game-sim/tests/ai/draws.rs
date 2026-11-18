@@ -2,7 +2,7 @@
 // S328 — C33's draws that are not the AI's: the original's whole frame in the interpreter
 // ---------------------------------------------------------------------------------------------------
 
-use super::race4::{C33_NAMES, C33_RIDERS, C33_STATE};
+use super::race4::{C33_NAMES, C33_RIDERS, C33_STATE, c33_rear_node};
 use super::sim::s12e_u64;
 use super::*;
 use ps2_oracle::{Ee, Kit};
@@ -256,12 +256,35 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     let emitters: Vec<(u32, &str, usize)> = c33_emitters(&ee);
     let emitted: Rc<RefCell<Vec<(u32, usize)>>> = Rc::default();
     let (e, l) = (Rc::clone(&emitted), Rc::clone(&log));
+    // S421: each rear tyre emitter's point, against the Sim's node chain on what the original holds
+    // as it emits: the root's world, Bike's local, the rear mount and the snapshot's compression.
+    let rears: Vec<(u32, u32, game_sim::dust::RearNode)> = C33_RIDERS.iter().map(|&(r, _, _)| {
+        let (node, rear) = c33_rear_node(&ee, r);
+        (r, node, rear)
+    }).collect();
+    let rear_points: Rc<RefCell<Vec<(u32, F, [u32; 16], u32)>>> = Rc::default();
+    let rp = Rc::clone(&rear_points);
     ee.hooks.insert(
         addr("emit").unwrap(),
         Box::new(move |ee: &mut Ee| {
             let (before, a0) = (l.borrow().len(), ee.r(4) as u32);
+            let rear = rears.iter().find(|n| ee.u32_at(a0 + 0xa4) == n.1).map(|&(r, node, rear)| {
+                let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+                let mat = |a: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| vf(a + o)));
+                let (arm, c) = (ee.u32_at(node + 0x100), F(ee.f32_at(r + 0x87c)));
+                let bike = ee.u32_at(arm + 0x100);
+                let root = mat(ee.u32_at(bike + 0x100) + 0x80);
+                let now = game_sim::dust::RearNode { bike: mat(bike + 0x40), ..rear };
+                assert_eq!(now.swingarm(c).to_bits(), mat(arm + 0x40).to_bits(), "{r:#x}: SwingArm aimed at a compression of {c:?}");
+                (r, now.point(&root, c), c, root.to_bits(), ee.u32_at(bike + 0x100))
+            });
             through(ee);
             e.borrow_mut().push((a0, l.borrow().len() - before));
+            if let Some((r, want, c, root, root_node)) = rear {
+                let got = Vf([0, 4, 8, 12].map(|o| ee.f32_at(a0 + 0x40 + o)));
+                assert_eq!(want.to_bits(), got.to_bits(), "{r:#x}: emitter {a0:#x}'s point");
+                rp.borrow_mut().push((r, c, root, root_node));
+            }
         }),
     );
     // A body's animation object is held at its rider's +0xdb4.
@@ -273,6 +296,7 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     let look_owner = |ee: &Ee, obj: u32| C33_RIDERS.iter().position(|&(r, _, _)| ee.u32_at(r + 0xdb4) == obj).map_or("?", |k| C33_NAMES[k]);
     let mut clock = f64::from(ee.u32_at(wall_ticks)) * 100.0;
     let mut generator_through = rows[0].0;
+    let mut last_rear: Vec<f32> = C33_RIDERS.iter().map(|&(r, _, _)| ee.f32_at(ee.u32_at(r + 0x7b4) + 0xf0)).collect();
     for w in rows.windows(2) {
         let tick = w[1].0;
         neutral_pad(&mut ee);
@@ -306,6 +330,20 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         assert_eq!((count(Site::Note), count(Site::Dust), count(Site::Ai), &looks[..]), want, "tick {tick}");
         if tick >= 17 {
             assert!(count(Site::Dust) > 0, "tick {tick}: no dust");
+        }
+        // S421: every rear tyre emitter took its point from the node chain; the swingarm's compression is
+        // the rear wheel's of the frame before, and the bike's root is not moved after the emitters run.
+        let points = std::mem::take(&mut *rear_points.borrow_mut());
+        for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
+            let mine: Vec<_> = points.iter().filter(|p| p.0 == r).collect();
+            assert_eq!(mine.len(), 4, "tick {tick}: {}'s rear emitters", C33_NAMES[k]);
+            for p in mine {
+                assert_eq!(p.1.0.to_bits(), last_rear[k].to_bits(), "tick {tick}: {}'s swingarm compression is the last frame's", C33_NAMES[k]);
+                let after: [u32; 16] = core::array::from_fn(|i| ee.u32_at(p.3 + 0x80 + 4 * i as u32));
+                assert_eq!(p.2, after, "tick {tick}: {}'s root moved after its emitters", C33_NAMES[k]);
+                assert_eq!(p.3, ee.u32_at(ee.u32_at(r + 0x7a4) + 0x254), "{}'s root is the chassis' node", C33_NAMES[k]);
+            }
+            last_rear[k] = ee.f32_at(ee.u32_at(r + 0x7b4) + 0xf0);
         }
         // S328c: the emitters that drew, two draws each, as C33_DUST says.
         let mut dust = Vec::new();
@@ -362,3 +400,4 @@ pub(crate) fn c33_emitters(ee: &Ee) -> Vec<(u32, &'static str, usize)> {
     }
     out
 }
+

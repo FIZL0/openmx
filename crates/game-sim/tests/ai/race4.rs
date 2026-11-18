@@ -628,7 +628,7 @@ const C33_DUST_THROUGH: u64 = 63;
 /// switch byte `+0x240` (4 on, 2 just on), point `+0x40`, previous `+0x60`, node offset `+0x70`,
 /// MinimumEmissionSpeed `+0x3c4`. Its place on the bike is its point in the seeded bike's frame.
 fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
-    use dust::{Emitter, Entry, Kind, RiderDust};
+    use dust::{Emitter, Entry, Kind, Place, RiderDust};
     const EXHAUST: u32 = 0x0045_e780;
     const GENERIC: u32 = 0x0045_e6f0;
     const SPRAY: u32 = 0x0045_e720;
@@ -638,9 +638,10 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
         .enumerate()
         .map(|(k, &(r, _, _))| {
             let bike = sim.rider_of(c33_player(k)).ride.transform();
+            let (rear_node, rear) = c33_rear_node(ee, r);
             let m = ee.u32_at(r + 0x1490);
             let records = ee.u32_at(ee.u32_at(m + 0x30) + 4);
-            let entries = (0..ee.u32_at(m + 0x34))
+            let entries: Vec<Entry> = (0..ee.u32_at(m + 0x34))
                 .map(|i| {
                     let e = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
                     let em = ee.u32_at(e + 0x14);
@@ -656,14 +657,17 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
                     let switch = ee.read(em + 0x240, 1) as u8;
                     assert_eq!(vf(em + 0x70).0[..3], [0.0; 3], "{}'s entry {i}: an emitter offset", C33_NAMES[k]);
                     let pos = vf(em + 0x40);
-                    let at = dust::place_on(&bike, pos).expect("a bike transform that inverts");
+                    let place = match ee.u32_at(em + 0xa4) == rear_node {
+                        true => Place::Rear,
+                        false => Place::Chassis(dust::place_on(&bike, pos).expect("a bike transform that inverts")),
+                    };
                     Entry {
                         kind,
                         tyre,
                         disable: ee.u32_at(e + 0xc) as u8,
                         live: flag & 1 != 0,
                         zone_off: flag & 2 != 0,
-                        emitter: Emitter { on: switch & 4 != 0, just_on: switch & 2 != 0, min_speed: F(ee.f32_at(em + 0x3c4)), at, pos, prev: vf(em + 0x60) },
+                        emitter: Emitter { on: switch & 4 != 0, just_on: switch & 2 != 0, min_speed: F(ee.f32_at(em + 0x3c4)), place, pos, prev: vf(em + 0x60) },
                         draws: 0,
                     }
                 })
@@ -689,12 +693,38 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
                 clutch: F(ee.f32_at(at(feed, 0x1c))),
                 airspeed: F(ee.f32_at(at(feed, 0x20))),
                 tyres: [tyre(0), tyre(1)],
+                rear_compression: F(ee.f32_at(r + 0x87c)),
             };
-            (c33_player(k), RiderDust { entries, feed })
+            // S421: the rear tyre's emitters' point is the node's, from the seeded chassis.
+            let point = rear.point(&bike, feed.rear_compression);
+            for (i, e) in entries.iter().enumerate().filter(|(_, e)| e.emitter.place == Place::Rear) {
+                assert_eq!(point.to_bits(), e.emitter.pos.to_bits(), "{}'s entry {i}: the rear node's point", C33_NAMES[k]);
+            }
+            (c33_player(k), RiderDust { entries, feed, rear: Some(rear) })
         })
         .collect();
     riders.sort_by_key(|r| r.0);
     dust::Dust { riders: riders.into_iter().map(|r| r.1).collect() }
+}
+
+/// S421: rider `r`'s rear tyre emitter node in its image, and the Sim's chain for it. The vehicle holds
+/// `SwingArm` at `+0x96c` and its pivot at `+0x9c0`, the rear wheel (`+0x7b4`) its mount at `+0xa0`;
+/// a node's local is at `+0x40`, its parent at `+0x100`. The rear tyre's node is the one child of
+/// `SwingArm` an emitter hangs from (`+0xa4`).
+pub(crate) fn c33_rear_node(ee: &Ee, r: u32) -> (u32, dust::RearNode) {
+    let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
+    let local = |n: u32| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| vf(n + 0x40 + o)));
+    let arm = ee.u32_at(r + 0x96c);
+    let m = ee.u32_at(r + 0x1490);
+    let node = (0..ee.u32_at(m + 0x34))
+        .map(|i| ee.u32_at(ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i) + 0x14))
+        .map(|em| ee.u32_at(em + 0xa4))
+        .find(|&n| n != 0 && ee.u32_at(n + 0x100) == arm)
+        .expect("an emitter under SwingArm");
+    let pivot = vf(r + 0x9c0);
+    assert_eq!(vf(arm + 0x70).to_bits(), pivot.to_bits(), "rider {r:#x}: SwingArm's place is its pivot");
+    let rear = dust::RearNode { bike: local(ee.u32_at(arm + 0x100)), pivot, mount: vf(ee.u32_at(r + 0x7b4) + 0xa0), node: local(node) };
+    (node, rear)
 }
 
 /// The controls rider `r`'s image was saved holding: its stick, read back from the limiter's
