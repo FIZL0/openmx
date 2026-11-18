@@ -149,6 +149,7 @@ fn record_of(ee: &Ee, r: u32, body: u32) -> atv_contact::Held {
         mass: fl(body + 0x18),
         body: None,
         bikes: Vec::new(),
+        bodies: Vec::new(),
     }
 }
 

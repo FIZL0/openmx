@@ -157,6 +157,21 @@ pub struct Held {
     /// one's collision object and chassis as it stood when it struck the quad's hull
     /// ([`Held::file_mirrors`]). Emptied with the list at each refill.
     pub bikes: Vec<(Collider, Vehicle)>,
+    /// MD246: the knockable bodies the list's own hits name (an entry's other `k` is `bodies[k]`; the
+    /// bikes' indices come after them), each one's collision record and rigid body as the frame's pass
+    /// found them ([`Held::refill_among`]). The resolution pushes them as it pushes the quad.
+    pub bodies: Vec<Knocked>,
+}
+
+/// **A knockable body as the quad's resolution pushes it** (MD246, Untamed's bales): its collision
+/// record's resolution fields ([`Record`]'s collider), its rigid body (the record's `+0xe4`) with the
+/// body's mass (`+0x18`), and the centre of mass the resolution measures its arm from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Knocked {
+    pub collider: Collider,
+    pub body: atv_body::Body,
+    pub mass: F,
+    pub cofg: Vf,
 }
 
 impl Held {
@@ -167,11 +182,21 @@ impl Held {
     /// reads it). `false`, and the list left empty, if a contact is with another record or a mover, which
     /// the held record cannot answer ([`Held::resolve`]).
     pub fn refill(&mut self, filed: &[crate::handling::record::Contact]) -> bool {
+        self.refill_among(filed, Vec::new(), &[])
+    }
+
+    /// [`Held::refill`] among knockable bodies (MD246): a contact naming `ids[k]` as its other record
+    /// is held with `bodies[k]` as its other side (Untamed's quad's own hits on a bale). `false`, and
+    /// the list left empty, if a contact names another record than those, or a mover.
+    pub fn refill_among(&mut self, filed: &[crate::handling::record::Contact], bodies: Vec<Knocked>, ids: &[u32]) -> bool {
         let was = std::mem::take(&mut self.entries);
         self.bikes.clear();
-        if filed.iter().any(|c| c.other != 0 || c.mover != 0) {
+        self.bodies.clear();
+        let other = |c: &crate::handling::record::Contact| ids.iter().position(|&id| id == c.other);
+        if filed.iter().any(|c| (c.other != 0 && other(c).is_none()) || c.mover != 0) {
             return false;
         }
+        self.bodies = bodies;
         let blank = crate::handling::record::BLANK;
         self.entries = filed
             .iter()
@@ -186,7 +211,7 @@ impl Held {
                     arm: blank,
                     other_arm: blank,
                     surface: c.surface as i32,
-                    other: None,
+                    other: if c.other == 0 { None } else { other(c) },
                     mover: None,
                 },
                 relative: was.get(i).map_or(Vf::ZERO, |e| e.relative),
@@ -202,21 +227,24 @@ impl Held {
     /// zero; the resolution writes each before it reads it.
     pub fn file_mirrors(&mut self, mirrors: &[Contact], colliders: &[Collider], vehicles: &[Vehicle], room: usize) {
         self.bikes = colliders.iter().copied().zip(vehicles.iter().copied()).collect();
-        self.entries.extend(mirrors.iter().take(room).map(|c| Entry { contact: *c, relative: Vf::ZERO }));
+        let after = self.bodies.len();
+        self.entries.extend(mirrors.iter().take(room).map(|c| Entry { contact: Contact { other: c.other.map(|k| k + after), ..*c }, relative: Vf::ZERO }));
     }
 
     /// The record's resolution on the quad's body, handed 1 as the gravity hands it, with `cofg` the
-    /// body's centre of mass in its frame. A contact's other side is one of [`Held::bikes`] (MD179).
-    /// `false`, and nothing done, if a contact is with another record than those (none is held) or
-    /// the whole body is not in.
+    /// body's centre of mass in its frame. A contact's other side is one of [`Held::bodies`] (MD246)
+    /// or [`Held::bikes`] (MD179). `false`, and nothing done, if a contact is with another record
+    /// than those (none is held) or the whole body is not in.
     pub fn resolve(&mut self, cofg: Vf) -> bool {
-        if self.entries.iter().any(|e| e.contact.other.is_some_and(|k| k >= self.bikes.len())) {
+        if self.entries.iter().any(|e| e.contact.other.is_some_and(|k| k >= self.bodies.len() + self.bikes.len())) {
             return false;
         }
         let Some(body) = self.body.as_mut() else { return false };
         let mut me = Weighed { body, mass: self.mass, cofg };
-        let mut others: Vec<Other<'_>> =
-            self.bikes.iter_mut().map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }).collect();
+        let mut weighed: Vec<(&mut Collider, Weighed<'_>)> =
+            self.bodies.iter_mut().map(|k| (&mut k.collider, Weighed { body: &mut k.body, mass: k.mass, cofg: k.cofg })).collect();
+        let mut others: Vec<Other<'_>> = weighed.iter_mut().map(|(collider, w)| Other { collider: &mut **collider, side: Side::Body(w) }).collect();
+        others.extend(self.bikes.iter_mut().map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }));
         resolve(&mut self.record, &mut Own::Body(&mut me), &mut self.entries, &mut others, &self.movers, true);
         true
     }

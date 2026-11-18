@@ -13679,3 +13679,15 @@ atv_binding_lookup          atv 0x00118e10 = (controls *(*0x003eab60), cmd, 2, 1
 #   (tape tick 64) and first at +1 (tick 65) 2.014 ms apart; held while that pair stays in the 32 samples.
 #   MD164's -992.97 the same the other way. The port's stand-in (150 samples/s on the sim clock) gives 60.006;
 #   state 4's bike clamps the hold at max_backflip_time +0x11a8 = max_preload_time +0xc68 = 60.
+# MD246 — Untamed's (SLUS-21701) quad record resolution against a knockable bale's body (game_sim::atv_contact::
+# Held::bodies/refill_among, quad::Knockable::body; tests/untamed_race_quad.rs untamed_quad_resolves_its_hits_on_
+# the_bale_as_the_original, 10,000 cases + steer tick 197 in the interpreter on MD147's spawn image). Comment rows
+# only, as # MD81a. Journal: research/journal/2026-11-18-md246-quad-bale-resolve.
+#   Record vt 0x003db860 +0x88 = 0x00206170 (twin of 0x00205730); callees by call order, not diffed: relative 0x00206310 (0x002058d0), spring
+#   0x00206920 (0x00205f00), impulse 0x00206d40 (0x00206320), friction 0x00207690 (0x00206c70), damp 0x00207880
+#   (0x00206e60). Instruction diff: only the entry's other record +0x84 -> +0x80, mover +0x88 -> +0x84, kind lw ->
+#   lh +0, surface lw +0x80 -> lh +2, collidable flags +0x94 -> +0xc0, the other's node rows (no-body branch) +0x70
+#   -> +0xa0, the (0,0,0,1) constant 0x00396fc0 -> 0x003b5f60, and register allocation.
+#   Bale TripleBale02: record 0x00aac3d0 (collidable 0x00aab4c0 flags 0x3000), body 0x00aaa6c0 (mass 7.857, at
+#   rest until row 197, +0x0 flips then); quad record 0x01c326b0 (collidable flags 0x3012), both collide with
+#   0xffffffff, actors 0x1000: the contact is mutual.
