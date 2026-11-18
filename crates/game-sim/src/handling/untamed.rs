@@ -57,8 +57,9 @@ pub fn preload(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: &AirSt
         }
     }
     let lip = air.on_ground
-        && !(chassis.vel.y() <= 5.0)
-        && !(air.contact_vel.z() <= 30.0)
+        // Read as the FPU's c.ole does (through F): a NaN pattern is ±max, so a +NaN speed is over (R42).
+        && F(chassis.vel.y()) > 5.0
+        && F(air.contact_vel.z()) > 30.0
         && step.brake == F::ZERO;
     if let Some(axis) = axis
         && !was
@@ -616,8 +617,9 @@ pub fn spin(
         let lip = air.on_ground
             && !air.flip_torque_applied
             && !air.flip_active
-            && !(chassis.vel.y() <= 5.0)
-            && !(air.contact_vel.z() <= 30.0)
+            // Read as the FPU's c.ole does (through F): a NaN pattern is ±max, so a +NaN speed is over (R42).
+            && F(chassis.vel.y()) > 5.0
+            && F(air.contact_vel.z()) > 30.0
             && step.brake == F::ZERO;
         if !lip {
             s.active = false;
