@@ -41,6 +41,10 @@ pub struct Ee {
     /// VU0's accumulator and its `Q` register (`vdiv`, `vsqrt`, `vrsqrt` land in `Q`).
     pub vacc: [f32; 4],
     pub q: f32,
+    /// VU0's integer registers `vi0`..`vi15` (`vi0` reads as 0) and its clip flag register (`vi18`):
+    /// `vclip` shifts six new bits in at the bottom and keeps 24, the last four tests.
+    pub vi: [u16; 16],
+    pub clip: u32,
     pub pc: u32,
     npc: u32,
     /// EE RAM, `[emu] ram_mb` big (32 MB on a retail console).
@@ -75,6 +79,11 @@ pub struct Ee {
     journal: Option<Journal>,
     /// Inside [`Ee::quietly`]: writes leave [`Ee::written`] alone.
     quiet: bool,
+    /// The hardware registers (`0x10000000..0x14000000`: timers, DMA, VIF, GS) as plain storage while
+    /// this is `Some`: a write is kept and a read returns the last write (0 before any). Off (`None`)
+    /// unless a test turns it on, and then the reads a busy-wait polls never change: hook those. A DMA
+    /// channel's start bit reads clear at once, as if every transfer took no time (none is made).
+    pub io: Option<std::collections::HashMap<u32, u8>>,
 }
 
 /// What [`Ee::mark`] keeps: which pages have been written since, and each one's words before that.
@@ -281,6 +290,8 @@ impl Ee {
             vf: std::array::from_fn(|k| if k == 0 { [0.0, 0.0, 0.0, 1.0] } else { [0.0; 4] }),
             vacc: [0.0; 4],
             q: 0.0,
+            vi: [0; 16],
+            clip: 0,
             pc: 0,
             npc: 0,
             ram,
@@ -294,6 +305,7 @@ impl Ee {
             hooks: BTreeMap::new(),
             journal: None,
             quiet: false,
+            io: None,
         }
     }
 
@@ -413,6 +425,9 @@ impl Ee {
     }
     /// `n` bytes at `a`, little-endian.
     pub fn read(&self, a: u32, n: usize) -> u128 {
+        if let Some(io) = self.io.as_ref().filter(|_| is_io(a)) {
+            return (0..n).fold(0, |v, k| v | u128::from(io.get(&(a + k as u32)).copied().unwrap_or(0)) << (8 * k));
+        }
         let (spr, o) = self.loc(a);
         if let Some(reads) = self.reads.borrow_mut().as_mut() {
             reads.note(a, n);
@@ -424,6 +439,15 @@ impl Ee {
     }
     /// Write `n` bytes at `a`, little-endian, and remember that they changed.
     pub fn write(&mut self, a: u32, n: usize, v: u128) {
+        if let Some(io) = self.io.as_mut().filter(|_| is_io(a)) {
+            // a DMA channel's CHCR: the transfer is not made, and is over at once (STR clear)
+            const CHCR: [u32; 10] = [0x8000, 0x9000, 0xa000, 0xb000, 0xb400, 0xc000, 0xc400, 0xc800, 0xd000, 0xd400];
+            let v = if CHCR.contains(&(a & 0x1fff_ffff).wrapping_sub(0x1000_0000)) { v & !0x100 } else { v };
+            for k in 0..n {
+                io.insert(a + k as u32, (v >> (8 * k)) as u8);
+            }
+            return;
+        }
         let (spr, o) = self.loc(a);
         if !spr && let Some(j) = self.journal.as_mut() {
             for p in [o / PAGE, (o + n.max(1) - 1) / PAGE] {
@@ -788,6 +812,14 @@ impl Ee {
                     }
                 }
                 2 if rd == 22 => self.set(rt, sx32(self.q.to_bits())), // cfc2 from Q (the vwaitq after a vdiv)
+                2 if rd == 18 => self.set(rt, u64::from(self.clip)), // cfc2 from the clip flags
+                2 if rd < 16 => self.set(rt, u64::from(self.vi[rd])), // cfc2 from an integer register
+                6 if rd == 18 => self.clip = self.r(rt) as u32 & 0xff_ffff, // ctc2 to the clip flags
+                6 if rd < 16 => {
+                    if rd != 0 {
+                        self.vi[rd] = self.r(rt) as u16; // ctc2 to an integer register
+                    }
+                }
                 5 => {
                     let v = self.gpr[rt]; // qmtc2
                     self.put_vf(rd, 0xf, std::array::from_fn(|k| f32::from_bits((v >> (32 * k)) as u32)));
@@ -852,6 +884,17 @@ impl Ee {
                         None
                     }
                     0x2f | 0x3b => None, // vnop, vwaitq (nothing to wait for without pipelines)
+                    0x1f => {
+                        // vclip: fs' x, y and z against ft.w's magnitude, two bits each (above +|w|,
+                        // below -|w|), shifted in at the bottom of the 24-bit flag register
+                        let w = vu::operand(b[3].to_bits()).abs();
+                        let bits = (0..3).fold(0u32, |f, i| {
+                            let x = vu::operand(a[i].to_bits());
+                            f | u32::from(x > w) << (2 * i) | u32::from(x < -w) << (2 * i + 1)
+                        });
+                        self.clip = (self.clip << 6 | bits) & 0xff_ffff;
+                        None
+                    }
                     0x30 => {
                         self.put_vf(ft, dest, a); // vmove
                         None
@@ -918,6 +961,21 @@ impl Ee {
                 };
                 (self.lo1, self.hi1) = (sx32(p as u32), sx32((p >> 32) as u32));
                 self.set(rd, self.lo1);
+            }
+            (0x00, _) | (0x01, _) | (0x20, _) | (0x21, _) => {
+                // madd/maddu (and madd1/maddu1 on the second multiplier): the 64-bit HI:LO pair (its
+                // two low words) plus rs × rt, the halves sign-extended back, LO into rd too
+                let one = fun >= 0x20;
+                let (hi, lo) = if one { (self.hi1, self.lo1) } else { (self.hi, self.lo) };
+                let p = if fun & 1 == 0 {
+                    (s as i32 as i64 * t as i32 as i64) as u64
+                } else {
+                    (s as u32 as u64) * (t as u32 as u64)
+                };
+                let sum = ((hi as u32 as u64) << 32 | lo as u32 as u64).wrapping_add(p);
+                let (l, h) = (sx32(sum as u32), sx32((sum >> 32) as u32));
+                if one { (self.lo1, self.hi1) = (l, h) } else { (self.lo, self.hi) = (l, h) }
+                self.set(rd, l);
             }
             (0x1a, _) => (self.lo1, self.hi1) = idiv(s as u32, t as u32),
             (0x1b, _) => (self.lo1, self.hi1) = udiv(s as u32, t as u32),
@@ -1020,6 +1078,11 @@ impl std::fmt::Debug for Ee {
                self.pc, self.v0(), self.f0(), self.steps, self.ram.len() >> 20, self.written.len(),
                self.hooks.len())
     }
+}
+
+/// A hardware register address, through any of the segments that map it.
+fn is_io(a: u32) -> bool {
+    (0x1000_0000..0x1400_0000).contains(&(a & 0x1fff_ffff))
 }
 
 fn sx32(v: u32) -> u64 {

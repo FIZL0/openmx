@@ -84,9 +84,11 @@
 //!   `madd.s`, …), `rsqrt.s`, `max.s`/`min.s`, the compares and `bc1t`/`bc1f`, `cvt.w.s`/`cvt.s.w`.
 //! * VU0 macro mode through [`ps2_float::vu`]: the lane-masked and broadcast add/sub/mul/madd/msub,
 //!   the `Q` unit (`vdiv`, `vsqrt`, `vrsqrt`), `vopmula`/`vopmsub`, `vmove`/`vmr32`, `qmfc2`/`qmtc2`,
-//!   `lqc2`/`sqc2`.
+//!   `lqc2`/`sqc2`, `vclip` and `cfc2`/`ctc2` of the clip flags and the integer registers.
+//! * The hardware registers as plain storage, when a test turns [`Ee::io`] on (a DMA start bit reads
+//!   clear at once): enough to run a render that builds and kicks its packets, with its waits hooked.
 //! * The MMI instructions that turn up in ordinary compiled code: `pcpyld`/`pcpyud`, `pand`/`por`/
-//!   `pxor`/`pnor`, and the `*1` multiplier moves.
+//!   `pxor`/`pnor`, `madd`/`maddu`, and the `*1` multiplier moves.
 //!
 //! Everything else — COP0, micro-mode VU0, the cache instructions' effects, syscalls — panics by name.
 //! Teaching it one more instruction is a dozen lines in `src/ee.rs`.
