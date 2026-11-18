@@ -3,7 +3,7 @@
 //! words every tick from the race's load to past its end.
 
 use game_sim::camera_flash::{BATCH, CameraFlashes};
-use game_sim::race::{Gate, PodiumFlashes, Race};
+use game_sim::race::{Frame, Gate, PodiumFlashes, Race};
 use game_sim::rng::Rng;
 use ps2_float::F;
 use ps2_oracle::{Kit, skip};
@@ -22,12 +22,14 @@ fn hex_bytes(s: &str) -> Vec<u8> {
     (0..s.len() / 2).map(|k| u8::from_str_radix(&s[2 * k..2 * k + 2], 16).expect("hex")).collect()
 }
 
-/// A row: its frame, its dt, the generator's state and the flash object's 0x70 bytes.
+/// A row: its frame, its dt, the generator's state, the flash object's 0x70 bytes and the race
+/// activity's 0x4e0.
 struct Row {
     frame: u32,
     dt: F,
     rand: u64,
     flash: Vec<u8>,
+    act: Vec<u8>,
 }
 
 impl Row {
@@ -36,6 +38,9 @@ impl Row {
     }
     fn f(&self, o: usize) -> F {
         F(f32::from_bits(self.word(o)))
+    }
+    fn act(&self, o: usize) -> u32 {
+        u32::from_le_bytes(self.act[o..o + 4].try_into().unwrap())
     }
     fn burst(&self) -> PodiumFlashes {
         PodiumFlashes { from: self.f(0x5c), length: self.f(0x64), rate: self.f(0x68), half: self.f(0x6c) }
@@ -68,6 +73,7 @@ fn capture() -> Option<(Vec<Row>, F)> {
                     dt: F(f32::from_bits(hex32(field(line, "dt").unwrap()))),
                     rand: u64::from_le_bytes(hex_bytes(field(line, "rand").unwrap())[..8].try_into().unwrap()),
                     flash: hex_bytes(flash),
+                    act: field(line, "act").map(hex_bytes).unwrap_or_default(),
                 });
             }
         }
@@ -308,4 +314,107 @@ fn a_sims_race_carries_its_flashes_through_a_snapshot() {
     }
     assert_eq!(copy.hash(), sim.hash());
     assert_eq!(copy.race.as_ref().unwrap().flashes, sim.race.as_ref().unwrap().flashes);
+}
+
+/// S334: the race's end stops the flashes as S13d's capture ends. The race's end arms the tip clock
+/// (the activity's `+0x410`, its armed word `+0x474`), the tip puts the "preload and clutch" popup up,
+/// and once the menu has faded in over the race — a quarter second, the popup having a word to show —
+/// the race manager is ticked no more: in the capture every word it moves stands still from then to
+/// the capture's end, the activity's own clock (`+0x148`, moved by every tick) and the flash object's
+/// words with them. The race is run from the row the tip is armed on (its clock taken from the row),
+/// the flashes resumed on the first batch picked after it, and on every row the race ticks exactly when
+/// the activity's clock moved: the tip clock bit for bit, the tip on the row the capture's clock reads
+/// zero, the flash words bit for bit while it ticks and its words, generator and all, untouched after.
+#[test]
+fn the_tips_popup_fading_in_stops_the_race_and_its_flashes_as_s13d_ends() {
+    let Some((rows, _)) = capture() else { return };
+    assert!(rows.iter().all(|r| r.act.len() >= 0x4e0), "every row keeps the activity");
+    let armed = rows.iter().position(|r| r.act(0x474) == 1).expect("the race's end arms the tip");
+    let mut j = armed;
+    while !(rows[j + 1].frame == rows[j].frame + 1 && rows[j + 1].word(0x50) != rows[j].word(0x50) && rows[j + 1].word(0x58) == 0) {
+        j += 1;
+    }
+    let at = &rows[j + 1];
+    let mut race = Race::new(Gate::new(), &[], F::ZERO, Rng::new());
+    race.countdown.running = false;
+    race.tip_armed = true;
+    race.tip_words = true;
+    race.tip_in = F(f32::from_bits(at.act(0x410)));
+    race.flashes = Some(Box::new(CameraFlashes::resumed(1200, at.f(0x60), at.burst(), at.word(0x50) as usize, at.word(0x4c) as usize)));
+    let (mut ticked, mut tip, mut stopped, mut late) = (0, None, None, 0);
+    for w in rows[j + 1..].windows(2) {
+        let (before, now) = (&w[0], &w[1]);
+        assert_eq!(now.frame, before.frame + 1, "the end's rows run without a gap");
+        let ran = now.act(0x148) != before.act(0x148);
+        let up = race.outro_up();
+        assert_eq!(!up, ran, "frame {}: the race ticks when the activity's clock moves", now.frame);
+        race.rng = Rng::from_state(before.rand);
+        let kept = race.clone();
+        let frame = race.tick(before.dt, &[]);
+        if up {
+            assert_eq!(frame, Frame::default(), "frame {}: the stopped race's tick does nothing", now.frame);
+            assert_eq!(race, kept, "frame {}: the stopped race stands still", now.frame);
+            assert_eq!(now.flash, before.flash, "frame {}: the capture's flash words stand still", now.frame);
+            stopped.get_or_insert(now.frame);
+            continue;
+        }
+        ticked += 1;
+        assert_eq!(race.tip_in.0.to_bits(), now.act(0x410), "frame {}: the tip clock", now.frame);
+        assert_eq!(frame.tip, before.act(0x410) != 0 && now.act(0x410) == 0, "frame {}: the tip", now.frame);
+        if frame.tip {
+            tip = Some(now.frame);
+        }
+        let fx = race.flashes.as_mut().unwrap();
+        if now.word(0x68) != fx.burst.rate.0.to_bits() || now.word(0x6c) != fx.burst.half.0.to_bits() {
+            fx.burst = now.burst();
+        }
+        let (got, want) = (words(fx), row_words(now));
+        if got != want {
+            // A late row (the recorder under load) holds the tick after.
+            let mut ahead = (**fx).clone();
+            ahead.tick(now.dt, &mut Rng::new());
+            assert_eq!(words(&ahead), want, "frame {}: brightness, length, rate, half, floor, ready, lit, head, hidden", now.frame);
+            late += 1;
+        }
+    }
+    let (tip, stopped) = (tip.expect("the tip"), stopped.expect("the race never stopped"));
+    // 0.25 s at the capture's 1/30 s: seven more ticks after the tip's, the eighth stopped.
+    assert_eq!(stopped, tip + 8, "the tip on {tip}, stopped on {stopped}");
+    assert!(rows.last().unwrap().frame > stopped + 60, "the capture runs on well past the stop");
+    assert!(late < 5, "{late} late rows");
+    println!("armed on {}, {ticked} ticks, the tip on {tip}, stopped on {stopped}, {late} late rows", rows[armed].frame);
+}
+
+/// S334: the menu's fade-in over the race lasts a quarter second when the popup has a word to show and
+/// three quarters when not: at 30 ticks a second the race ticks 7 more times after the tip's tick, or
+/// 22, and then never again.
+#[test]
+fn the_race_stops_when_the_tips_fade_has_run() {
+    for (words, more) in [(true, 7), (false, 22)] {
+        let mut race = Race::new(Gate::new(), &[], F::ZERO, Rng::from_state(0x1234_5678));
+        race.countdown.running = false;
+        race.tip_words = words;
+        race.flashes = Some(Box::new(CameraFlashes::new(1200, F(0.01)).unwrap()));
+        let dt = F(f32::from_bits(0x3d08_850a));
+        race.tip_in = F(0.05);
+        assert!(!race.tick(dt, &[]).tip && race.outro.is_none());
+        assert!(race.tick(dt, &[]).tip, "the tip");
+        assert_eq!(race.outro, Some(dt), "the fade runs from the tip's own tick");
+        let mut ran = 0;
+        for _ in 0..100 {
+            let kept = race.clone();
+            race.tick(dt, &[]);
+            if race == kept {
+                break;
+            }
+            ran += 1;
+        }
+        assert_eq!(ran, more, "words {words}");
+        assert!(race.outro_up());
+        let kept = race.clone();
+        for _ in 0..30 {
+            assert_eq!(race.tick(dt, &[]), Frame::default());
+        }
+        assert_eq!(race, kept, "words {words}: the stopped race stands still");
+    }
 }

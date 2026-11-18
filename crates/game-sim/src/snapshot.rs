@@ -1126,7 +1126,7 @@ wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cof
 wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
-wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, activity, scene_clock, rng, laps, flashes, sink } skip { guests, guests_did });
+wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, tip_words, outro, countdown, activity, scene_clock, rng, laps, flashes, sink } skip { guests, guests_did });
 wire!(crate::drop_gate::Sink { trigger, armed, count, t, length, on, y, move_time, move_down, pieces });
 wire!(crate::camera_flash::CameraFlashes { burst, floor, ready, pool, times, lit, head, count, fade });
 wire!(crate::race::PodiumFlashes { from, length, rate, half });
