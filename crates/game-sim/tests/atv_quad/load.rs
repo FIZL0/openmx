@@ -281,6 +281,12 @@ fn spawn(ee: &Ee) -> (Vf, Vf) {
     (get_v(ee, QUAD + 0x50), get_v(ee, QUAD + 0x60))
 }
 
+/// The start spot's point the quad was made at, which its `+0x50` held before the ride moved it on
+/// (the same in all four images).
+fn start(ee: &Ee) -> Vf {
+    get_v(ee, 0x0066_9e40)
+}
+
 /// The R quad's chassis model, or why it is not there.
 fn chassis(kit: &Kit) -> Option<quad::Model> {
     let path = kit.ctx("mxvatv-ps2/md37a").join("250r_atv_chasis.psg");
@@ -322,10 +328,10 @@ fn the_models_mounts_are_the_c28_wheels() {
     assert!(seen > 0 || IMAGES.is_empty());
 }
 
-/// The part reader's box off the chassis model at the quad's spawn, against the record's inertia:
-/// its `x` and `y` are the only box's near that gives the record, its `z` one float under it (not
-/// 1:1: the frame the loader saw is not pinned down, research/journal/2026-11-11-md129-atv-model-load).
-/// So [`Load::read_model`]'s words are the image's but for the four record words that `z` feeds.
+/// The part reader's box off the chassis model at the quad's start spot ([`start`]), against the
+/// record's inertia: it is the only box near that gives the record, and so every one of
+/// [`Load::read_model`]'s words is the image's (MD134: the load path re-places the node there with
+/// the kept heading made unit once more before the part reader runs). The test keeps MD129's name.
 #[test]
 fn the_models_box_is_the_c28_records_but_one_float() {
     let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
@@ -345,21 +351,18 @@ fn the_models_box_is_the_c28_records_but_one_float() {
         }
         let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
         let at = layout(&ee);
-        let (spot, heading) = spawn(&ee);
-        let half = model.half_box(&quad::heading_frame(spot, heading));
+        let (spot, heading) = (start(&ee), spawn(&ee).1);
+        let half = model.half_box(&quad::spawn_frame(spot, heading));
         let bytes = std::fs::read(phy.join(format!("{file}.phy"))).unwrap_or_else(|e| panic!("{file}: {e}"));
         let load = Load::read_model(&Ini::parse_bytes(&bytes), &model, spot, heading, &curve(&ee)).unwrap_or_else(|e| panic!("{e}"));
         let want: [u32; 3] = std::array::from_fn(|k| ee.u32_at(at.record + 0x60 + 4 * k as u32));
         let solved = load_box(&load.part, want).expect("a box that gives the record");
-        let up = Vf::new(half.x(), half.y(), f32::from_bits(half.z().to_bits() + 1), 1.0);
-        assert_eq!(up.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), solved.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}: the model's box {half:?}, the record's {solved:?}");
+        assert_eq!(half.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), solved.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}: the model's box {half:?}, the record's {solved:?}");
         let (bad, n) = misses(&ee, &at, &load.words(&at));
         for (a, theirs, port) in &bad {
             println!("{name}: {a:#010x} ({}): the original's {theirs:#010x} ours {port:#010x}", place(&at, *a));
         }
-        // The record's inertia `x`, `y` (each over the box's `z`) and their inverses.
-        let off: Vec<u32> = bad.iter().map(|&(a, _, _)| a - at.record).collect();
-        assert_eq!(off, [0x60, 0x64, 0x70, 0x74], "{name}: of {n} words, the ones that differ from {file}'s");
+        assert!(bad.is_empty(), "{name}: of {n} words, {} differ from {file}'s", bad.len());
         seen += 1;
     }
     assert!(seen > 0 || IMAGES.is_empty());
