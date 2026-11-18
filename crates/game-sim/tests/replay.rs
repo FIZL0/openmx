@@ -9333,6 +9333,40 @@ fn the_braked_slopes_replay_from_their_save_states() {
     }
 }
 
+// --- S437: V40's tape from first_recording's state ---------------------------------------------------
+
+/// **V40's tape (research/v40/hold.pad) ridden by the port from first_recording's save state**
+/// ([`replay_a_save_state_case`]) against S437's capture of the original on the same tape
+/// (`research/s437/capture.sh`, `context/capture/s437/hold.csv`): gas with the bars over for 75 ticks,
+/// the brake 60, idle 60, the brake again 90. V120 found the shell's ride of it parting from the
+/// original's (the brake to a dead stop, the launch spin 35 ticks long); the shell starts a fresh rider
+/// at the start line, not the state's bike. From the state, the path and the slip flags agree through
+/// the whole tape.
+#[test]
+fn the_v40_tape_replays_from_first_recordings_state() {
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let what = "V40's tape: gas and the bars over, the brake, idle, the brake";
+    let Ok(text) = std::fs::read_to_string(private_dir("capture").join("s437").join("hold.csv")) else {
+        println!("hold ({what}): no capture — research/s437/capture.sh records it");
+        return;
+    };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else {
+        println!("hold ({what}): no RAM image of first_recording's save state");
+        return;
+    };
+    let parted = replay_a_save_state_case(&acc, &st, seed, &text, "hold", what, S437_LATE);
+        let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
+    assert!(first(".origin[") > S437_THROUGH, "hold: the path parts at {}, not after {S437_THROUGH}", first(".origin["));
+    assert!(first(".slip.") > S437_THROUGH, "hold: a slip flag parts at {}, not after {S437_THROUGH}", first(".slip."));
+}
+
+/// The ticks of S437's capture whose row the recorder read out of step with the ride, not compared.
+const S437_LATE: &[u64] = &[];
+
+/// The last tick of S437's capture the path and the slip flags agree through.
+const S437_THROUGH: u64 = 292;
+
 // --- S138: a wall and a front wheel, each from a save state taken just before it ---------------------
 
 /// S138's captures (`research/s138_hits.py`, `research/s138/hits.toml`: S67's whole-bike spec on
