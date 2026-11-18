@@ -43,6 +43,7 @@ pub mod record;
 pub mod reset;
 pub mod seed;
 pub mod sound;
+pub mod spot;
 pub mod step;
 pub mod steps;
 pub mod run;

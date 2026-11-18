@@ -13750,3 +13750,28 @@ vehicle_fx_tracks_walk boot 0x003d5a00 the vehicle fx manager's render walk (vta
 #                                   entry with +8 == 1 (a tyre track; C33's entries 12 front, 13 rear) through
 #                                   its +0x10 object's vt +0xc (vehicle_fx_track_update), then the node's own
 #                                   (0x001333e0). So tyre tracks lay rows in the render, not in the sim half
+# F31e — the bike's put-back spot kept every frame (crates/game-sim/src/handling/spot.rs; proof
+#   crates/game-sim/tests/mxvatv_bike_ride.rs flip_replays_in_pure_rust, switch "keep spot": the original's
+#   keep and the port's after each frame, each the row's +0xd38..+0xd6c on all 465 rows, no spot poke).
+#   Journal: research/journal/2026-11-18-f31e-keep-spot.
+#   Writer chain: actor update 0x0046c710 (actor = bike +0x684; its state +0x58 == 3, run = bike +0x680) runs
+#   after the sim frame, before the capture: run fill 0x004aa660 (owner vt +8 0x004e71b0; copies node +0xa0 ->
+#   run +0x60, +0x90 -> +0x120, +0x80 -> +0x130, 3 words each; also body +0x80, a ground query, event post
+#   0x00272300, not ported); with run flags +8 & 2 and not & 1: keep-spot 0x004aa460 through owner vt +0x20
+#   (a0 bike, a1 run +0x60, a2 run +0x120, a3 run +0x88, t0 1). 0x0046b700 runs when flags & 0x40000 (state 4).
+#   Keep 0x004aa460: spot = run +0x60 if flags & 0x200000 and & 0x400000; else +0xc00 while +0xc10; else
+#   (& 0x400000 clear) node position 0x00194c20 + body +0x1a0 turned by +0x190 (w 1); else a1, a3's 3 words
+#   -> +0xd70. +0xc20 != 0 -> return 1. Place 0x004aa7d0: sphere (+0xd80) +0x160 = spot, *(sphere +0x148) =
+#   (x, 10 + y, z); reach 5 when actor +0x58 == 2 and run +0x40, else 40; !(+0xd38 <= +0xd3c) -> spatial move
+#   0x0018d690(sphere +0x18, sphere +0x160, half 0x00525270, f12 40); ground query 0x004833c0; gather pass
+#   0x004aa980; heading.y = |y|. Clear and !(normal.y <= 0.8): +0xd40 spot, +0xd50 heading (y 0, xyz *
+#   vrsqrt(1, x²+y²+z² madd)), +0xd60 normal.
+#   Gather pass 0x004aa980: memsets 0x003544c8 of *(sphere +0x7c) +0xa8 (4n), +0x98 (16n), +0x94 (16n), +0xa4
+#   (4n), n = sphere +0x130; +0x50 = +0x160, +0x70 = +0x170; +0xd38 = |+0x50 - +0xd90|² (mula/madda/madd); over
+#   +0xd3c: list +0x3c = 1, gather 0x001d6a60(list, sphere, 1), +0x3c = 0, +0xd90 = +0x50. Candidates (list
+#   array/count, dist < reach): kind 2 object (item - 0x18): enabled +0x45 bit 0 and +0x94 & *0x00542388 == 0;
+#   rider on -> blocked; off -> sweep 0x00116a90(sphere, o, *(sphere +0x7c)), a hit above spot.y lifts it,
+#   normal = *(s +0x94). Kind 3 plant: count 0x0046d390, soft = category 0x00113d00(*0x0038d400,
+#   "SoftFoliage" 0x00526a16) once; each part i: 0x0046d3c0(plant, i) (the stand: it writes the part's sphere,
+#   e.g. 0x01cc4980 on flip-1 row 42), part +0x94 != soft -> dz² + dx² (u16 +0x10 / +0xc times eco +0xc4,
+#   eco *0x0052cd88) <= 400 -> blocked.
