@@ -47,14 +47,14 @@ fn sandrail_jump_capture() {
 }
 
 /// Drive `d` beside, through the frame or the Ride: every frame of the drive compared, word for word
-/// against SLUS-21701's, but those with a tire on an object (`on_objects`, which the harness cannot
-/// answer: throttle's rough ground past the whoops); `wrecked` the frames compared wrecked (steer's
+/// against SLUS-21701's, those with a tire on an object too (`on_objects`, answered since MD233:
+/// throttle's rough ground past the whoops); `wrecked` the frames compared wrecked (steer's
 /// wall).
 fn sandrail_beside_test(d: &UDrive, ride: bool, on_objects: &[usize], wrecked: usize) {
     let Some(s) = u_beside(d, ride) else { return };
     let n = u_rows(d.set, d.name).expect("read").len();
     assert_eq!(s.on_objects, on_objects, "{}: frames on objects", d.name);
-    assert_eq!((s.frames, s.wrecked), (n - on_objects.len(), wrecked), "{}: frames compared, wrecked", d.name);
+    assert_eq!((s.frames, s.wrecked), (n, wrecked), "{}: frames compared, wrecked", d.name);
     assert_eq!(s.respawned, Vec::<usize>::new(), "{}: frames put back", d.name);
 }
 
