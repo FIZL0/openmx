@@ -59,7 +59,7 @@ fn manager(ee: &Ee) -> u32 {
 }
 
 /// A node as the card holds it: flags, id, points, base, rate, mult, extra, held, granularity.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Node {
     flags: u32,
     id: u32,
@@ -312,4 +312,200 @@ fn the_port_scores_stunts_as_the_original() {
         }
     }
     assert_eq!(ee.u32_at(entry(41) + 4), score::ATV_REPEAT_FLOOR.to_bits(), "the backflip at the repeat floor");
+}
+
+/// One row of an S411 capture (`research/s411/card.toml`): the bike's words the scorer reads, and
+/// the card as the original left the frame.
+struct Ride {
+    vsync: u32,
+    /// The rows' words, to tell a row read late (the next frame's, so the same as the next row).
+    words: String,
+    ground: bool,
+    /// `+0x14f4`: the bank's clock.
+    bank: u32,
+    /// `+0x1754` the backflip's clip, `+0x1758` the 360's.
+    clip: u32,
+    spin: u32,
+    /// The node's up and forward rows' heights (node `+0x84`, `+0x94`).
+    heights: (F, F),
+    /// A backflip's (`+0x1194`..) or 360's (`+0x11d8`) move on.
+    move_on: bool,
+    /// The backflip's torque on (`+0x1194`).
+    flip_torque: bool,
+    wrecks: u32,
+    flags: u32,
+    total: u32,
+    combo: u32,
+    nodes: Vec<Node>,
+}
+
+/// An S411 capture, or `None` (and a skip) without it.
+fn ride(name: &str) -> Option<Vec<Ride>> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("capture").join("s411").join(format!("{name}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        skip(&format!("{} is not there: capture it with research/s411/play.sh", path.display()));
+        return None;
+    };
+    let hex = |s: &str| -> Vec<u8> { (0..s.len() / 2).map(|k| u8::from_str_radix(&s[2 * k..2 * k + 2], 16).unwrap()).collect() };
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no {name} column"));
+    let (vs, o0, o1, nd, cd, pl) = (col("vsync"), col("obj0"), col("obj1"), col("node"), col("card"), col("pool"));
+    let w = |b: &[u8], o: u32| u32::from_le_bytes(b[o as usize..o as usize + 4].try_into().unwrap());
+    let rows = lines.map(|l| {
+        let c: Vec<&str> = l.split(',').collect();
+        let obj = [hex(c[o0]), hex(c[o1])].concat();
+        let (node, card, pool) = (hex(c[nd]), hex(c[cd]), hex(c[pl]));
+        let mut nodes = vec![];
+        let mut n = w(&card, 0xc8);
+        while n != 0 {
+            let at = |o: u32| w(&pool, n - 0x012a_d6c0 + o);
+            nodes.push(Node { flags: at(0), id: at(4), points: at(8), base: at(0xc), rate: at(0x10), mult: at(0x14), extra: at(0x18), held: at(0x1c), granularity: at(0x20) });
+            n = at(0x24);
+            assert!(nodes.len() < 100, "the node list runs on");
+        }
+        Ride {
+            vsync: c[vs].parse().unwrap(),
+            words: [c[o0], c[o1], c[nd], c[cd], c[pl]].concat(),
+            ground: w(&obj, 0x324) != 0,
+            bank: w(&obj, 0x14f4),
+            clip: w(&obj, 0x1754),
+            spin: w(&obj, 0x1758),
+            heights: (F::from_bits(w(&node, 0x84)), F::from_bits(w(&node, 0x94))),
+            move_on: (0..4).any(|k| w(&obj, 0x1194 + 4 * k) != 0) || w(&obj, 0x11d8) != 0,
+            flip_torque: w(&obj, 0x1194) != 0,
+            wrecks: w(&obj, 0x6e4),
+            flags: w(&card, 8),
+            total: w(&card, 0xdc),
+            combo: w(&card, 0xe0),
+            nodes,
+        }
+    });
+    Some(rows.collect())
+}
+
+/// The port's card run over a captured ride, row by row, as the rider runs it on a pack ride: the
+/// 360's node off its clip, then the frame (the bank's clock and the backflip's watch), then the
+/// manager's growth; and compared on every row with the original's card and bank clock. A frame
+/// the recorder missed is run on the next row's words, and must change none of them; a row read late
+/// holds the next frame (the next row's words exactly), and the next row is no frame on.
+fn ride_the_port(name: &str, rows: &[Ride]) {
+    let mut frame: Vec<u32> = rows.iter().map(|r| r.vsync / 2).collect();
+    for k in (0..rows.len() - 1).rev() {
+        if rows[k].words == rows[k + 1].words {
+            frame[k] = frame[k + 1];
+        }
+    }
+    let mut port = Score { total: F::from_bits(rows[0].total), ..Score::default() };
+    let mut atv = Atv::default();
+    let mut front = 0;
+    let mut hang = F::ZERO;
+    let dt = F::from_bits(DT);
+    for k in 1..rows.len() {
+        let (was, r) = (&rows[k - 1], &rows[k]);
+        assert_eq!(r.wrecks, rows[0].wrecks, "{name}: no wreck in these rides");
+        let ticks = frame[k] - frame[k - 1];
+        if ticks > 1 {
+            let same = |r: &Ride| (r.ground, r.clip, r.spin, r.move_on, r.flags & 0x60, r.nodes.len());
+            assert_eq!(same(was), same(r), "{name}: the recorder missed a frame that changed something at {}", r.vsync);
+        }
+        for _ in 0..ticks {
+            let id = score::THREE_SIXTY_RIGHT;
+            let live = port.nodes.iter().any(|n| n.id == id && n.flags & score::atv_flag::LIVE != 0);
+            if r.spin != 0 && !live {
+                port.atv_start(&atv, id, score::ATV_THREE_SIXTY, true);
+            } else if r.spin == 0 && live {
+                port.atv_end(id);
+            }
+            hang = if r.ground { F::ZERO } else { hang + dt };
+            let s = score::Sense { front: r.ground, rear: r.ground, airborne: !r.ground, hang_time: hang, up_y: r.heights.0, forward_y: r.heights.1, ..Default::default() };
+            let rows = score::AtvRows {
+                backflip: score::ATV_BACKFLIP,
+                wheelie: score::ATV_WHEEL,
+                stoppie: score::ATV_WHEEL,
+                trick_running: false,
+                heights: was.heights,
+                move_on: r.move_on,
+                flip_torque: r.flip_torque,
+                front_torque: false,
+            };
+            port.atv_frame(&mut atv, dt, &s, rows, &mut front);
+            port.atv_grow(dt);
+        }
+        let at = format!("{name} at {} (row {k})", r.vsync);
+        let got: Vec<Node> = port.nodes.iter().map(|n| Node {
+            flags: n.flags, id: u32::from(n.id), points: n.points.to_bits(), base: n.base.to_bits(), rate: n.rate.to_bits(),
+            mult: n.mult.to_bits(), extra: n.extra.to_bits(), held: n.held.to_bits(), granularity: n.granularity.to_bits(),
+        }).collect();
+        let want: Vec<Node> = r.nodes.iter().map(|n| Node { id: u32::from(port_id(n.id)), ..*n }).collect();
+        assert_eq!(got, want, "{at}: the nodes");
+        assert_eq!((port.combo, port.scoring), (r.flags & 0x20 != 0, r.flags & 0x40 != 0), "{at}: combo open, a node running");
+        assert_eq!(port.total.to_bits(), r.total, "{at}: the total");
+        assert_eq!(port.combo_points.to_bits(), r.combo, "{at}: the combo's points");
+        assert_eq!(atv.bank.to_bits(), r.bank, "{at}: the bank's clock");
+    }
+}
+
+/// The first row at or after `from` where `f` holds.
+fn first(rows: &[Ride], from: usize, f: impl Fn(&Ride) -> bool) -> usize {
+    (from..rows.len()).find(|&k| f(&rows[k])).expect("the ride gets there")
+}
+
+/// S411: when the original's backflip calls come on a ride — a backflip off state 4's session's
+/// first lip that comes round, lands and banks (`flip2`: `research/s411/flip.pad`). The clip starts
+/// (the stunt start: node 41 open and grown one frame), goes over, and comes round (the stunt end:
+/// node finished) each a frame after the node's heights pass the rule — the up row's height at or
+/// under 0 with the forward row's over 0; both under 0; the up row's over 0 with the forward row's
+/// over −0.79 — so the backflip reads the frame before. The bank's clock is 0.2 from the frame
+/// after the start, through the stunt word held past the clip until the move ends on the ground,
+/// counts down from the first frame down, and banks the sixth frame after the word goes. Then the
+/// port's card, run on the same rows, matches the original's on every row.
+#[test]
+fn the_backflip_calls_come_when_the_originals_do() {
+    let Some(rows) = ride("flip2") else { return };
+    let start = first(&rows, 1, |r| r.clip == 1);
+    let over = first(&rows, start, |r| r.clip == 2);
+    let round = first(&rows, over, |r| r.clip == 0);
+    for k in [start, over, round] {
+        assert_eq!(rows[k].vsync - rows[k - 2].vsync, 4, "the rows either side of {k} are all there");
+    }
+    let h = |k: usize| rows[k].heights;
+    assert!(h(start - 1).0 <= F::ZERO && F::ZERO < h(start - 1).1 && F::ZERO < h(start - 2).0, "the start: {:?} {:?}", h(start - 2), h(start - 1));
+    assert!(h(over - 1).1 < F::ZERO && F::ZERO <= h(over - 2).1, "over: {:?} {:?}", h(over - 2), h(over - 1));
+    assert!(F::ZERO < h(round - 1).0 && F(-0.79) < h(round - 1).1 && h(round - 2).1 <= F(-0.79), "round: {:?} {:?}", h(round - 2), h(round - 1));
+    let n = &rows[start].nodes;
+    assert_eq!((n.len(), n[0].id, n[0].flags, f32::from_bits(n[0].points)), (1, 41, 0x3d, 2333.0), "opened at the start");
+    assert_eq!(rows[round].nodes[0].flags, 0x0d, "finished on the clip's end");
+    assert!(!rows[round].ground, "in the air");
+    // The bank's clock: 0 on the start, 0.2 the frame after, counting from the first frame down.
+    assert_eq!((rows[start].bank, rows[start + 1].bank), (0, 0x3e4c_cccd));
+    let down = first(&rows, round, |r| r.ground);
+    let gone = first(&rows, down, |r| !r.move_on);
+    let banked = first(&rows, down, |r| r.flags & 0x20 == 0);
+    assert_eq!((gone - down, banked - gone), (1, 6), "the move ends a frame down, the bank six frames on");
+    assert_eq!(rows[banked].total, rows[round].nodes[0].points, "banked x1");
+    ride_the_port("flip2", &rows);
+}
+
+/// S411: the 360's held start on the original's ride (`spin3`: `research/s411/spin3.pad`, a right
+/// 360 off the same lip that comes round and banks). Its node opens held on the frame the 360's clip
+/// leaves 0 (grown one frame), and is finished on the frame it comes back to 0, in the air; the bank's
+/// clock holds through the move and banks as the backflip's does. The port's card, run on the same
+/// rows with its 360 node off the clip, matches the original's on every row.
+#[test]
+fn the_three_sixty_starts_held_on_its_clip() {
+    let Some(rows) = ride("spin3") else { return };
+    let start = first(&rows, 1, |r| r.spin != 0);
+    let round = first(&rows, start, |r| r.spin == 0);
+    let n = &rows[start].nodes;
+    assert_eq!((n.len(), n[0].id, n[0].flags, f32::from_bits(n[0].points)), (1, 45, 0x3d, 2499.0), "opened held at the start");
+    assert!(rows[start - 1].nodes.is_empty(), "and not before");
+    assert_eq!(rows[round].nodes[0].flags, 0x0d, "finished on the clip's end");
+    assert!(!rows[round].ground, "in the air");
+    let down = first(&rows, round, |r| r.ground);
+    let gone = first(&rows, down, |r| !r.move_on);
+    let banked = first(&rows, down, |r| r.flags & 0x20 == 0);
+    assert_eq!((gone - down, banked - gone), (1, 6), "the move ends a frame down, the bank six frames on");
+    ride_the_port("spin3", &rows);
 }

@@ -6088,7 +6088,9 @@ fn md20_one_short_of_either_wrecks() {
 /// with S140's speed measured again after the substeps (the same walk's measure; the ride does not move),
 /// and the gesture's with S230's wreck entry, which zeroes both wheels' compression (hashed, and the
 /// gesture's 360 ends in a wreck; the ride up to it does not move), and with S358's MX vs. ATV score
-/// on pack rides (hashed: its nodes open at a stunt's start, and the pack's repeat scales and bank clock).
+/// on pack rides (hashed: its nodes open at a stunt's start, and the pack's repeat scales and bank clock),
+/// and with S411's stunt timing (the bank clock held on the stunt word the frame starts with, hashed, and
+/// the backflip's and front flip's watches each only under their own torque, on the frame's starting pose).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -6100,8 +6102,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0xa92183ff70b0f05c;
-const MD25_DIAGONAL_FOLD: u64 = 0x5adca4da8d3affd4;
+const MD25_GESTURE_FOLD: u64 = 0xa1fa8927a16188ef;
+const MD25_DIAGONAL_FOLD: u64 = 0xd45192c24baf4ae0;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's
