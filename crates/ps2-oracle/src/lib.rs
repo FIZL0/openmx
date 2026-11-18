@@ -108,7 +108,7 @@ pub mod ee;
 pub mod kit;
 
 pub use disc::Disc;
-pub use ee::{DONE, Ee};
+pub use ee::{Bytes, DONE, Ee};
 pub use kit::Kit;
 
 /// The address recorded under `name` in the `[oracle] addresses` file.
