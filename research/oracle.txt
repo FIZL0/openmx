@@ -12314,7 +12314,35 @@ race_prop_raiser            boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot
 #                                           there over +0x50 / +0x64 s through the prop's vt+0xe4, then its
 #                                           own vt+0x18 when done. No rand() in the tick or its two callees
 #                                           (the props' vt+0xe4 not followed). On sx01 (S13d) +0x3a4 = 1.
-#                                           Not ported (S334 read it).
+#                                           V134 (game_sim::prop_raise, research/journal/*-v134-*): race
+#                                           ctor 0x002f9b70 always sets +0x3a4 = 1; loader 0x002faa50 builds
+#                                           it (also ghost load 0x0031a620 and 0x00349cc0, not ported).
+#                                           scene +0xb0 = [Funnel_Up], +0xac = [Funnel_Down] (read by
+#                                           0x002af2e0, names any case): TriggerPosition +0x10 (0,0,0,1),
+#                                           TriggerLook +0x20, TriggerWidth +0x30 / Height +0x34 (10),
+#                                           MoveTime +0x38 (5), ObjectNameSubstring +0x3c (up_bale
+#                                           0x004372d8 / down_bale 0x004372e0). Gather walks scene+0x70 ->
+#                                           +0x18 (next [2]), strstr 0x00411b28 (case counts) on each
+#                                           collection's +0x144, every object (+0x320 count, 0x00289f10):
+#                                           up list +0x30/+0x34, down +0x38/+0x3c; words +0x54 up, +0x40
+#                                           down. Bind: path_spot on the words' +0x10, path_spot_point
+#                                           (0x0026e4f0) over it, distance to track(+0x68)+0x5c line +0x94 —
+#                                           the moved line: sx01 3369.951 (0x45529f38) both, the file's line
+#                                           3371.399. Tick dt f12: cards walked while +0x88 or +0x8c, each
+#                                           !(+0x10 <= spot) && +0x14 < spot -> ++count, start. Start up
+#                                           0x002fe7e0: each prop's +0x90 copied to +0x58[k], target
+#                                           +0x5c[k] = y + 50 (add.s), copy +0x70[k]; t +0x60 = 0, T +0x64 =
+#                                           words +0x38, on +0x68 = 1, vt+0x20. Down 0x002fe910 the same with
+#                                           -50 (+0x44, +0x48, +0x74, t +0x4c, T +0x50, on +0x6c). Down
+#                                           group first: per prop, t < T: copy.y = prop+0x94 + (target -
+#                                           prop+0x94) * (t / T), vt+0xe4 (physics_object_place) with the
+#                                           copy and stack copies of +0xa0/+0xb0 (the prop's own +0x90 stays,
+#                                           so the move is linear); else copy.y = target, place, on = 0,
+#                                           prop+0x94 = target. Then t += dt. Up the same; at its end with
+#                                           the down group off, the last prop's turn calls own vt+0x18.
+#                                           Then 0x00133500 (children). sx01: 10 up props (up_bale_single_01
+#                                           5, up_bale_triple_01 5, y 41.4-50.4), 17 down (down_bale_single_01
+#                                           5, down_bale_triple_01 12, y 91-102), MoveTime 1.
 # P333 — the tip popup and the results menu's buttons (menu::race::{tip_title, Results::tip_ok, buttons, press}).
 #   Popup vtable 0x00455d30: ctor 0x0029aad0 ("Preload Movie"/"Clutch Movie" parts +0xa4/+0xac, their "Mode"
 #   +0xa8/+0xb0, the STR_WARNING field +0xd0); open 0x0029ad60 (button bar +0x8c: one button, icon 0,
