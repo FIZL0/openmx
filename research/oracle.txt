@@ -8920,6 +8920,11 @@ kiowa_preforce boot 0x0038e2b0 (heli, dt in f12): 0x0015b050(heli+0x50), vt +0x1
 #   (22 rays, capacity +0x104 22), collidable +0x1f8 categories 0x202058, actors +0x110 8, collides
 #   +0x114 0xffffffff; +0x460 = 0x2000 (vehicles), +0x464 = 0x40000. Ported as kiowa::Collision /
 #   kiowa::Grounded. *(heli+0x54c)+0x200 (touchdown clip count) is 0 in C14's image: no rand() at touchdown.
+# B34c — the record's probes' lists in C14's image (each list +0 mode, +4 array, +8 count): ray probe
+#   *(rec+0x1f0) 0x006071b0 category 0x8, object list mode 1 [collidable, sweep], category list mode 1
+#   [0x100000]; sweep *(rec+0x1f4) 0x01490340 category list mode 1 [0x8, 0x800]; collidable 0x0148f830
+#   lists empty but its own two probes. So its rays meet the knockable props' f.col (category 0x18)
+#   as the plane's do. The port's Kiowa search offers the props nothing: S471 (after C43's capture).
 kiowa_measure boot 0x0038e380 (heli, dt in f12): 0x0015b070(heli+0x50), the figures, vt +0x1b4,
 #                                 then the touchdown sound (0x001b30e0, 0x003dd0a0)
 kiowa_wreck_check boot 0x0038e910 (heli, dt in f12): edge throw, rotor in ground / struck / speed,
