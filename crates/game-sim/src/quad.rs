@@ -4157,9 +4157,25 @@ impl<R: Moto + Default> Ride<R> {
     /// the quad's hull filed on its record after the pass's entries ([`Ride::file_mirrors`]), which
     /// the gravity's call resolves against their chassis every substep.
     fn frame_met(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4], met: Option<&crate::flight::Met>) {
+        self.frame_among(dt, world, segments, met, &mut []);
+    }
+
+    /// [`Ride::frame_met`] among knockable bodies (MD224): the record's pass [`Ride::record_among`].
+    fn frame_among(
+        &mut self,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        segments: [[Vf; 2]; 4],
+        met: Option<&crate::flight::Met>,
+        knocked: &mut [Knockable],
+    ) {
         let b = &mut self.bike.parts.bounds;
         *b = world_bounds(world, b.floor);
-        self.record_on(dt, world);
+        if knocked.is_empty() {
+            self.record_on(dt, world);
+        } else {
+            self.record_among(dt, world, knocked);
+        }
         if let Some(m) = met {
             self.file_mirrors(m);
         }
@@ -4204,6 +4220,13 @@ impl<R: Moto + Default> Ride<R> {
         let none = crate::ride::Controls::default();
         self.controls(if self.down() { &none } else { c });
         self.frame_met(dt, world, segments, met);
+    }
+
+    /// [`Ride::step`] among knockable bodies (MD224, [`Ride::record_among`]).
+    pub fn step_among(&mut self, c: &crate::ride::Controls, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4], knocked: &mut [Knockable]) {
+        let none = crate::ride::Controls::default();
+        self.controls(if self.down() { &none } else { c });
+        self.frame_among(dt, world, segments, None, knocked);
     }
 
     /// **The bikes' mirrors on the quad's record** (MD179): after [`Ride::record_on`]'s refill, each
@@ -4409,6 +4432,145 @@ impl crate::handling::record::Collides for RecordOn<'_> {
     }
     fn other(&mut self, _id: u32) -> &mut crate::handling::record::Record {
         &mut self.nobody
+    }
+}
+
+/// **A knockable body the quad's record can strike** (MD224; Untamed's knockable props, a bale on
+/// Rocksbury): its collidable mesh (`f.col`) standing at `frame` (the rows its scene node holds), and
+/// its own collision record, named `id` to the quad's (the original's record address will do). The
+/// quad's pass files a hit on it with `id` as the other record, and the mirror of that hit on
+/// `record` ([`crate::handling::record::pass`]).
+///
+/// The body is not moved here: nothing yet runs the body's own pass, its resolution or its step.
+#[derive(Clone, Debug)]
+pub struct Knockable {
+    pub id: u32,
+    pub mesh: crate::track::Mesh,
+    pub facets: Vec<crate::ray_probe::Facet>,
+    pub frame: [Vf; 4],
+    pub record: crate::handling::record::Record,
+}
+
+impl Knockable {
+    /// `mesh` standing at `frame`, its record `record` (named `id`).
+    pub fn new(id: u32, mesh: crate::track::Mesh, frame: [Vf; 4], record: crate::handling::record::Record) -> Knockable {
+        let facets = crate::flight_search::facets(&mesh);
+        Knockable { id, mesh, facets, frame, record }
+    }
+}
+
+/// **The quad's record among knockable bodies** (MD224): [`RecordOn`]'s answers, and its world
+/// rays' search with each of `knocked` struck as Untamed's ray probe strikes a mesh
+/// ([`crate::ray_probe::pair`], the rays stood at the scene node's frame against the body's mesh at
+/// its frame; one contact per ray, the nearest). A ray that strikes both the world and a body keeps
+/// the nearer of the two points (the port's choice: [`RecordOn`]'s world hits carry no fraction).
+/// The hits are listed in ray order. Another record a hit names is the body's own.
+pub struct RecordAmong<'a, 'b> {
+    pub on: RecordOn<'a>,
+    pub knocked: &'b mut [Knockable],
+}
+
+impl RecordAmong<'_, '_> {
+    /// Each knockable body's hits, as (ray index, hit).
+    fn knock(&mut self) -> Vec<(usize, crate::handling::record::Hit)> {
+        use crate::ray_probe::{RayProbe, Segment, Shape};
+        let rays = self.on.rays;
+        let segments: Vec<Segment> = rays.iter().map(|&[from, to]| Segment { from, to }).collect();
+        if self.knocked.is_empty() || segments.is_empty() {
+            return Vec::new();
+        }
+        let Some(tree) = crate::kiowa::try_ray_tree(&segments) else { return Vec::new() };
+        self.on.scene.tip(0, Vf::new(0.0, 0.0, 0.0, 1.0));
+        let probe = RayProbe { transform: self.on.scene.nodes[0].world, root: tree.root, nodes: &tree.nodes, segments: &tree.segments };
+        let mut out = Vec::new();
+        for k in self.knocked.iter() {
+            let mesh = crate::ray_probe::Mesh { id: k.id, transform: k.frame, root: 0, nodes: &k.mesh.nodes, facets: &k.facets, vertices: &k.mesh.vertices };
+            let mut rec = crate::atv_props::record(segments.len(), 1);
+            if !crate::ray_probe::pair(&probe, &Shape::Mesh(mesh), &mut rec) {
+                continue;
+            }
+            for c in &rec.contacts {
+                let Some(i) = rays.iter().position(|&[a, b]| a == c.from && b == c.to) else { continue };
+                let struck = crate::handling::record::Struck { object: k.id, other: k.id, mover: 0, category: self.on.category };
+                out.push((i, crate::handling::record::Hit { from: c.from, to: c.to, normal: c.normal, point: c.point, struck }));
+            }
+        }
+        out
+    }
+}
+
+impl crate::handling::record::Collides for RecordAmong<'_, '_> {
+    fn damp(&mut self, linear: Vf, angular: Vf) {
+        self.on.damp(linear, angular);
+    }
+    fn node_rotate(&mut self, v: Vf) -> Vf {
+        self.on.node_rotate(v)
+    }
+    fn node_position(&mut self) -> Vf {
+        self.on.node_position()
+    }
+    fn node_place(&mut self, v: Vf) -> Vf {
+        self.on.node_place(v)
+    }
+    fn node_move(&mut self, at: Vf) {
+        self.on.node_move(at);
+    }
+    fn node_up(&self) -> [F; 3] {
+        self.on.node_up()
+    }
+    fn chassis_velocity(&self) -> Vf {
+        self.on.chassis_velocity()
+    }
+    fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<crate::handling::record::Swept> {
+        self.on.sweep(from, to, nearby)
+    }
+    fn place_part(&mut self) {
+        self.on.place_part();
+    }
+    fn part_rays(&self) -> Vec<[Vf; 2]> {
+        self.on.part_rays()
+    }
+    fn search(&mut self, nearby: bool) -> Vec<crate::handling::record::Hit> {
+        let world = self.on.search(nearby);
+        let knocked = self.knock();
+        if knocked.is_empty() {
+            return world;
+        }
+        let rays = self.on.rays;
+        let start = |i: usize, scene: &mut crate::atv_moto::Scene| scene.tip(0, rays[i][0]);
+        let far = |p: Vf, from: Vf| {
+            let d = p.sub(from);
+            fpu::madd(fpu::madda(fpu::mula(d.x(), d.x()), d.y(), d.y()), d.z(), d.z())
+        };
+        let mut by_ray: Vec<Option<crate::handling::record::Hit>> = vec![None; rays.len()];
+        for h in world {
+            if let Some(i) = rays.iter().position(|&[a, b]| a == h.from && b == h.to) {
+                by_ray[i] = Some(h);
+            }
+        }
+        for (i, h) in knocked {
+            let from = start(i, self.on.scene);
+            match by_ray[i] {
+                Some(w) if !(far(h.point, from) < far(w.point, from)) => {}
+                _ => by_ray[i] = Some(h),
+            }
+        }
+        by_ray.into_iter().flatten().collect()
+    }
+    fn terrain_box(&self) -> [Vf; 2] {
+        self.on.terrain_box()
+    }
+    fn under(&mut self, g: &mut crate::contact_search::Ground) {
+        self.on.under(g);
+    }
+    fn velocity(&mut self, s: &crate::handling::record::Struck) -> Vf {
+        self.on.velocity(s)
+    }
+    fn other(&mut self, id: u32) -> &mut crate::handling::record::Record {
+        match self.knocked.iter().position(|k| k.id == id) {
+            Some(i) => &mut self.knocked[i].record,
+            None => self.on.other(id),
+        }
     }
 }
 
@@ -4787,6 +4949,34 @@ impl<R: Moto + Default> Ride<R> {
         }
         self.body.set_view(&view);
         // A contact is never with another record or a mover here, so the refill always holds.
+        r.held.refill(&r.record.contacts);
+        self.bike.contacts = Some(r.held.clone());
+        self.bike.touching = r.record.touching;
+        self.bike.struck_class = r.record.touching && r.record.struck != 0 && category & class != 0;
+    }
+
+    /// [`Ride::record_on`] among knockable bodies (MD224, [`RecordAmong`]): the quad's hits on them
+    /// filed naming their records, and the mirrors on those. Each body's list is emptied first (in
+    /// the original each body's own pass clears it before the quad's runs; that pass is not run here).
+    /// With such a hit in the list the refill does not hold ([`crate::atv_contact::Held::refill`]):
+    /// the held list is empty and the gravity resolves nothing.
+    pub fn record_among(&mut self, dt: F, world: &mut dyn crate::world::World, knocked: &mut [Knockable]) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        for k in knocked.iter_mut() {
+            k.record.contacts.clear();
+        }
+        let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
+        let rays = r.active().to_vec();
+        let on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
+        let mut among = RecordAmong { on, knocked };
+        crate::handling::record::clear(&mut r.record, &mut among);
+        let mut view = self.body.view();
+        let body = if r.record.body { Some(&mut view) } else { None };
+        crate::handling::record::pass(&mut r.record, 1, body, dt, &mut among);
+        if let Some((linear, angular)) = among.on.damped {
+            (self.body.damping, self.body.ang_damping) = (linear, angular);
+        }
+        self.body.set_view(&view);
         r.held.refill(&r.record.contacts);
         self.bike.contacts = Some(r.held.clone());
         self.bike.touching = r.record.touching;
