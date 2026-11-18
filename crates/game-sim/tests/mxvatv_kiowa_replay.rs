@@ -17,7 +17,10 @@
 //! body word for word against the game's after each frame, as far as [`KIOWA_AGREES_THROUGH`] and
 //! [`KIOWA3_AGREES_THROUGH`] pin. Since MD115 it flies on the ground too: its collision record (the
 //! biplane's class, [`flight::MxvatvRecord`], seeded off RAM) runs its pass on Desert Oasis's terrain
-//! and resolves its contacts ([`kiowa::OnMxvatv`]), and the record's words are compared as well.
+//! and resolves its contacts ([`kiowa::OnMxvatv`]), and the record's words are compared as well;
+//! since MD115a the record and the rotor's sphere centres are also built off the disc
+//! ([`kiowa::mxvatv_record`]: `kiowa.phy`, the skin's `.psg` and `…M.col`;
+//! [`kiowa::WreckRotor::centres`]), compared with the image's, and flown in their place.
 //!
 //! Skips without the images, the captures, the tapes or Desert Oasis's `mc02.res` (MD37a's).
 
@@ -1028,7 +1031,7 @@ fn others_diff(k: &Kiowa, ride: &Ride, ee: &Ee, heli: u32) -> Vec<String> {
 /// beside it through [`Kiowa::tick_mxvatv`] on Desert Oasis's ground ([`kiowa::OnMxvatv`]: the record's
 /// pass before the frame, its resolve in the body wrapper, the rotor's strike on the terrain) on the
 /// same pad words, its body and its record compared with the game's after each frame.
-fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
+fn port_flies(f: &Flight, disc: Option<&OffTheDisc>) -> Option<Vec<Stretch>> {
     let (mut ee, ticks) = (hooked(image(f.name)?), tape(f.name)?);
     let frames = by_frame(&ee, f.heli, &rows(f.name)?).iter().map(|&(j, _)| j).max()? + 1;
     let tables = game_sim::ride::Tables::build();
@@ -1047,7 +1050,10 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     let terrain_at = ee.u32_at(f.heli + TERRAIN);
     let read = ground::read_terrain(&|a| ee.u32_at(a), terrain_at, Some(&map));
     assert_eq!(ground::terrain_words(&read, terrain_at), ground::terrain_words(&terrain, terrain_at), "{}: the terrain object", f.name);
-    let centres = rotor_centres(&ee, f.heli);
+    let centres = match disc {
+        Some(d) => d.centres.clone(),
+        None => rotor_centres(&ee, f.heli),
+    };
     let mut out: Vec<Stretch> = Vec::new();
     let mut port: Option<(Kiowa, Ride, Mxvatv, flight::MxvatvRecord)> = None;
     let mut rng = game_sim::rng::Rng::from_seed(1);
@@ -1055,7 +1061,12 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     while j < frames {
         if j % STRETCH == 0 {
             let (k, ride, m) = seeded(&ee, f.heli);
-            port = Some((k, ride, m, read_record(&ee, f.heli)));
+            let seeded_record = read_record(&ee, f.heli);
+            let rec = match disc {
+                Some(d) => on_the_discs(&d.record, &seeded_record),
+                None => seeded_record,
+            };
+            port = Some((k, ride, m, rec));
             out.push(Stretch { from: j, touching: ee.u32_at(record + 0x34) != 0, agreed: 0, parted: Vec::new(), drift: None });
         }
         step(&mut ee, s, f.heli, &ticks, &mut j);
@@ -1095,8 +1106,12 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
 }
 
 fn port_flown(f: &Flight, pinned: &[usize]) {
-    let Some(stretches) = port_flies(f) else { return };
-    for s in &stretches {
+    let Some(stretches) = port_flies(f, None) else { return };
+    ratchet(f, &stretches, pinned);
+}
+
+fn ratchet(f: &Flight, stretches: &[Stretch], pinned: &[usize]) {
+    for s in stretches {
         println!(
             "{} from frame {} ({}): {} frames agree{}",
             f.name,
@@ -1128,4 +1143,109 @@ fn the_port_flies_kiowa() {
 #[test]
 fn the_port_flies_kiowa3() {
     port_flown(&KIOWA3, KIOWA3_AGREES_THROUGH);
+}
+
+// --- MD115a: the Kiowa's record off the disc ------------------------------------------------------
+
+/// What [`port_flies`] takes off the disc in place of the image's: the record
+/// ([`kiowa::mxvatv_record`]) and the rotor's sphere centres ([`kiowa::WreckRotor::centres`]).
+struct OffTheDisc {
+    record: flight::MxvatvRecord,
+    centres: Vec<Vf>,
+}
+
+/// The skin's files off MX vs. ATV's disc (MXVSATV.PSR's `Veh\\kiowa.phy`, `Veh\\Anim\\<skin>.psg`
+/// and `Veh\\Col\\<Skin>M.col`, MD115a's copies), and what is built from them: the record and,
+/// off the `.phy` read for the skin's model, the rotor's centres.
+fn off_the_disc(skin: &str, col: &str, model_one: bool) -> Option<OffTheDisc> {
+    let dir = Kit::load().ok()?.ctx("mxvatv-ps2/md115a");
+    let read = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).ok();
+        if bytes.is_none() {
+            skip(&format!("no {} (MXVSATV.PSR's Veh, Veh\\Anim and Veh\\Col: memory mxvsatv-psr-off-the-iso)", dir.join(name).display()));
+        }
+        bytes
+    };
+    let (phy, psg, rays) = (read("kiowa.phy")?, read(&format!("{skin}.psg"))?, read(col)?);
+    let record = kiowa::mxvatv_record(&phy, &psg, &rays, &CurveTable::build()).unwrap();
+    let centres = kiowa::Phy::read_mxvatv_bytes(&phy, model_one).phy.wreck_rotor.centres();
+    Some(OffTheDisc { record, centres })
+}
+
+/// The record and the rotor built off the disc are the flight's image's, in every word the flight
+/// does not move: the record's flags and tuning, its resolution's fields (mass, the scenery's and
+/// the actors' responses, the surfaces, the impulse mask), the held mass (the body's `+0x18`), the
+/// active part's rays bit for bit, and the rotor's sphere centres bit for bit (`*(heli + 0x11c8)`).
+/// The record's last sweep and contacts and its resolution's speeds are state. Its inverse inertia,
+/// the part reader's off the model's box, is the image's bit for bit too (the plane's is not, MD110a).
+fn the_kiowas_off_the_disc_are_the_images(f: &Flight, skin: &str, col: &str, model_one: bool) {
+    let (Some(ee), Some(ours)) = (image(f.name), off_the_disc(skin, col, model_one)) else { return };
+    let theirs = read_record(&ee, f.heli);
+    let still = |r: &record::Record| {
+        let mut r = r.clone();
+        (r.swept_from, r.swept_to, r.contacts) = (Vf::ZERO, Vf::ZERO, Vec::new());
+        (r.touching, r.touching_other, r.on_ground, r.on_object) = (false, false, false, false);
+        r
+    };
+    assert_eq!(still(&ours.record.record), still(&theirs.record), "{}: the record", f.name);
+    let collider = |h: &game_sim::atv_contact::Held| {
+        let mut c = h.record.clone();
+        (c.collider.cofg_world, c.collider.normal_speed, c.collider.relative) = (Vf::ZERO, F::ZERO, Vf::ZERO);
+        (c, h.movers.len(), h.body.is_some())
+    };
+    assert_eq!(collider(&ours.record.held), collider(&theirs.held), "{}: the record's resolution fields", f.name);
+    let body_mass = ee.f32_at(ee.u32_at(f.heli + at::BODY) + 0x18);
+    assert_eq!(ours.record.held.mass.to_bits(), body_mass.to_bits(), "{}: the held mass, the body's", f.name);
+    let bits = |r: &[[Vf; 2]]| r.iter().flat_map(|s| s.iter().flat_map(|v| v.0.map(f32::to_bits))).collect::<Vec<_>>();
+    assert_eq!(bits(&ours.record.rays), bits(&theirs.rays), "{}: the part's rays", f.name);
+    let quads = |c: &[Vf]| c.iter().flat_map(|v| v.0.map(f32::to_bits)).collect::<Vec<_>>();
+    assert_eq!(quads(&ours.centres), quads(&rotor_centres(&ee, f.heli)), "{}: the rotor's sphere centres", f.name);
+    println!("{}: the record and the rotor off the disc are the image's; {} rays", f.name, ours.record.rays.len());
+}
+
+/// **kiowa's record off the disc** (MD115a): `kiowa.phy` for model one, `kiowa.psg` and `KiowaM.col`.
+#[test]
+fn kiowas_record_off_the_disc_is_its_images() {
+    the_kiowas_off_the_disc_are_the_images(&KIOWA, "kiowa", "KiowaM.col", true);
+}
+
+/// **And kiowa3's** (model two): `kiowa3.psg` and `Kiowa3M.col`.
+#[test]
+fn kiowa3s_record_off_the_disc_is_its_images() {
+    the_kiowas_off_the_disc_are_the_images(&KIOWA3, "kiowa3", "Kiowa3M.col", false);
+}
+
+/// The disc's record (`d`) carrying the state the seeded one (`s`, off RAM) holds: the touch flags,
+/// the last sweep, the contacts and struck object, the terrain, and the resolution's list and
+/// speeds. Everything else, the tuning, the resolution's fields and the rays, is the disc's.
+fn on_the_discs(d: &flight::MxvatvRecord, s: &flight::MxvatvRecord) -> flight::MxvatvRecord {
+    let mut r = d.clone();
+    let (o, i) = (&mut r.record, &s.record);
+    (o.touching, o.touching_other, o.on_ground, o.on_object) = (i.touching, i.touching_other, i.on_ground, i.on_object);
+    (o.swept_from, o.swept_to, o.contacts, o.struck, o.terrain) = (i.swept_from, i.swept_to, i.contacts.clone(), i.struck, i.terrain);
+    r.held.entries = s.held.entries.clone();
+    let (o, i) = (&mut r.held.record.collider, &s.held.record.collider);
+    (o.cofg_world, o.normal_speed, o.relative) = (i.cofg_world, i.normal_speed, i.relative);
+    r
+}
+
+/// **A Kiowa on the disc's record and rotor lands and takes off as on the image's** (MD115a): each
+/// flight's stretches flown as [`the_port_flies_kiowa`] does, on the record and the rotor's centres
+/// built off the disc ([`off_the_disc`]) in place of the image's, as far as the image's fly them
+/// ([`KIOWA_AGREES_THROUGH`], [`KIOWA3_AGREES_THROUGH`]): every take-off, kiowa's landing at 1092
+/// (its impulse) and kiowa3's at 1191, word for word.
+fn flies_off_the_disc(f: &Flight, skin: &str, col: &str, model_one: bool, pinned: &[usize]) {
+    let Some(disc) = off_the_disc(skin, col, model_one) else { return };
+    let Some(stretches) = port_flies(f, Some(&disc)) else { return };
+    ratchet(f, &stretches, pinned);
+}
+
+#[test]
+fn kiowa_flies_on_the_discs_record() {
+    flies_off_the_disc(&KIOWA, "kiowa", "KiowaM.col", true, KIOWA_AGREES_THROUGH);
+}
+
+#[test]
+fn kiowa3_flies_on_the_discs_record() {
+    flies_off_the_disc(&KIOWA3, "kiowa3", "Kiowa3M.col", false, KIOWA3_AGREES_THROUGH);
 }

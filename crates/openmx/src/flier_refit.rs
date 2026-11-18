@@ -89,14 +89,19 @@ pub fn kiowa_ride(res: &Res, pack: Option<&PackFlier>) -> Option<vehicle::KiowaR
         Some(f) => f.rays(),
         None => read(game_sim::kiowa::KIOWA_RAYS),
     };
-    let heli = match rays {
-        Some(col) => heli.with_rays(&col),
+    let heli = match &rays {
+        Some(col) => heli.with_rays(col),
         None => heli,
     };
     // And its model's nodes (S270), where its wreck throws the blades from.
     let psg = match pack {
         Some(f) => f.psg(),
         None => read(game_sim::kiowa::KIOWA_MODEL),
+    };
+    // And a pack's SLUS-21104 collision record (MD115a), which it meets SLUS-21104's terrain with.
+    let heli = match (pack.and_then(|f| f.phy_bytes()), &psg, &rays) {
+        (Some(phy), Some(psg), Some(col)) => heli.with_mxvatv_record(&phy, psg, col),
+        _ => heli,
     };
     let heli = match psg {
         Some(psg) => heli.with_model(&psg),

@@ -11934,6 +11934,10 @@ atv_heap_free               atv 0x001b76d0 = free
 # the wrapper above (atv_contact::resolve, impulses, mass *(record+0xe4)+0x18). The strike's terrain
 # *(heli+0x3b4) is the MD76 terrain object over MC02.ps2.trn (words equal), rotor spheres *(heli+0x11c8).
 # Seeded every 100 frames, both flights agree on body and record words through the take-off and landing.
+# MD115a — the Kiowa's record off the disc (kiowa::mxvatv_record = flight::MxvatvRecord::read on Veh\kiowa.phy,
+# Veh\Anim\kiowa{,3}.psg, Veh\Col\Kiowa{,3}M.col): every constructor word the plane's (class 0x43804, +0x24 1,
+# +0x100 0x1000, +0x104 ~0); rays 22/24 and +0x60/+0x70 inverse inertia bit-exact with both images. Rotor
+# spheres *(heli+0x11c8) +0x178/+0x180 are the [Wrecks] rotor rays' far ends in the ray tree's order (bit-exact).
 # F46b — the collision sync's gather (atv_gather_nearby) on state 4 in Rust (tests/mxvatv_bike_ride.rs
 # gather_in_ram; journal research/journal/2026-11-05-f46b-gather-in-rust). State 4: the riding probe 0x00ea63a0
 # and frame mesh 0x00ea5970 (entries +0x18) in space link 0x01efa350 -> cell 0x00672cd0 (no subs +0x38/+0x3c,

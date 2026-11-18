@@ -3077,6 +3077,52 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
     }
 }
 
+/// The world round an MX vs. ATV helicopter flown on SLUS-21104's record (MD115a,
+/// [`KiowaRide::step_on_record`]): the record's ground ([`game_sim::kiowa::OnMxvatv`]) for its
+/// response, touching flag, entries and strike; the wreck and put-back as [`KiowaAround`]'s, the
+/// put-back snapped to the record's terrain (MD214); the thrown blades in its world, their side of a
+/// contact on the hull MX Unleashed's collision object's (which they never meet here).
+struct KiowaOnRecord<'a> {
+    ground: game_sim::kiowa::OnMxvatv<'a>,
+    wreckage: &'a mut game_sim::kiowa::Wreckage,
+    collision: &'a mut game_sim::kiowa::Collision,
+    put_back: Option<F>,
+    tree: Option<&'a game_sim::kiowa::RotorTree>,
+    curve: &'a game_sim::camera::CurveTable,
+    blade_movers: &'a [game_sim::contact::Mover],
+}
+
+impl game_sim::kiowa::Surroundings for KiowaOnRecord<'_> {
+    fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
+        self.ground.resolve(body);
+    }
+    fn among(&mut self) -> Option<game_sim::kiowa::Among<'_>> {
+        Some(self.wreckage.blades.among(blade_tables(), self.blade_movers, &mut *self.collision))
+    }
+    fn among_listed(&self, list: game_sim::biplane::List) -> i32 {
+        self.wreckage.blades.set.listed(list)
+    }
+    fn touching(&self) -> bool {
+        self.ground.touching()
+    }
+    fn ignored(&self) -> bool {
+        self.ground.ignored()
+    }
+    fn entries(&self) -> Vec<game_sim::kiowa::Touch> {
+        self.ground.entries()
+    }
+    fn strike(&mut self, matrix: &game_sim::math::Mat4) -> game_sim::kiowa::Strike {
+        self.ground.strike(matrix)
+    }
+    fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, rng: &mut game_sim::rng::Rng) {
+        self.ground.crashed(asked, ride, rng);
+        let throw = kiowa_throw(ride, self.tree, self.curve);
+        if let Some(f) = self.wreckage.act_on(asked, ride, &throw, false, rng, self.ground.terrain.as_ref()) {
+            self.put_back = Some(f);
+        }
+    }
+}
+
 /// A flown helicopter: its flight ([`game_sim::kiowa::Kiowa`]), the frame's state round it, its
 /// collision object, and the `rand()` its wreck and touchdown draw from.
 #[derive(Clone, Debug)]
@@ -3090,12 +3136,20 @@ pub struct Heli {
     /// What SLUS-21104's helicopter carries besides (MD80e): there for MX vs. ATV's, which then flies
     /// [`game_sim::kiowa::Kiowa::tick_mxvatv`]; `None` for MX Unleashed's.
     pub mxvatv: Option<game_sim::kiowa::Mxvatv>,
+    /// SLUS-21104's collision record (MD115a, [`KiowaRide::with_mxvatv_record`]), where an MX vs. ATV
+    /// helicopter was taken over SLUS-21104's terrain ([`takes_mxvatv_record`]): its frames then meet
+    /// that ground with it ([`game_sim::kiowa::OnMxvatv`]) in place of [`Heli::collision`].
+    pub record: Option<Box<flight::MxvatvRecord>>,
 }
 
 impl Heli {
-    /// Its collision record's touching flag, as the last tick left it.
+    /// Its collision record's touching flag, as the last tick left it: SLUS-21104's record's where it
+    /// flies on one.
     pub fn touching(&self) -> bool {
-        self.collision.record.touching
+        match &self.record {
+            Some(r) => r.record.touching,
+            None => self.collision.record.touching,
+        }
     }
 }
 
@@ -3130,13 +3184,16 @@ pub struct KiowaRide {
     /// MX vs. ATV's pedal figures (MD80e, [`KiowaRide::new_mxvatv`]): there, each helicopter taken flies
     /// SLUS-21104's steps.
     pub mxvatv: Option<game_sim::kiowa::Pedal>,
+    /// SLUS-21104's collision record off the skin's files (MD115a, [`KiowaRide::with_mxvatv_record`]),
+    /// as built: each MX vs. ATV helicopter taken over SLUS-21104's terrain gets a copy.
+    pub record: Option<flight::MxvatvRecord>,
 }
 
 impl KiowaRide {
     /// The helicopter off `kiowa.phy`'s bytes, seat `flier`'s, parked at `bay`.
     pub fn new(phy: &[u8], flier: usize, bay: Option<Spawn>) -> KiowaRide {
         let rays = game_sim::flight_search::Rays::default();
-        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), flier, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None, blades: None, mxvatv: None }
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), flier, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None, blades: None, mxvatv: None, record: None }
     }
 
     /// MX vs. ATV's helicopter (MD80e) off its `kiowa.phy`'s bytes, read for model one or two
@@ -3153,6 +3210,17 @@ impl KiowaRide {
         match game_sim::track::Rays::parse(col) {
             Ok(r) => self.rays = game_sim::flight_search::Rays::of(&r),
             Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::KIOWA_RAYS),
+        }
+        self
+    }
+
+    /// It with SLUS-21104's collision record (MD115a, [`game_sim::kiowa::mxvatv_record`], proved
+    /// against kiowa's and kiowa3's images) off the skin's `.phy`, `.psg` and `…M.col` bytes; as it
+    /// was where they do not read (said on stderr). Only an MX vs. ATV helicopter's frames use it.
+    pub fn with_mxvatv_record(mut self, phy: &[u8], psg: &[u8], col: &[u8]) -> KiowaRide {
+        match game_sim::kiowa::mxvatv_record(phy, psg, col, &game_sim::camera::CurveTable::build()) {
+            Ok(r) => self.record = Some(r),
+            Err(e) => eprintln!("kiowa: the MX vs. ATV collision record: {e}"),
         }
         self
     }
@@ -3293,7 +3361,10 @@ impl KiowaRide {
             wreckage.blades = blades;
         }
         let mxvatv = self.mxvatv.map(|pedal| game_sim::kiowa::Mxvatv { pedal, unmanned: false });
-        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage, mxvatv }
+        // SLUS-21104's record (MD115a), fresh, where it flies SLUS-21104's terrain: what MD110a1
+        // gives the plane there. Its resolution's body is the helicopter's, handed in each substep.
+        let record = self.record.clone().filter(|_| self.mxvatv.is_some() && takes_mxvatv_record(world)).map(Box::new);
+        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage, mxvatv, record }
     }
 
     /// One frame of the helicopter on `pad` through `table`: the input step
@@ -3333,6 +3404,9 @@ impl KiowaRide {
         let Some(h) = self.flown.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
+        if h.record.is_some() && h.mxvatv.is_some() && takes_mxvatv_record(world) {
+            return self.step_on_record(input, tables, dt, world);
+        }
         // Its rays meet the blades its nearby list holds (C24).
         let (movers, struck) = h.collision.search_knocking(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered());
         let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
@@ -3359,6 +3433,46 @@ impl KiowaRide {
             h.kiowa.put_back_controls(fraction);
             h.collision.refresh(&h.ride.body, world);
             h.wreckage.blades.gather_round(&h.collision, &h.ride.body);
+        }
+    }
+
+    /// **[`KiowaRide::step_through`]'s frame on SLUS-21104's record** (MD115a), as MD115's replay flies
+    /// it ([`game_sim::kiowa::OnMxvatv`]): the record's pass on the world's SLUS-21104 terrain before
+    /// the frame, its resolve in the body wrapper, the rotor's spheres
+    /// ([`game_sim::kiowa::WreckRotor::centres`]) asked of that terrain for the strike; the wreck and
+    /// put-back as [`KiowaAround`] does them, the put-back snapped to the terrain. Thrown blades fly
+    /// and step in its world, meeting the world but not its hull, and its rays do not meet them:
+    /// MX Unleashed's collision object is not searched.
+    fn step_on_record(&mut self, input: game_sim::kiowa::Pad, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
+        let Some(h) = self.flown.as_mut() else { return };
+        let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
+        let mut blade_movers = Vec::new();
+        if blades_out {
+            let (field, props, trees) = world.wooded();
+            h.wreckage.blades.search(dt, field.as_deref(), props, trees);
+            blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
+        }
+        let (Some(m), Some(record), Some(terrain)) = (h.mxvatv.as_mut(), h.record.as_deref_mut(), world.mxvatv_terrain()) else { return };
+        let centres = self.phy.wreck_rotor.centres();
+        let mut ground = game_sim::kiowa::OnMxvatv { record, terrain: Some(terrain), centres: &centres, asked: Vec::new() };
+        ground.pass(&mut h.ride, dt);
+        let mut around = KiowaOnRecord {
+            ground,
+            wreckage: &mut h.wreckage,
+            collision: &mut h.collision,
+            put_back: None,
+            tree: self.tree.as_ref(),
+            curve: &tables.curve,
+            blade_movers: &blade_movers,
+        };
+        let asked = h.kiowa.tick_mxvatv(m, &mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
+        let put_back = around.put_back;
+        self.wrecks += u32::from(asked.wreck.is_some());
+        if blades_out || h.wreckage.blades.started.iter().any(|s| s.out) {
+            h.wreckage.blades.post(dt);
+        }
+        if let Some(fraction) = put_back {
+            h.kiowa.put_back_controls(fraction);
         }
     }
 
@@ -4237,6 +4351,45 @@ mod tests {
         assert!(with_mxvatv_record_on(plane(), Some(&record), true).record_mxvatv.is_some());
         assert!(with_mxvatv_record_on(plane(), Some(&record), false).record_mxvatv.is_none());
         assert!(with_mxvatv_record_on(plane(), None, true).record_mxvatv.is_none());
+    }
+
+    #[test]
+    fn an_mxvatv_helicopter_flies_slus_21104s_record_only_over_its_terrain() {
+        // MD115a: as MD110a1's plane, the record's pass asks only SLUS-21104's terrain, so the
+        // helicopter takes it only there; MX Unleashed's helicopter never does.
+        use game_sim::world::Flat;
+        let terrain = game_sim::atv_ground::Terrain {
+            map: None,
+            min: Vf::ZERO,
+            max: Vf::ZERO,
+            margin: F::ZERO,
+            per_sample: F::ONE,
+            height_scale: F::ONE,
+            coarse: false,
+            split_one_way: true,
+        };
+        let heli = "[Mass Properties]\nMass = 10\n[Wrecks]\nWreckRotorRadius = 20.0\nWreckRotorHeight = 11.0\n";
+        let (at, forward) = (Vf::new(0.0, 5.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
+        let with = |mut k: KiowaRide| {
+            k.record = Some(flight::MxvatvRecord::default());
+            k
+        };
+        let mut under = game_sim::handling::ground::Under(terrain);
+        let mut atv = with(KiowaRide::new_mxvatv(heli.as_bytes(), false, 0, None));
+        assert!(atv.built(at, forward, &mut under).record.is_some());
+        assert!(atv.built(at, forward, &mut Flat::default()).record.is_none());
+        assert!(with(KiowaRide::new(heli.as_bytes(), 0, None)).built(at, forward, &mut under).record.is_none());
+        assert!(KiowaRide::new_mxvatv(heli.as_bytes(), false, 0, None).built(at, forward, &mut under).record.is_none());
+        // A frame over the terrain runs the record's pass and resolve: with no map under it nothing
+        // is met, and it falls.
+        atv.flown = Some(atv.built(at, forward, &mut under));
+        let tables = game_sim::ride::Tables::build();
+        let table = game_sim::bindings::Table::SHIPPED;
+        let before = atv.flown.as_ref().unwrap().ride.body.position.y();
+        atv.step(&game_sim::input::Pad::default(), &table, &tables, F(1.0 / 30.0), &mut under);
+        let h = atv.flown.as_ref().unwrap();
+        assert!(h.record.as_ref().unwrap().record.terrain, "the record's pass ran on the terrain");
+        assert!(!h.touching() && h.ride.body.position.y() < before, "the record met nothing; it fell");
     }
 
     #[test]
