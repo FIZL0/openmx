@@ -433,7 +433,7 @@ impl Down {
         }
         let bike = Bike { velocity: crash.bike.body.velocity, rates: crash.bike.body.rates, hit_velocity: crash.bike.body.velocity };
         ragdoll.wreck_enter(reason, &bike, wrecks, rng);
-        let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
+        let frame = wreck_frame(&crash.bike.record.node);
         let held_at = std::array::from_fn(|h| {
             let pin = &ragdoll.pins[h];
             let b = &ragdoll.bones[pin.first].body;
@@ -495,7 +495,7 @@ impl Down {
         bike_in: bool,
         mut knockable: Option<&mut crate::prop_set::PropSet>,
     ) {
-        let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
+        let frame = wreck_frame(&crash.bike.record.node);
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
         // The bones' search, once a frame before the off-bike test, round the first sphere.
         if let (Some(b), Some(s)) = (bike, kit.spheres.first()) {
@@ -550,8 +550,8 @@ impl Down {
                 rows: [frame.0[0], frame.0[1], frame.0[2]],
                 spin: F::ZERO,
                 velocity: crash.bike.body.velocity,
-                centre: crash.bike.body.position,
-                quat: crash.bike.body.quat,
+                centre: frame.0[3],
+                quat: request_quat(&crash.bike.record.node),
             },
             rests: std::array::from_fn(|i| match posed.and_then(|p| p.rests.get(i)) {
                 Some(&r) => r,
@@ -738,5 +738,13 @@ impl crate::hash::State for Down {
 /// pose before the frame's last substep ([`crate::wreck_bike::node_of`]), not the body as the step
 /// left it (R40).
 fn request_quat(node: &crate::contact::Node) -> Vf {
-    math::mat4_to_quat(&Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin]))
+    math::mat4_to_quat(&wreck_frame(node))
+}
+
+/// **The wreck's frame**: the wreck bike's node, rows and origin, which is what the body's request
+/// copies into its rows and centre and what the bike's collidable places its sphere and its tree key
+/// by (S424, `tests/ragdoll_wrecks.rs` the_wrecks_frame_is_the_wreck_bike_nodes) — the pose before
+/// the frame's last substep, not the body as the step left it.
+fn wreck_frame(node: &crate::contact::Node) -> Mat4 {
+    Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin])
 }
