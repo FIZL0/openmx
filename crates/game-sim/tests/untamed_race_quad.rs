@@ -29,6 +29,9 @@ const GROUND_QUERY: u32 = 0x004b_0910;
 const POINT: u32 = 0x01f0_0000;
 const NORMAL: u32 = 0x01f0_0010;
 const RECORD: u32 = 0x01f0_0020;
+/// MD224: the collision record of the knockable bale steer.csv's take-off strikes (`TripleBale02`,
+/// [`bale`]), in every MD147 state.
+const BALE: u32 = 0x00aa_c3d0;
 /// The frame's dt, as the image keeps it (0.033333).
 const DT: u32 = 0x3d08_850a;
 /// The scene nodes' words from `+0x30` are SLUS-21104's 0x30 further in.
@@ -595,9 +598,14 @@ impl Row {
 }
 
 fn rows(kit: &Kit, name: &str) -> Option<Vec<Row>> {
-    let path = kit.ctx("capture/md147").join(format!("{name}{}", ".csv"));
+    rows_in(kit, "md147", name)
+}
+
+/// A capture's rows: `task`'s (`context/capture/<task>`) `name`.csv.
+fn rows_in(kit: &Kit, task: &str, name: &str) -> Option<Vec<Row>> {
+    let path = kit.ctx(&format!("capture/{task}")).join(format!("{name}{}", ".csv"));
     let Ok(text) = std::fs::read_to_string(&path) else {
-        skip(&format!("{} is not there (MD147's)", path.display()));
+        skip(&format!("{} is not there ({}'s)", path.display(), task.to_uppercase()));
         return None;
     };
     let mut lines = text.lines();
@@ -861,5 +869,66 @@ fn untamed_quad_replays_md147_hazard_on_through_the_put_backs() {
     assert!(r.skipped.len() < 4, "rows {:?} were read badly", r.skipped);
     assert_eq!(r.before_put_back, [30, 61, 216, 278, 309, 340], "the rows read before a put-back");
     clock_matches(&r.clock, 1);
+}
+
+
+/// MD224: Rocksbury's `TripleBale02` at (437.99, 9.28, 474.69), the knockable bale steer.csv's
+/// take-off strikes, as the spawn image holds it: its record ([`BALE`]) and its collidable mesh
+/// (`TripleBalef.col`) at the rows its record's node (`+0xe8`) holds (`+0x60..+0xa0`, Untamed's node
+/// layout). The scene's own frame for the model ([`game_sim::props::frame`]) is not those rows to the
+/// bit: they come off the body's quaternion.
+fn bale(kit: &Kit, ee: &Ee) -> Option<game_sim::quad::Knockable> {
+    let bytes = std::fs::read(kit.ctx("untamed/sx_a/col/TripleBalef.col")).ok()?;
+    let mesh = game_sim::track::Mesh::parse(&bytes).unwrap_or_else(|e| panic!("TripleBalef.col: {e}"));
+    let node = ee.u32_at(BALE + 0xe8);
+    let rows: [Vf; 4] = std::array::from_fn(|k| v(ee, node + 0x60 + 0x10 * k as u32));
+    let record = game_sim::handling::record::read(&|a| ee.u32_at(a), BALE);
+    Some(game_sim::quad::Knockable::new(BALE, mesh, rows, record))
+}
+
+/// One entry of a captured record list (Untamed's layout, research/journal/*md224*): the kind (a
+/// half-word, 0 the record's own, 1 handed to it), the ray (`+0x10`, `+0x20`), the normal and point,
+/// and the other record (`+0x80`).
+fn listed(r: &Row, col: &str, k: usize) -> (u32, [u32; 16], u32) {
+    let w = hex_words(r, col);
+    let e = &w[k * 0x24..];
+    (e[0] & 0xffff, std::array::from_fn(|j| e[4 + j]), e[0x20])
+}
+
+/// MD224's steer.csv (research/md224: MD147's steer.pad from the spawn again, with the quad's
+/// collision record and list and the bale's record, list and body): rows to 196 are MD147's word
+/// for word. Row 197 is read between the tick's record pass and its step: the quad's record holds
+/// two contacts of its own, its rays' hits on the top of the still bale (`TripleBalef.col`), each
+/// naming the bale's record, and the bale's list opens with their mirrors. The port's pass on that
+/// tick among the bale ([`game_sim::quad::Ride::step_among`]) files those two and the two mirrors:
+/// the same rays, normals and points, bit for bit.
+#[test]
+fn untamed_quad_record_strikes_the_bale_on_md224_steer() {
+    let Some(kit) = kit() else { return };
+    let Some(rows) = rows_in(&kit, "md224", "steer") else { return };
+    let Some(mut s) = setup(&kit, "spawn") else { return };
+    let Some(bale) = bale(&kit, &s.world.ee) else { return };
+    let mut knocked = [bale];
+    let dt = F(f32::from_bits(DT));
+    for r in rows.iter().take(198) {
+        s.ride.step_among(&controls(r), dt, &mut s.world, s.segments, &mut knocked);
+    }
+    let r = &rows[197];
+    let count = hex_words(r, "rec")[0xf0 / 4] as usize;
+    assert_eq!(count, 2, "the capture's row 197 lists {count} contacts");
+    let record = &s.ride.recorded.as_ref().expect("the quad's record").record;
+    let words = |c: &game_sim::handling::record::Contact| {
+        let q = [c.from, c.to, c.normal, c.point];
+        (c.kind, std::array::from_fn::<u32, 16, _>(|j| q[j / 4].0[j % 4].to_bits()), c.other)
+    };
+    let got: Vec<(u32, [u32; 16], u32)> = record.contacts.iter().map(words).collect();
+    let want: Vec<(u32, [u32; 16], u32)> = (0..count).map(|k| listed(r, "rec_list", k)).collect();
+    assert_eq!(got, want, "the port's pass on tick 197 against the original's list");
+    // The bale's list opens with the mirrors: the hits turned round, naming the quad's record.
+    let quad_record = s.world.ee.u32_at(QUAD + 0xf8);
+    let mirrors: Vec<(u32, [u32; 16], u32)> = knocked[0].record.contacts.iter().map(words).map(|(k, w, _)| (k, w, quad_record)).collect();
+    let want: Vec<(u32, [u32; 16], u32)> = (0..count).map(|k| listed(r, "bale_list", k)).collect();
+    assert_eq!(mirrors, want, "the bale's mirrors on tick 197");
+    assert!(knocked[0].record.contacts.iter().all(|c| c.other == 1), "a mirror names the quad's record");
 }
 
