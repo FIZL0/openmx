@@ -37,27 +37,29 @@ pub(crate) fn u(o: u32) -> u32 {
     }
 }
 
-/// A drive of MD160's: its capture and tape's name, the state it starts from and the player's car.
+/// A drive of MD160's: its capture and tape's name, the state it starts from and the player's car;
+/// `set` the capture's folder (MD81f's sandrail drives are `md81f`).
 pub(crate) struct UDrive {
+    pub(crate) set: &'static str,
     pub(crate) name: &'static str,
     pub(crate) image: &'static str,
     pub(crate) car: u32,
     pub(crate) vtable: u32,
 }
 
-pub(crate) const U_THROTTLE: UDrive = UDrive { name: "throttle", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_STEER: UDrive = UDrive { name: "steer", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_JUMP: UDrive = UDrive { name: "jump", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
-pub(crate) const U_WRECK: UDrive = UDrive { name: "wreck", image: "flipped", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_THROTTLE: UDrive = UDrive { set: "md160", name: "throttle", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_STEER: UDrive = UDrive { set: "md160", name: "steer", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_JUMP: UDrive = UDrive { set: "md160", name: "jump", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_WRECK: UDrive = UDrive { set: "md160", name: "wreck", image: "flipped", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
 
 /// A state's RAM image and scratchpad (MD160's, `context/untamed/md160`; the flipped state's
 /// pulled out of its `.p2s`).
-pub(crate) fn u_image(name: &str) -> Option<Ee> {
+pub(crate) fn u_image(set: &str, name: &str) -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let dir = kit.ctx("untamed/md160");
+    let dir = kit.ctx(&format!("untamed/{set}"));
     let (ram, spr) = (dir.join(format!("{name}.ee{}", ".bin")), dir.join(format!("{name}.spr{}", ".bin")));
     if !ram.exists() || !spr.exists() {
-        skip(&format!("no {} and its .spr.bin (MD160's images; a copy is in openmx-slots/kept-context/md160)", ram.display()));
+        skip(&format!("no {} and its .spr.bin (the {set} images; a copy is in openmx-slots/kept-context/{set})", ram.display()));
         return None;
     }
     let mut ee = Ee::from_ram(&ram).unwrap();
@@ -65,12 +67,12 @@ pub(crate) fn u_image(name: &str) -> Option<Ee> {
     Some(ee)
 }
 
-pub(crate) fn u_rows(name: &str) -> Option<Vec<Row>> {
-    drive::csv(Kit::load().ok()?.ctx("capture/md160").join(format!("{name}{}", ".csv")))
+pub(crate) fn u_rows(set: &str, name: &str) -> Option<Vec<Row>> {
+    drive::csv(Kit::load().ok()?.ctx(&format!("capture/{set}")).join(format!("{name}{}", ".csv")))
 }
 
-pub(crate) fn u_tape(name: &str) -> Option<Vec<Row>> {
-    drive::csv(Kit::load().ok()?.ctx("recordings/md160").join(format!("{name}.p2m2.ticks{}", ".csv")))
+pub(crate) fn u_tape(set: &str, name: &str) -> Option<Vec<Row>> {
+    drive::csv(Kit::load().ok()?.ctx(&format!("recordings/{set}")).join(format!("{name}.p2m2.ticks{}", ".csv")))
 }
 
 /// The syscall stubs (`addiu v1, zero, n; syscall; jr ra`) answer `a0`, GetThreadId 1 (F31's); the
@@ -237,9 +239,19 @@ fn row_block(row: &Row, name: &str) -> Vec<u8> {
 /// The rows after a torn one match again, and one of the last ten does, so the interpreter never
 /// drifts off the game. Returns the rows it ran and the torn ones.
 pub(crate) fn u_capture_check(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usize>)> {
-    let pre = u_image(d.image)?;
-    let rows = u_rows(d.name)?;
-    let ticks = u_tape(d.name)?;
+    let (n, early, torn) = u_capture_rows(d)?;
+    let off = early.len() + torn.len();
+    assert!(off * 3 < n, "{}: {off} of {n} rows are not the frame's: early {early:?}, torn {torn:?}", d.name);
+    assert!((n - 10..n).any(|r| !early.contains(&r) && !torn.contains(&r)), "{}: none of the last ten rows match", d.name);
+    Some((n, early, torn))
+}
+
+/// [`u_capture_check`]'s replay without its verdict: the rows run, the early ones and the torn ones
+/// (MD81f's recorder reads every row before its frame, so its drives are early throughout).
+pub(crate) fn u_capture_rows(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usize>)> {
+    let pre = u_image(d.set, d.image)?;
+    let rows = u_rows(d.set, d.name)?;
+    let ticks = u_tape(d.set, d.name)?;
     assert_eq!(pre.u32_at(d.car + 4), d.vtable, "{}: not the truck at {:#x}", d.name, d.car);
     let mut ee = u_hooked(pre);
     let blocks = u_blocks(&ee, d)[1..].to_vec();
@@ -258,14 +270,10 @@ pub(crate) fn u_capture_check(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usiz
         }
         before = now;
     }
-    let n = rows.len();
-    let off = early.len() + torn.len();
-    assert!(off * 3 < n, "{}: {off} of {n} rows are not the frame's: early {early:?}, torn {torn:?}", d.name);
-    assert!((n - 10..n).any(|r| !early.contains(&r) && !torn.contains(&r)), "{}: none of the last ten rows match", d.name);
-    Some((n, early, torn))
+    Some((rows.len(), early, torn))
 }
 
-fn u_capture_test(d: &UDrive) {
+pub(crate) fn u_capture_test(d: &UDrive) {
     let _ = u_capture_check(d);
 }
 
@@ -735,9 +743,9 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
 
 /// [`u_beside`], with the ground queries and the noise answered by `port` when given (MD234).
 pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_terrain::UPort>) -> Option<USeen> {
-    let pre = u_image(d.image)?;
-    let rows = u_rows(d.name)?;
-    let ticks = u_tape(d.name)?;
+    let pre = u_image(d.set, d.image)?;
+    let rows = u_rows(d.set, d.name)?;
+    let ticks = u_tape(d.set, d.name)?;
     assert_eq!(pre.u32_at(d.car + 4), d.vtable, "{}: not the truck at {:#x}", d.name, d.car);
     THE_CAR.with(|c| c.set(d.car));
     let table: &'static AcosTable = Box::leak(Box::new(AcosTable::build()));
@@ -920,7 +928,7 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
 }
 
 /// Drive `d` beside, through the frame or the Ride: every frame compared.
-fn u_beside_test(d: &UDrive, ride: bool) -> Option<USeen> {
+pub(crate) fn u_beside_test(d: &UDrive, ride: bool) -> Option<USeen> {
     let s = u_beside(d, ride)?;
     assert!(s.frames > 0, "{}: no frame compared", d.name);
     // MD183: the wreck drive's unwreck puts the truck back on frame 83, compared through the port's
