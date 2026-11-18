@@ -538,7 +538,7 @@ impl Down {
             &mut self.touching,
             &mut self.fade,
             dt,
-            crash.bike.body.quat,
+            request_quat(&crash.bike.record.node),
             bike,
             self.reason,
             &kit.wrecks,
@@ -731,4 +731,12 @@ impl crate::hash::State for Down {
             w.bool("touched", c.touched);
         }
     }
+}
+
+/// **The orientation the throw is turned by**: the body's request takes the bike node's world
+/// matrix as a quaternion, and the wreck bike's node is what its post listener last wrote — the
+/// pose before the frame's last substep ([`crate::wreck_bike::node_of`]), not the body as the step
+/// left it (R40).
+fn request_quat(node: &crate::contact::Node) -> Vf {
+    math::mat4_to_quat(&Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin]))
 }
