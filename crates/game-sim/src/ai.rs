@@ -15,7 +15,7 @@
 //! * it seeds `srand` from the wall clock if nothing has seeded it yet. The caller hands in the
 //!   generator it already has.
 //! * an event marked as a career round takes its riders from a saved roster or the championship's own
-//!   table instead of drawing them (S12f).
+//!   table instead of drawing them. That is [`spawn_career_roster`] (S12f); the caller picks it.
 //!
 //! [`controls`] is an AI rider's per-tick ground controller (S12b): the bar, lean, throttle and brake
 //! that take its bike the way and at the speed the route follower asks for. The route follower, the
@@ -140,17 +140,10 @@ pub fn skill_range(difficulty: u8) -> (i32, i32) {
 /// Panics where the original would hang or run off its array: more AI riders than there are database
 /// entries from [`FIRST_AI_IDENTITY`] up to tell apart, or more than [`MAX_AI`] of them.
 pub fn spawn_roster(rng: &mut Rng, input: RosterIn) -> Roster {
-    let mut humans = input.humans;
-    let mut all_ai = None;
-    if input.all_ai {
-        humans = 1;
-        let racer = rng.index(input.racers - 1) + 1;
-        let seconds = F(8.0) + F(5.0) * rng.unit();
-        all_ai = Some(AllAiDraw { racer, seconds });
-    }
-    if input.ghost_race {
-        return Roster { humans: 1, ghost: true, ai: Vec::new(), all_ai };
-    }
+    let (humans, all_ai) = match spawn_start(rng, input) {
+        Ok(start) => start,
+        Err(ghost) => return ghost,
+    };
 
     let count = input.racers - humans;
     let mut identities: Vec<i32> = Vec::new();
@@ -175,6 +168,87 @@ pub fn spawn_roster(rng: &mut Rng, input: RosterIn) -> Roster {
         .map(|identity| AiRider { identity, skill: low + rng.index(high - low + 1) })
         .collect();
     Roster { humans, ghost: false, ai, all_ai }
+}
+
+/// The part of the spawn every event shares: the AllAI pair, then the ghost race, which spawns no AI
+/// riders whatever else the event says. `Ok` is the human count and the AllAI draw to go on with.
+fn spawn_start(rng: &mut Rng, input: RosterIn) -> Result<(i32, Option<AllAiDraw>), Roster> {
+    let mut humans = input.humans;
+    let mut all_ai = None;
+    if input.all_ai {
+        humans = 1;
+        let racer = rng.index(input.racers - 1) + 1;
+        let seconds = F(8.0) + F(5.0) * rng.unit();
+        all_ai = Some(AllAiDraw { racer, seconds });
+    }
+    if input.ghost_race {
+        return Err(Roster { humans: 1, ghost: true, ai: Vec::new(), all_ai });
+    }
+    Ok((humans, all_ai))
+}
+
+/// The most riders a saved career roster lists after its first: its entries sit in seven words just
+/// below its count byte.
+pub const MAX_SAVED_AI: usize = 7;
+
+/// The most riders a championship's identity table holds: three words, just below its count.
+pub const MAX_CHAMPIONSHIP_AI: usize = 3;
+
+/// Where a career round's AI riders come from instead of the draw (the event's career byte set). The
+/// career's current round says which: a saved roster, or the championship's table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CareerRoster {
+    /// A saved roster: its racer count byte, and for each rider after the first, the identity and
+    /// skill its entry holds. Nothing is drawn.
+    Saved { count: u8, riders: Vec<AiRider> },
+    /// The championship's opponents: their count and identities. Each one's skill is drawn from the
+    /// event's difficulty, as for a drawn roster.
+    Championship { count: i32, identities: [i32; MAX_CHAMPIONSHIP_AI] },
+}
+
+/// A career round's spawn: who is on the line, and the racer count it writes back over the settings'.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CareerSpawn {
+    pub roster: Roster,
+    pub racers: i32,
+}
+
+/// The original's player spawn for a career round: [`spawn_roster`]'s AllAI pair and ghost race first,
+/// then the AI riders out of `career` in its order, numbered on from the humans.
+///
+/// * **Saved**: the settings' racer count becomes the saved count, humans or not, and the riders
+///   are the saved ones after the first (`count − 1` of them). No draws.
+/// * **Championship**: the racer count becomes the humans plus the table's count, and each listed
+///   identity gets one skill draw from [`skill_range`]. No identity draws.
+///
+/// Panics where the original would read past the lists: a saved count above `MAX_SAVED_AI + 1`, or
+/// fewer riders than it says; a championship count above [`MAX_CHAMPIONSHIP_AI`].
+pub fn spawn_career_roster(rng: &mut Rng, input: RosterIn, career: &CareerRoster) -> CareerSpawn {
+    let (humans, all_ai) = match spawn_start(rng, input) {
+        Ok(start) => start,
+        Err(ghost) => return CareerSpawn { roster: ghost, racers: input.racers },
+    };
+    let (racers, ai) = match career {
+        CareerRoster::Saved { count, riders } => {
+            let listed = usize::from(*count).saturating_sub(1);
+            assert!(listed <= MAX_SAVED_AI, "a saved roster of {count}: the original keeps room for {MAX_SAVED_AI} after the first");
+            assert!(riders.len() >= listed, "a saved roster of {count} lists only {} riders", riders.len());
+            (i32::from(*count), riders[..listed].to_vec())
+        }
+        CareerRoster::Championship { count, identities } => {
+            assert!(
+                *count <= MAX_CHAMPIONSHIP_AI as i32,
+                "a championship of {count}: the original's table holds {MAX_CHAMPIONSHIP_AI}"
+            );
+            let (low, high) = skill_range(input.difficulty);
+            let ai = identities[..(*count).max(0) as usize]
+                .iter()
+                .map(|&identity| AiRider { identity, skill: low + rng.index(high - low + 1) })
+                .collect();
+            (humans.wrapping_add(*count), ai)
+        }
+    };
+    CareerSpawn { roster: Roster { humans, ghost: false, ai, all_ai }, racers }
 }
 
 /// What the controller reads off the rider each tick: the bike's frame and motion as the interface
