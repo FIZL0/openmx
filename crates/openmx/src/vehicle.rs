@@ -2503,9 +2503,12 @@ impl CarRide {
     }
 
     /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
-    /// unloaded, and [`CAR_DROP`] more.
+    /// unloaded, and [`CAR_DROP`] more. A tire's bottom is one radius under its node, where the car's
+    /// suspension hangs it ([`game_sim::car::Wheel::drop`]); two radii stood each car a radius too
+    /// high, and the drop spun a driven car's wheels up enough that over 100% Car acceleration held
+    /// it on landing (P370a).
     pub fn rest_height(&self) -> f32 {
-        let lowest = (0..4).map(|k| self.model.tire_nodes[k].y() - 2.0 * self.car.tires[k].radius.0).fold(f32::MAX, f32::min);
+        let lowest = (0..4).map(|k| self.model.tire_nodes[k].y() - self.car.tires[k].radius.0).fold(f32::MAX, f32::min);
         CAR_DROP - lowest
     }
 

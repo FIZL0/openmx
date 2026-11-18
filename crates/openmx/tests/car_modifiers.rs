@@ -3,7 +3,8 @@
 //! ATV's cars' launch off over 100% because a freshly taken one lands on the gas inside it and is held
 //! (`tests/mxvatv_car_modifiers.rs`). The stock cars are taken with theirs spent, and a clutch drop's
 //! launch over 100% does not hold them, so their knob leaves the launch alone. Each test skips without
-//! a disc.
+//! a disc. P370a: the take stood the cars a tire radius too high, and over 100% the drop held them on
+//! landing; stood right, a car taken on the gas is away at every value.
 //!
 //! `src/vehicle.rs` is compiled in by path, the way `tests/machine_modifiers.rs` takes it.
 
@@ -43,6 +44,7 @@ fn ground_speed(b: &game_sim::biplane::Body) -> f32 {
 /// One tick of a ride: the ground speed, the launch's boost and its timer and length.
 struct Tick {
     speed: f32,
+    grounded: bool,
     boost: F,
     timer: F,
     time: F,
@@ -64,7 +66,7 @@ fn drive(machines: &game_render::disc::Res, machine: vehicle::Machine, mods: &Mo
             pad.poll(F(DT), &Report::from_buttons(held(t)), &mut events);
             car.step(&pad, &table, &tables.ride, F(DT), &mut floor);
             let m = car.driven.as_ref().unwrap();
-            Tick { speed: ground_speed(&m.body), boost: m.drivetrain.launch_boost, timer: m.launch.timer, time: m.launch.time }
+            Tick { speed: ground_speed(&m.body), grounded: m.wheels.iter().any(|w| w.s.grounded), boost: m.drivetrain.launch_boost, timer: m.launch.timer, time: m.launch.time }
         })
         .collect()
 }
@@ -125,6 +127,39 @@ fn a_clutch_drop_over_100_is_not_held() {
             let b = drive(&machines, machine, &with(Knob::CarAccel, pct), 150, &hands);
             println!("{machine:?} {pct}%: {} / {} ft/s 1 / 2 s after the drop (100%: {one} / {two})", b[119].speed, b[149].speed);
             assert!(b[119].speed >= one * 0.5 && b[149].speed >= two * 0.8, "{machine:?} held at {pct}%: {} {}", b[119].speed, b[149].speed);
+        }
+    }
+}
+
+/// P370a: a car is taken with its tires' bottoms half a foot over the floor, so it is down in 6
+/// ticks (it was 12 or 13 when the take counted the tires' radius twice, and the drop spun its rear
+/// wheels up).
+#[test]
+fn a_taken_car_lands_at_once() {
+    let Some(machines) = machines() else { return println!("skipped: no disc") };
+    for machine in CARS {
+        let ride = drive(&machines, machine, &Mods::original(), 20, &|_| Control::Cross.mask());
+        let down = ride.iter().position(|t| t.grounded);
+        assert!(down.is_some_and(|t| t <= 6), "{machine:?} first down at tick {down:?}");
+    }
+}
+
+/// P370a: on the gas from the take, every 10% from 110 to the knob's top, each car is at least half
+/// as fast as at 100% a second in and 0.9 times two seconds in. Held, the baja was at 11.7 against
+/// 28 ft/s a second in at every value, and the monster truck at 21 against 35 from 180%; the slowest
+/// now (the baja at 200%, about 25 against 37) spins its rear wheels on the torque it is given.
+#[test]
+fn a_car_taken_on_the_gas_over_100_is_not_held() {
+    let Some(machines) = machines() else { return println!("skipped: no disc") };
+    let gas = |_| Control::Cross.mask();
+    for machine in CARS {
+        let stock = drive(&machines, machine, &Mods::original(), 60, &gas);
+        let (one, two) = (stock[29].speed, stock[59].speed);
+        assert!(one > 20.0, "{machine:?} at 100% is away: {one}");
+        for pct in (110..=Knob::CarAccel.most()).step_by(10) {
+            let b = drive(&machines, machine, &with(Knob::CarAccel, pct), 60, &gas);
+            println!("{machine:?} {pct}%: {} / {} ft/s 1 / 2 s in (100%: {one} / {two})", b[29].speed, b[59].speed);
+            assert!(b[29].speed >= one * 0.5 && b[59].speed >= two * 0.9, "{machine:?} held at {pct}%: {} {}", b[29].speed, b[59].speed);
         }
     }
 }
