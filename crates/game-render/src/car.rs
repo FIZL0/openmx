@@ -15,9 +15,9 @@
 //!   tire's compression and turned about y by its steer (the rears' by the steer times
 //!   `RearTireSteerScale`, which the caller gives); each tire under it spins about x and is
 //!   stretched in y toward `MaxTireScale` as it is compressed. Each lower strut is lifted with its
-//!   hub. The two axles are lifted by their pair's mean compression and rolled about z to meet both
-//!   hubs; each drive line is aimed at its axle node, and each swingarm at its swingarm node, which
-//!   rides the lower strut.
+//!   hub. The two axles are lifted by their pair's mean compression and rolled about z by the
+//!   pair's difference across the hubs' spread; each drive line looks from its axle node to itself,
+//!   and each swingarm from itself to its swingarm node, which rides the lower strut.
 //! * **The baja and the buggy** ([`ARMS`]): each front tire hangs under a wheel hub under the upper
 //!   arm. The hub is turned about y by the steer, the tire spun about x; the upper arm swings about
 //!   z by 1.25 × compression ÷ (the front right hub's distance from its upper arm) radians, up on
@@ -26,13 +26,13 @@
 //!   of the two rear tires' compressions; they spin about x and are stretched as the truck's. Every
 //!   strut is a pair of nodes, each aimed at the other.
 //!
-//! The baja and the buggy are posed as the original writes them ([`buggy`], S264): every turn set
-//! afresh, each aim a frame built from an up vector and the target, matched node for node against
-//! the original's own matrices in a driven buggy's image (`tests/car.rs`). The truck's aims, and
-//! the rig of a model without the buggy's nodes (MD157's cars), are still the port's own form: the
-//! node turned, about its own axis where the original turns about one, by the turn that takes the
-//! target from where it was in the bind pose to where it is now, so such a car at rest is drawn
-//! exactly as the model is.
+//! The baja and the buggy are posed as the original writes them ([`buggy`], S264), and so is the
+//! truck ([`truck`], S343): every turn set afresh, each aim a frame built from an up vector and the
+//! target, matched node for node against the original's own matrices in a driven buggy's and a
+//! parked truck's image (`tests/car.rs`). The rig of a model without those nodes (MD157's cars) is
+//! still the port's own form: the node turned, about its own axis where the original turns about
+//! one, by the turn that takes the target from where it was in the bind pose to where it is now, so
+//! such a car at rest is drawn exactly as the model is.
 //!
 //! **The driver.** The seat is where the plane's and the helicopter's pilots sit to the model's four
 //! limb nodes ([`SEAT`]), carried to the car ([`seat`]). The `.phy`'s `[Animation]`
@@ -261,7 +261,9 @@ pub fn pose(model: &Model, tires: &[Tire; 4]) -> Vec<M4> {
     let mut local: Vec<M4> = model.nodes.iter().map(|n| n.local).collect();
     let bind = compose(model, &local);
     if find(model, HUBS[0]).is_some() {
-        truck(model, &mut local, &bind, tires);
+        if !truck(model, &mut local, &bind, tires) {
+            truck_aims(model, &mut local, &bind, tires);
+        }
     } else {
         if !buggy(model, &mut local, &bind, tires) {
             arms(model, &mut local, &bind, tires);
@@ -288,9 +290,107 @@ pub(crate) fn lift(local: &mut M4, by: f32) {
     local.0[3][1] += by;
 }
 
-/// The truck's rig: hubs and lower struts lifted, axles lifted and rolled, then the drive lines and
-/// swingarms aimed.
-fn truck(model: &Model, local: &mut [M4], bind: &[M4], tires: &[Tire; 4]) {
+/// The truck's two axles, front then rear: the axle, the node its drive line looks from, and the
+/// drive line, which hangs under the axle.
+pub const AXLES: [[&str; 3]; 2] = [["FrontAxle", "FrontAxleNode", "FrontDriveLine"], ["RearAxle", "RearAxleNode", "RearDriveLine"]];
+
+/// The truck's corners, in [`TIRES`]' order, as its strut and swingarm nodes are named.
+const CORNERS: [&str; 4] = ["FrontLeft", "FrontRight", "RearLeft", "RearRight"];
+
+/// Whether `model` carries every node of the truck's rig as the original poses it ([`truck`]): the
+/// four [`HUBS`] and [`TIRES`], each corner's lower strut and its two swingarms and their nodes, and
+/// the [`AXLES`]. A model without them is posed by the port's own aims.
+pub fn has_truck_rig(model: &Model) -> bool {
+    let corners = CORNERS.iter().flat_map(|c| {
+        [format!("{c}LowerStrut"), format!("{c}UpperSwingarm"), format!("{c}LowerSwingarm"), format!("{c}UpperSwingarmNode"), format!("{c}LowerSwingarmNode")]
+    });
+    let names: Vec<String> = HUBS.iter().chain(TIRES.iter()).chain(AXLES.iter().flatten()).map(|s| s.to_string()).chain(corners).collect();
+    names.iter().all(|n| find(model, n).is_some())
+}
+
+/// The frame that looks along `dir` with its y as near `up` as it goes, as the original builds it:
+/// rows [up' × dir, up', dir], up' = dir × (up × dir), both made unit.
+fn look(dir: V3, up: V3, at: [f32; 4]) -> M4 {
+    let along = dir.norm();
+    let square = dir.cross(up.cross(dir)).norm();
+    of_rows(square.cross(along), square, along, at)
+}
+
+/// A frame of the model's space taken into node `i`'s parent's, as its local: the parent's turn
+/// undone (a rigid one, so turned back), the node's place kept.
+fn into_parent(model: &Model, local: &mut [M4], now: &[M4], i: usize, frame: M4) {
+    let p = model.nodes[i].parent.map_or(M4::IDENTITY, |p| now[p]);
+    let back = M4(std::array::from_fn(|r| if r == 3 { [0.0, 0.0, 0.0, 1.0] } else { [p.0[0][r], p.0[1][r], p.0[2][r], 0.0] }));
+    let keep = local[i].0[3];
+    local[i] = frame.mul(back);
+    local[i].0[3] = keep;
+}
+
+/// The truck's rig as the original writes it (S343), every turn set afresh:
+///
+/// * Each hub is put at its bind place lifted by its tire's compression and set about y by its
+///   steer; each tire is set about x by its spin and stretched in y by its scale; each lower strut
+///   is put at its bind place lifted by its tire's compression.
+/// * Each axle is put at its bind place lifted by its pair's mean compression and set about z by
+///   the angle whose cosine is w ÷ √(w² + d²), w the front hubs' spread across and d the right
+///   tire's compression less the left's, signed as d.
+/// * Each drive line, and then each swingarm, takes the frame that looks from a fixed place to the
+///   node it reaches for, y as near up as it goes: the drive line from its axle node's bind place
+///   to its own place, the swingarm from its own bind place to its swingarm node, which rides the
+///   lower strut. Its place is kept.
+///
+/// False, and nothing written, for a model without the rig's nodes ([`has_truck_rig`]).
+fn truck(model: &Model, local: &mut [M4], bind: &[M4], tires: &[Tire; 4]) -> bool {
+    if !has_truck_rig(model) {
+        return false;
+    }
+    let at = |name: &str| find(model, name).expect("checked by has_truck_rig");
+    let (x, y, z) = (v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0));
+    for (k, tire) in tires.iter().enumerate() {
+        let hub = at(HUBS[k]);
+        local[hub].0[3][1] = origin(bind[hub]).y + tire.compression;
+        set(&mut local[hub], y, tire.steer);
+        let t = at(TIRES[k]);
+        set(&mut local[t], x, tire.spin);
+        let keep = local[t].0[3];
+        let mut s = M4::IDENTITY;
+        s.0[1][1] = tire.scale;
+        local[t] = local[t].mul(s);
+        local[t].0[3] = keep;
+    }
+    for (k, tire) in tires.iter().enumerate() {
+        let strut = at(&format!("{}LowerStrut", CORNERS[k]));
+        local[strut].0[3][1] = origin(bind[strut]).y + tire.compression;
+    }
+    let spread = origin(bind[at(HUBS[1])]).x - origin(bind[at(HUBS[0])]).x;
+    for (a, pair) in [(0, [0, 1]), (1, [2, 3])] {
+        let axle = at(AXLES[a][0]);
+        let (left, right) = (tires[pair[0]].compression, tires[pair[1]].compression);
+        local[axle].0[3][1] = origin(bind[axle]).y + (left + right) * 0.5;
+        let d = right - left;
+        let angle = (spread / (spread * spread + d * d).sqrt()).clamp(-1.0, 1.0).acos();
+        set(&mut local[axle], z, if d < 0.0 { -angle } else { angle });
+    }
+    let now = compose(model, local);
+    for [_, from, line] in AXLES.map(|a| a.map(at)) {
+        let frame = look(origin(now[line]).sub(origin(bind[from])), y, [0.0, 0.0, 0.0, 1.0]);
+        into_parent(model, local, &now, line, frame);
+    }
+    for level in ["Upper", "Lower"] {
+        for corner in CORNERS {
+            let arm = at(&format!("{corner}{level}Swingarm"));
+            let node = at(&format!("{corner}{level}SwingarmNode"));
+            let frame = look(origin(now[node]).sub(origin(bind[arm])), y, [0.0, 0.0, 0.0, 1.0]);
+            into_parent(model, local, &now, arm, frame);
+        }
+    }
+    true
+}
+
+/// The truck's rig in the port's own form, for a model without every node of the original's
+/// ([`has_truck_rig`]): hubs and lower struts lifted, axles lifted and rolled, then the drive lines
+/// and swingarms aimed.
+fn truck_aims(model: &Model, local: &mut [M4], bind: &[M4], tires: &[Tire; 4]) {
     let at = |name: &str| find(model, name);
     for (k, tire) in tires.iter().enumerate() {
         if let Some(h) = at(HUBS[k]) {
