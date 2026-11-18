@@ -150,7 +150,10 @@ pub struct Tire {
     /// tires, so a tire without the key uses the previous tire's count (zero for the first).
     pub number_of_surfaces: i32,
     /// `<Tire> Surface 1` up to the count — but only the first [`MAX_SURFACES`] reach the tire.
-    pub surfaces: Vec<Surface>,
+    pub surfaces: Vec<Surface>,    /// Not a key: what Game Modifiers' Car acceleration raises a driven tire's forward grip by while
+    /// it drives the car forward (P373), held under what would lift the front tires off the floor
+    /// ([`Wheel::forces`]). 1 as read.
+    pub drive_grip: F,
 }
 
 /// One `<Tire> Surface N` section: the tire model's coefficients for one ground type. Every key
@@ -675,6 +678,7 @@ impl Tire {
             max_braking_slip,
             number_of_surfaces,
             surfaces,
+            drive_grip: F::ONE,
         }
     }
 }
@@ -2291,6 +2295,9 @@ impl Wheel {
         if !self.s.grounded {
             return;
         }
+        if tire.drive_grip > F::ONE {
+            self.drive_grip(tire, body);
+        }
         let m = &self.frame.0;
         let f = self.s.force;
         let acc = Vf::madd(m[0].mul(f.bc(Field::X)), m[1], f.bc(Field::Y));
@@ -2301,6 +2308,34 @@ impl Wheel {
             let arm = Vf::opmsub(Vf::opmula(lever, world), world, lever);
             body.add_moment_local(crate::biplane::unturn(q, arm));
         }
+    }
+}
+
+impl Wheel {
+    /// Game Modifiers' raise of a driven tire's forward force (P373): times [`Tire::drive_grip`]
+    /// while it pushes the car forward on a forward-spinning wheel, but never past `b / (h mu)`,
+    /// the grip at which the drive force on this tire, with all the car's weight on it, would lift
+    /// the other axle (`b` the centre of mass's distance ahead of the contact along the ground, `h`
+    /// its height over it, `mu` the surface's friction). A car whose file's grip is already past
+    /// that (the monster truck) gets no raise. The force read back next tick (`last_force`) is the
+    /// raised one, so the wheel spins down on it.
+    fn drive_grip(&mut self, tire: &Tire, body: &crate::biplane::Body) {
+        use crate::contact::minus;
+        let s = &mut self.s;
+        let along = F(s.force.z());
+        if along <= F::ZERO || s.spin <= F::ZERO {
+            return;
+        }
+        let m = &self.frame.0;
+        let lever = minus(body.position, s.contact);
+        let (b, h) = (dot3(lever, m[2]), dot3(lever, m[1]));
+        let mu = s.friction_scale * tire.surface(s.surface).friction_peak;
+        if b <= F::ZERO || h <= F::ZERO || mu <= F::ZERO {
+            return;
+        }
+        let g = tire.drive_grip.min(b / (h * mu));
+        s.force[2] = (along * g).0;
+        s.last_force[2] = s.force[2];
     }
 }
 
