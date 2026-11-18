@@ -215,13 +215,13 @@ impl Image<'_> {
 }
 
 /// A bike's physics file and the bike's collision files, off the disc.
-struct Bikes {
+pub(crate) struct Bikes {
     disc: Disc,
-    col: Arc<BikeCol>,
+    pub(crate) col: Arc<BikeCol>,
 }
 
 impl Bikes {
-    fn open() -> Option<Bikes> {
+    pub(crate) fn open() -> Option<Bikes> {
         let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
         let res = disc.res("Tracks\\free09_2.res").expect("free09's second archive");
         let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
@@ -231,7 +231,7 @@ impl Bikes {
     }
 
     /// `name` (`Bike\Race250A.phy`) out of whichever bike archive carries it.
-    fn phy(&mut self, name: &str, tables: &Tables) -> Phy {
+    pub(crate) fn phy(&mut self, name: &str, tables: &Tables) -> Phy {
         let leaf = name.rsplit('\\').next().unwrap().to_ascii_lowercase();
         let bikes: Vec<String> = self
             .disc
@@ -252,7 +252,7 @@ impl Bikes {
 }
 
 /// The rider at `r`, built on `phy` (named `name`) and seeded off the image.
-fn c33_bike(ee: &Ee, r: u32, phy: &Phy, name: &str, col: &Arc<BikeCol>) -> Bike {
+pub(crate) fn c33_bike(ee: &Ee, r: u32, phy: &Phy, name: &str, col: &Arc<BikeCol>) -> Bike {
     let im = Image { ee, rider: r };
     let c = im.at(0x7a4);
     let mut bike = Bike::new(phy, im.mounts(), im.vf(c + 0x60), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
@@ -724,7 +724,7 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
             // nodes' now: the drive moved the nodes after the image's last emit (tests/ai/draws.rs).
             let places = |p: Place| entries.iter().filter(|e| e.emitter.place == p).count();
             assert_eq!((places(Place::Front), places(Place::Exhaust)), (2, 1), "{}'s front and exhaust emitters", C33_NAMES[k]);
-            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls: Vec::new() })
+            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls: Vec::new(), wrecked: false })
         })
         .collect();
     riders.sort_by_key(|r| r.0);

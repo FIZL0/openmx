@@ -6650,6 +6650,10 @@ vehicle_fx_pcc_update boot 0x003d7a30 each masked ragdoll sphere touching: emit 
 #   clear -> skip): flags ground +0x18 | scene +0x1c | none; zone = byte entry + sphere +0x3c + 0x1c;
 #   zone != 0xff and Disable lets the flags -> prev = point - (*(+0x80))+0x70 x dt (.xyz), emit.
 #   The manager runs after the wreck bike's node update (0x0026f800) and before rider_body_update.
+# S483 — the feed's wreck word (+0x24) is rider +0x868, the state pack's (0x00258d50) copy of +0x748,
+#   made before the frame's verdict: after each frame +0x868 = +0x748 as the frame before left it
+#   (s325-nose76 reason 1 at 2614, copy 2615; s325-flat reason 5). The collision entries switch on
+#   two frames after the verdict (2616) and emit from the third (2617). game_sim::dust RiderDust::wrecked.
 emitter_view_test   boot 0x0014d8c0 emitter vt +0x94 (emitter, point or 0 = +0x40): once a frame (frame
 #                                    *(*0x0041f770+0x374) vs +0x258) +0x248 = 1, +0x254 = 0; camera =
 #                                    *(*0x0048a560) (none, or *0x0041f788 == 0 -> +0x248 0, +0x254 1);

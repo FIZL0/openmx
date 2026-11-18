@@ -72,6 +72,9 @@
 //! - **The emit** at a contact takes the contact as its point and the contact less the velocity
 //!   times the frame as its previous one, and makes the speed test. An emitter just switched on only
 //!   takes the point, as in the emitter pass; an emitter **culled** makes nothing at all.
+//! - **The wreck flag** they switch by is the snapshot's copy of the wreck reason, which the state
+//!   pack makes before the frame's verdict: a wreck's dust switches on two frames after its verdict
+//!   and emits from the third (S483, [`RiderDust::wrecked`]).
 //! - **The view test** runs once a frame after the manager, on the emitter's point
 //!   ([`Emitter::view_test`]): culled past `FarCullDistance` from the camera, or behind it and past
 //!   `DirectionalCullDistance`. An emitter switched on carries the last frame's answer, made at its
@@ -599,6 +602,10 @@ pub struct RiderDust {
     /// The bone collisions the [`Kind::Spheres`] entries read: the body's, as the frame before left
     /// them (S422, [`Touches`]).
     pub balls: Vec<Option<Ball>>,
+    /// The rider's wreck as the frame before left it, which this frame's snapshot carries (S483):
+    /// the snapshot's wreck word is the state pack's copy of the reason, made before the frame's
+    /// verdict, so a wreck reaches the manager two frames after its verdict.
+    pub wrecked: bool,
 }
 
 impl RiderDust {
@@ -699,8 +706,10 @@ impl crate::Sim {
             spinning: w.slip.spinning,
             side: w.side_per_load,
         };
+        // The snapshot's wreck is the frame before's (S483, [`RiderDust::wrecked`]).
+        let wrecked = rider.crash.is_some();
         let feed = Feed {
-            wrecking: rider.crash.is_some(),
+            wrecking: dust.riders[i].wrecked,
             throttle: r.held.gas,
             clutch: r.mv.clutch_in,
             airspeed: r.chassis.speed,
@@ -727,6 +736,7 @@ impl crate::Sim {
         let Some(dust) = self.dust.as_deref_mut() else { return };
         let view = dust.view.unwrap_or(View { at: bike.0[3], forward: Vf([0.0; 4]) });
         let rider = &mut dust.riders[i];
+        rider.wrecked = wrecked;
         let draws = rider.frame_with(feed, object, balls, &bike, &tables.ride.curve, dt);
         // The emitters' view tests, after the manager has run (S422).
         for e in &mut rider.entries {
