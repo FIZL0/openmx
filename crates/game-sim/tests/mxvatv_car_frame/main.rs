@@ -2507,6 +2507,7 @@ mod golf_step; // MD156a: the golf cart's class step
 mod truck_step; // MD156b: the monster truck's class step
 mod untamed; // MD161a: MD160's Untamed monster-truck drives beside SLUS-21701
 mod untamed_terrain; // MD234: those drives with the ground and noise from the port
+mod untamed_sandrail; // MD81f: Untamed's sandrail drives beside SLUS-21701
 
 use own_back::*;
 use own_calls::*;

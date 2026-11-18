@@ -1,0 +1,6 @@
+# MD81f (MD81e's, unchanged) (MD164's throttle.pad): gas from the Rocksbury spawn, straight on, Cross held full.
+sleep 15t
+down cross
+sleep 300t
+up cross
+sleep 60t

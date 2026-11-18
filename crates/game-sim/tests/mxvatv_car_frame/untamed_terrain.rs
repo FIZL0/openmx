@@ -40,7 +40,7 @@ fn rocksbury_terrain() -> Option<&'static atv_ground::Terrain<'static>> {
 /// before the image was taken; the original builds them off `rand()` on its first sample).
 fn port_of(d: &UDrive) -> Option<UPort> {
     let terrain = rocksbury_terrain()?;
-    let pre = u_image(d.image)?;
+    let pre = u_image(d.set, d.image)?;
     assert_eq!(pre.u32_at(U_NOISE_UNBUILT), 0, "{}: the noise's tables are built", d.name);
     let perm: [u32; 256] = std::array::from_fn(|k| pre.u32_at(U_NOISE_PERM + 4 * k as u32));
     let mut sorted = perm;
@@ -53,7 +53,7 @@ fn port_of(d: &UDrive) -> Option<UPort> {
 /// Drive `d` beside, through the frame or the Ride, with every ground query answered by
 /// [`atv_ground::query`] on Rocksbury and every noise sample by [`SmoothNoise::at_accumulated`]: the
 /// answers the original's own ground query and noise gave are only checked against.
-fn terrain_test(d: &UDrive, ride: bool) {
+pub(crate) fn terrain_test(d: &UDrive, ride: bool) {
     let Some(port) = port_of(d) else { return };
     let Some(s) = u_beside_with(d, ride, Some(port)) else { return };
     assert!(s.frames > 0, "{}: no frame compared", d.name);

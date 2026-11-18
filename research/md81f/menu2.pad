@@ -1,0 +1,10 @@
+# MD81f menu step 2 (MD164's menu2.pad): up to Start Event, Cross, the load (about 50 s): the sandrail at the Rocksbury spawn (spawn.p2s).
+sleep 20t
+down up
+sleep 9t
+up up
+sleep 36t
+down cross
+sleep 9t
+up cross
+sleep 1500t
