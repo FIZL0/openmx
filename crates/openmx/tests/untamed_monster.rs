@@ -63,6 +63,17 @@ fn pack(id: &str) -> bool {
     there
 }
 
+/// Whether pack `id` lists `car`; says SKIPPED when not (an `untamed_cars` imported before MD161b
+/// has the baja, the golf cart and the sandrail alone).
+fn lists(id: &str, car: &str) -> bool {
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(packs().join(id).join("mod.json")).unwrap()).unwrap();
+    let there = manifest["cars"].as_array().is_some_and(|cs| cs.iter().any(|c| c["car"] == car));
+    if !there {
+        eprintln!("SKIPPED: mods/machines/{id} lists no {car} (import-atv untamed-cars from openmx-mods' openmx-MD161b makes it)");
+    }
+    there
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md161b-untamed-monster");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -144,7 +155,7 @@ fn load(curve: &CurveTable) -> Load {
 /// Ride's made here off the pack with `Load::untamed`.
 #[test]
 fn the_untamed_monster_truck_drives_in_the_shell_on_untameds_step() {
-    if !pack("untamed_cars") {
+    if !pack("untamed_cars") || !lists("untamed_cars", "monstertruck") {
         return;
     }
     let switched = tape("on.tape", 300, FULL, &["30 mxvatv_car", "280 bike"]);

@@ -138,6 +138,16 @@ fn load(curve: &CurveTable) -> Load {
     load
 }
 
+/// The car's collision record's ray probe as the shell rigs it (MD149b): the `col` the pack's
+/// mod.json lists for `name`, or `None` with none listed (the shell's car then has no record).
+fn riding(name: &str) -> Option<game_sim::track::Rays> {
+    let dir = packs().join("untamed_cars");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("mod.json")).unwrap()).unwrap();
+    let col = manifest["cars"].as_array()?.iter().find(|c| c["car"] == name)?["col"].as_str().filter(|c| !c.is_empty())?.to_string();
+    let bytes = std::fs::read(dir.join(&col)).unwrap_or_else(|e| panic!("{col}: {e}"));
+    Some(game_sim::track::Rays::parse(&bytes).unwrap_or_else(|e| panic!("{col}: {e}")))
+}
+
 /// **The Untamed baja drives in the shell on Untamed's step**, bit for bit the Ride's made here off the
 /// pack with `Load::untamed`; picked and never switched to, the bike's ride is the one with none picked.
 #[test]
@@ -169,6 +179,9 @@ fn the_untamed_baja_drives_in_the_shell_on_untameds_step() {
         let yaw = f(3).atan2(f(4));
         let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
         let mut ride = load.ride(Vf::new(f(0), f(1) + lift, f(2), 1.0), quat, F::ZERO);
+        if let Some(riding) = riding("baja") {
+            ride.rig(&load, &riding);
+        }
         let (mut input, table) = (Manager::connected(), Table::SHIPPED);
         for _ in 0..IN {
             input.tick(dt, &[report, Report::idle()]);
