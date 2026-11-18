@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai: _, seek: _, notes: _, dust: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _ } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -148,7 +148,45 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         RACE.put(&mut out);
         race.put(&mut out);
     }
+    // The AI riders (S327) the same way, behind theirs.
+    if let Some(ai) = ai {
+        AI_LANE.put(&mut out);
+        ai_put(ai, &mut out);
+    }
     out
+}
+
+/// What begins [`encode`]'s AI riders section.
+const AI_LANE: u64 = u64::from_le_bytes(*b"S327ai\0\0");
+
+/// The Sim's AI riders in [`encode`]'s codec, which the state's hash walks as one blob (S327): every
+/// field of the lane but its tables and its race's edge net, which this machine works out itself.
+pub(crate) fn ai_bytes(ai: &crate::ai::Lane) -> Vec<u8> {
+    let mut out = Vec::new();
+    ai_put(ai, &mut out);
+    out
+}
+
+fn ai_put(ai: &crate::ai::Lane, out: &mut Vec<u8>) {
+    let crate::ai::Lane { seek, tables: _, rng, pilots, net, cards, edge: _ } = ai;
+    seek.put(out);
+    rng.put(out);
+    pilots.put(out);
+    net.put(out);
+    cards.put(out);
+}
+
+/// [`ai_put`]'s bytes into a lane on `here`'s tables and edge net.
+fn ai_take(r: &mut Reader<'_>, here: &crate::ai::Lane) -> Result<crate::ai::Lane, String> {
+    Ok(crate::ai::Lane {
+        seek: Wire::take(r)?,
+        tables: Arc::clone(&here.tables),
+        rng: Wire::take(r)?,
+        pilots: Wire::take(r)?,
+        net: Wire::take(r)?,
+        cards: Wire::take(r)?,
+        edge: here.edge.clone(),
+    })
 }
 
 /// What begins [`encode`]'s race section.
@@ -343,6 +381,13 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         race = Some(Box::new(Wire::take(&mut r)?));
     }
+    // The AI riders keep this machine's tables, so a state with them needs a lane here.
+    let mut ai: Option<Box<crate::ai::Lane>> = None;
+    if r.bytes.get(r.at..r.at + 8) == Some(&AI_LANE.to_le_bytes()[..]) {
+        r.at += 8;
+        let here = sim.ai.as_deref().ok_or("AI riders in the state, none here")?;
+        ai = Some(Box::new(ai_take(&mut r, here)?));
+    }
     // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
     // this seat drives the same car here; otherwise left empty for the shell to put back.
     if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
@@ -429,10 +474,10 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         traffic,
         event,
         race,
-        ai: sim.ai.take(),
+        ai,
         // The seeker world (S316) is not sent: nothing steps it yet, so this machine's is the map's.
         seek: sim.seek.take(),
-        // The engine notes (S328b) are not sent either, like the lane.
+        // The engine notes (S328b) are not sent either, like the seeker world.
         notes: sim.notes.take(),
         // Nor the dust (S328c).
         dust: sim.dust.take(),
@@ -1878,3 +1923,46 @@ impl Wire for crate::quad::Call {
         })
     }
 }
+
+// The Sim's AI riders (S327): each pilot's brain, character and card words, the seeker world they
+// learn into, the cards they read each other off and the track's AI path net, every word a think
+// writes; the controllers' tables and the race track's edge net are worked out here, kept local.
+wire!(crate::ai::Pilot { racer, character, wander, levers, recovery, card, seat, ignore });
+wire!(crate::ai::Racer { brain, senses, moves, seeker, reach, min_speed, assist_x, assist_z, controls, bar_rest, tuning, avoid, vehicle, plan, habits, filter, weights, listening, listeners, follower, driver });
+wire!(crate::ai::Brain { kind, mode, flags, speed, forward_y, stuck, climb, steer, pitch, throttle, brake });
+wire!(crate::ai::Climb { hold, steep, timer, speed });
+wire!(crate::ai::Senses { last_position, frame, velocity, acceleration, spin, speed, ground_normal, ground, flags, bumps });
+wire!(crate::ai::seek::Seeker { flags, flags2, set, target, last_target, jump, index, state, tries, tolerance, learnt, aim_step, speed_step, learn_step, last_miss, miss, lead, distance, follow, aim, heading, speed });
+wire!(crate::ai::seek::Reach { base, max, gain });
+wire!(crate::ai::Controls { steer, pitch, throttle, brake, heading, aim, roll, flat_forward, target_speed });
+wire!(crate::ai::Tuning { steering_gain, oversteer_gain, aim_gain, pitch_distance, pitch_gain, pitch_filter, landing_pitch, slow_tolerance, fast_tolerance, cruise_base, cruise_gain, brake_gain, steer_scale, pitch_scale });
+wire!(crate::ai::AvoidTuning { near_range, far_range, far_radius, far_response, far_approach_limit, far_min_braking_speed, far_braking_response, near_separation, near_response, near_braking_response, passing_speed, near_min_braking_speed, front_window, rear_window, drift_match, far_heading_cos, edge_look_ahead, edge_push, feelers, feeler_height, feeler_length });
+wire!(crate::ai::VehicleTuning { probe_ahead, drop_run, climb_limit, climb_speed, drop_limit, turn_limit });
+wire!(crate::ai::TrickPlan { cooldown, since, chance, estimate, slot, air });
+wire!(crate::ai::Habits { mode, node, start_state, start_preload, flags, moves, speed, steer, pitch, throttle, brake, position, forward, ground, low_air, direction, preload_base, preload_per_speed, preload, pull_back_amount, lag_hang_time, lag_chance, lag_time, lag, horse_power, brilliant_chance, brilliant_min, brilliant_random, brilliant, brilliant_roll, gate_delay, gate_clock, gate_wait, wheelie_max, wheelie, wheelie_lean, cross_up_side, cross_up_time, cross_up, cross_up_chance, cross_up_min, cross_up_max, cross_up_height, low_air_bar, power_scale, preload_force, preload_firing, preload_clock, preload_clock_start, max_preload, clutch, forward_speed, air_time, racing, lag_clock, keeper_state });
+wire!(crate::ai::HabitNode { flags, speed, gain });
+wire!(crate::ai::SteerFilter { rate, jitter, gain, out });
+wire!(crate::ai::Weights { heading, aim });
+wire!(crate::ai::Listener { state, wants });
+wire!(crate::ai::follow::Follower { flags, state, position, forward, own_speed, spot, draws, aim, heading, speed, angles, drift, kick, kick_time, kick_decay, kick_clock, drift_target, drift_low, drift_high, drift_rate, drift_max, drift_clock, period_low, period_high, period, reach, cruise, look, look_cone });
+wire!(crate::ai::DriverWords { gate_gain, goal_word, goal_speed, last_speed });
+wire!(crate::ai::Character { tuning, avoid, alod, steering_jitter_filter, steering_rate_filter, min_random_offset, max_random_offset, max_drift_size, max_drift_rate, no_track_look_ahead, no_track_min_turn, min_look_ahead, max_look_ahead, roll_gain, roll_distance, min_stunt_interval, stunt_probability, profile });
+wire!(crate::ai::Alod { window, lower_limit, upper_limit, speed, lead_window });
+wire!(crate::ai::Profile { alod_window, alod_lower_limit, alod_upper_limit, alod_speed, alod_lead_window, look_ahead_gain, near_response, preload_success, pull_back_speed, pull_back_amount, landing_lag_hang_time, landing_lag, landing_lag_time, horse_power, turn_rate_tweak, velocity_tweak, brilliant_moment, brilliant_min_duration, brilliant_random_duration, preload_per_speed, g_load_wreck, start_gate_delay, clutch_start_probability, wheelie_start_probability, wheelie_start_min, wheelie_start_max, wheelie_pull_back_clutch, wheelie_pull_back, crossup_probability, crossup_min_duration, crossup_max_duration, crossup_min_height });
+wire!(crate::ai::Pair { min, max });
+wire!(crate::ai::Triple { min, max, overdrive });
+wire!(crate::ai::Spread { min, max, overdrive, value });
+wire!(crate::ai::Wander { draws, drift, kick, kick_time, kick_decay, kick_clock, drift_target, drift_clock, period_low, period_high, period, cruise });
+wire!(crate::ai::Levers { steer, lean, gas, brake, reverse });
+wire!(crate::ai::Recovery { back_up, swerve, swerve_bar });
+wire!(crate::ai::Card { flags, settle, bike_word, progress });
+wire!(crate::ai::Seat { speed_scale, slow_radius, slow_speed, player, air_cone, look_ahead, bump_chance, race_phase, path_net, live });
+wire!(crate::ai::Other { active, marked, position, velocity, heading, speed, progress });
+wire!(crate::ai::seek::World { sets, targets, jumps, sequence, groups });
+wire!(crate::ai::seek::Set { picks, course, owner });
+wire!(crate::ai::seek::Course { targets, chance });
+wire!(crate::ai::seek::Owner { kind, player, position, hit_freeride });
+wire!(crate::ai::seek::Target { jump, done });
+wire!(crate::ai::seek::Jump { take_off, landing, setup });
+wire!(crate::ai::seek::Leg { velocity, aim, point, facing, learnt, spot });
+wire!(crate::ai::seek::Group { targets, point, active, open });
