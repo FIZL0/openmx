@@ -559,7 +559,7 @@ fn s336_the_feelers_meet_a_path_car() {
             let t = std::mem::take(&mut *theirs.borrow_mut());
 
             let mount = Mount { rider: ai::Rider { velocity, ..bike.rider }, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
-            let thought = pilot.think_among(mount, &mut world, &ridden, &mut seek_world, &tables, &bike.others, None, None, &mut rng, dt);
+            let thought = pilot.think_among(mount, &mut world, &ridden, &mut seek_world, &tables, &bike.others, None, None, None, &mut rng, dt);
 
             // The walk: the cars and the windmill, none AI_IGNORE, then (theirs) the plane, then the
             // bikes; the port's the same props by their place, then its bikes.
