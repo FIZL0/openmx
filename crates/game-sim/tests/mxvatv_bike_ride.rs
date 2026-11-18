@@ -13,7 +13,9 @@
 //!   input pass. Its words are the frame's inputs, and `ticks_land_one_row_later` ties them to the
 //!   tape;
 //! - the put-back spot ([`SPOT`]), which the game keeps outside this frame too. Row r's spot goes
-//!   into frame r + 1. Without it the flip's put-back lands on state04's spot.
+//!   into frame r + 1. Without it the flip's put-back lands on state04's spot. F31e: the pure-Rust
+//!   replays take none: after each frame the run's update keeps the spot, the original's in the
+//!   handing run and [`spot::frame`] in the Rust one, and both must be the row's.
 //!
 //! Everything else in the bike object is the interpreter's. The words it gets wrong are written
 //! outside this frame and read by nothing in it: the run stays bit-exact without them.
@@ -11194,11 +11196,139 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         let w = wrecked(|o| b.u32_at(BIKE + o));
         assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
         out.push(w);
-        poke(&mut a, row, &SPOT);
-        poke(&mut b, row, &SPOT);
+        // F31e: the put-back spot kept by the run's update after the frame, the original's in the
+        // first run and the port's in the second ([`spot::frame`]), each the row's; no poke.
+        if rust.contains(&"keep spot") {
+            keep_spot_original(&mut a);
+            let r0 = b.ran;
+            spot::frame(&mut SpotsInRam { ee: &mut b, map: &map });
+            FRAME_RAN.with(|n| n.set(n.get() + (b.ran - r0)));
+            let o = obj(row);
+            let want = |at: u32| o[at as usize / 4];
+            let off: Vec<String> = (0..SPOT[0].1 / 4)
+                .map(|i| SPOT[0].0 + 4 * i)
+                .filter(|&at| b.u32_at(BIKE + at) != want(at) || a.u32_at(BIKE + at) != want(at))
+                .map(|at| format!("+{at:#x}: {:#010x} / {:#010x} want {:#010x}", a.u32_at(BIKE + at), b.u32_at(BIKE + at), want(at)))
+                .collect();
+            assert!(off.is_empty(), "{name} row {r}: the kept spot (original / port) is not the row's\n  {}", off.join("\n  "));
+        } else {
+            poke(&mut a, row, &SPOT);
+            poke(&mut b, row, &SPOT);
+        }
     }
+
     eprintln!("{name}: nothing handed on answered {all:?}");
     Some((out, all, off))
+}
+
+use game_sim::handling::spot::{self, Spots};
+
+/// F31e: the bike's keep-spot (its vt `+0x3ac` through the run's base) and the sweep test, the
+/// category name table and the soft foliage's name; the categories a keep-spot passes over; the
+/// sphere's refile half.
+const KEEP_SPOT: u32 = 0x004a_a460;
+const SPOT_SWEEP: u32 = 0x0011_6a90;
+const NAME_TABLE_AT: u32 = 0x0038_d400;
+const SOFT_FOLIAGE_NAME: u32 = 0x0052_6a16;
+const SPOT_MASK_AT: u32 = 0x0054_2388;
+const SPOT_HALF: u32 = 0x0052_5270;
+
+/// F31e: the run's update as it reaches the bike, the keep the original's: [`spot::frame`]'s
+/// copies from the node, then the bike's keep-spot run by the interpreter.
+fn keep_spot_original(ee: &mut Ee) {
+    let (actor, run) = (ee.u32_at(BIKE + spot::ACTOR), ee.u32_at(BIKE + spot::RUN));
+    if actor == 0 || ee.u32_at(actor + 0x58) != 3 || run == 0 {
+        return;
+    }
+    let n = ee.u32_at(BIKE + spot::NODE);
+    for (to, from) in [(0x60, 0xa0), (0x120, 0x90), (0x130, 0x80)] {
+        for k in [0, 4, 8] {
+            ee.set_u32(run + to + k, ee.u32_at(n + from + k));
+        }
+    }
+    let flags = ee.u32_at(run + 8);
+    if flags & 2 != 0 && flags & 1 == 0 {
+        ee.set(28, GP);
+        ee.call(KEEP_SPOT, &[BIKE, run + 0x60, run + 0x120, run + 0x88, 1].map(u64::from), &[], BUDGET);
+    }
+}
+
+/// F31e: a category's bit (research/oracle.txt `# F31b5t`, the name table at `*NAME_TABLE_AT`: a
+/// count, then 32-byte names, searched by `strcmp`), read in Rust; a name not in the table is not
+/// added here but asserted against.
+fn category_in_ram(ee: &Ee, name: u32) -> u32 {
+    let cstr = |a: u32| (a..).map(|k| ee.u8_at(k)).take_while(|&c| c != 0).collect::<Vec<u8>>();
+    let table = ee.u32_at(NAME_TABLE_AT);
+    let want = cstr(name);
+    let n = ee.i32_at(table);
+    let i = (0..n.max(0) as u32).find(|&i| cstr(table + 4 + 32 * i) == want).unwrap_or_else(|| panic!("category {:?} not in the table", String::from_utf8_lossy(&want)));
+    1 << (i & 0x1f)
+}
+
+fn spot_quad(m: &mut impl node::Ram, at: u32) -> [u32; 4] {
+    [0, 4, 8, 12].map(|k| m.word(at + k))
+}
+
+/// F31e: the keep-spot's world in RAM, all Rust but the sweep: the ground query
+/// ([`game_sim::atv_ground::query`] over the map), the sphere's refile in the quadtree
+/// ([`attach::spatial_move`] on RAM, its heap calls the heap's port), the gather ([`gather_in_ram`]),
+/// a plant's part ([`plant_stand_in_ram`]) and the soft foliage's bit ([`category_in_ram`]). The
+/// sweep test, asked only with the rider off, is the original's: C15 never asks it.
+struct SpotsInRam<'a, 't> {
+    ee: &'a mut Ee,
+    map: &'t track::Terrain<'t>,
+}
+
+impl SpotsInRam<'_, '_> {
+    fn call(&mut self, f: u32, ints: &[u32]) -> u32 {
+        label(&format!("keep spot {f:#x}"));
+        self.ee.set(28, GP);
+        self.ee.call(f, &ints.iter().map(|&i| u64::from(i)).collect::<Vec<_>>(), &[], BUDGET);
+        self.ee.r(2) as u32
+    }
+}
+
+impl Spots for SpotsInRam<'_, '_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn ground(&mut self, g: u32, point: spot::Quad) -> (spot::Quad, spot::Quad) {
+        let ee = &*self.ee;
+        let t = ground::read_terrain(&|a| ee.u32_at(a), g, Some(self.map));
+        let (mut p, mut n) = (Vf(point.map(f32::from_bits)), Vf([0.0; 4]));
+        game_sim::atv_ground::query(&t, &mut p, Some(&mut n), None);
+        (p.0.map(f32::to_bits), n.0.map(f32::to_bits))
+    }
+    fn refile(&mut self, sphere: u32) {
+        let m = &mut NodeRam(self.ee);
+        let (centre, half) = (Vf::from_bits(spot_quad(m, sphere + 0x160)), Vf::from_bits(spot_quad(m, SPOT_HALF)));
+        attach::spatial_move(m, &ATTACH_GLOBALS, sphere + 0x18, centre, half, F(40.0));
+    }
+    fn gather(&mut self, list: u32, sphere: u32) {
+        gather_in_ram(self.ee, list, sphere, 1);
+    }
+    fn sweep(&mut self, sphere: u32, object: u32) -> bool {
+        let s = self.ee.u32_at(sphere + 0x7c);
+        self.call(SPOT_SWEEP, &[sphere, object, s]) != 0
+    }
+    fn plant_part(&mut self, plant: u32, i: u32) -> u32 {
+        plant_stand_in_ram(self.ee, plant, i as usize)
+    }
+    fn soft_foliage(&mut self) -> u32 {
+        category_in_ram(self.ee, SOFT_FOLIAGE_NAME)
+    }
+    fn mask(&mut self) -> u32 {
+        self.ee.u32_at(SPOT_MASK_AT)
+    }
+    fn ecosystem(&mut self) -> u32 {
+        self.ee.u32_at(ECO_AT)
+    }
 }
 
 /// Where two interpreters' RAMs (outside the stack and its scratch, as [`bytes_differ`]) and
@@ -11391,6 +11521,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "wreck camera",
             "wreck listeners dropped",
             "tape",
+            "keep spot",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -11414,7 +11545,8 @@ fn ride_replays_in_pure_rust() {
 /// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
 /// 125 and put back on row 193, with the interpreter running no instruction of any frame; F31: fed
 /// off the flip tape; F31d: the flip hold off the tape too (the port's flick on rows 66..71, past
-/// the clamp with the original's, [`the_tape_gives_every_reader_word`]).
+/// the clamp with the original's, [`the_tape_gives_every_reader_word`]); F31e: no spot poke, the
+/// spot kept by [`spot::frame`] after each frame.
 #[test]
 fn flip_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
