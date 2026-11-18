@@ -29,10 +29,10 @@ const C31_STATE: &str = "c31-sx01-ai4.ee.bin";
 /// The four AI-race capture by rider id (card id = player: 0 the human, 1–3 the AI riders).
 const C31_CSV: [&str; 3] = ["capture/c31/", "sx01-ai4-by-", "rider.csv"];
 
-/// The card flags the card's owner writes outside the race handler: the listeners' bits (S13c), and
-/// the jump watch, which the owner drops while its rider is down and sets again at the respawn (C31
-/// rider 1, frames 5915–6021). The Sim's owner keeps the watch on through a wreck: S429.
-const OWNER_FLAGS: u64 = 0xe0 | race_card_flags::WATCHES_JUMPS;
+/// The card flags the card's owner writes outside the race handler: the listeners' bits (S13c). The
+/// jump watch, which the owner drops while its rider is down and sets again at the respawn (C31
+/// rider 1, frames 5915–6021), is the Sim's own (S429, [`RaceCard::riding_bit`]).
+const OWNER_FLAGS: u64 = 0xe0;
 
 /// sx01's race track as C31's image holds it, and the RAM addresses that name its paths and nodes.
 struct Track {
@@ -318,7 +318,8 @@ fn feed_of(raw: &[u8], at: Vf) -> CardFeed {
         velocity: vq(raw, 0x110),
         ground: F(ps2_float::fpu::sub(at.y(), rise.0)),
         on_ground: u64::from(word(raw, 8)) & race_card_flags::GROUNDED != 0,
-        // Down: the owner has dropped the jump watch every card of the race carries.
+        // Down: the owner has dropped the jump watch every card of the race carries. C31 keeps no
+        // bike word, so the captured card is the only witness of the original's wreck.
         wrecked: u64::from(word(raw, 8)) & race_card_flags::WATCHES_JUMPS == 0,
     }
 }

@@ -2122,6 +2122,21 @@ impl RaceCard {
             card.flags &= !race_card_flags::JUMP_TO_JUDGE;
         }
     }
+
+    /// **The owner's riding bit** (S429), from its bike's update, before the race handler's tick: the
+    /// ride state machine drops the card's jump watch ([`race_card_flags::WATCHES_JUMPS`]) every tick
+    /// its rider is down, and the respawn sets it again, whatever the card held before (C31 rider 1,
+    /// frames 5915–6021). The port gives the card the watch on every tick its rider is up: every card
+    /// the Sim makes carries it, and a rider is up again only through a respawn. The speed word holds
+    /// through the wreck by itself ([`RaceCard::feed`]): a down rider's bike is not stepped, so its
+    /// velocity stands.
+    pub fn riding_bit(&mut self, f: &CardFeed) {
+        if f.wrecked {
+            self.lap.flags &= !race_card_flags::WATCHES_JUMPS;
+        } else {
+            self.lap.flags |= race_card_flags::WATCHES_JUMPS;
+        }
+    }
 }
 
 /// A score card's jump watch (S302): each jump's take-off and landing, its length, height and time in
@@ -4827,8 +4842,8 @@ impl Laps {
     }
 
     /// One tick of the race handler, `dt` long, every rider's bike as `riders` tells it (in player
-    /// order): the opening look for a rider still raced, each card in list order — its owner's word
-    /// ([`RaceCard::feed`]), then the card's step timed off the list head's clock — and the close.
+    /// order): the opening look for a rider still raced, each card in list order — its owner's riding
+    /// bit and word ([`RaceCard::riding_bit`], [`RaceCard::feed`]), then the card's step timed off the list head's clock — and the close.
     pub fn tick(&mut self, dt: F, riders: &[CardFeed], rng: &mut Rng) -> LapsFrame {
         let mut frame = LapsFrame::default();
         if self.cards.is_empty() {
@@ -4840,6 +4855,7 @@ impl Laps {
             let leader_time = self.cards[0].card.lap.race_time;
             let e = &mut self.cards[k];
             if let Some(f) = riders.get(e.player) {
+                e.card.riding_bit(f);
                 e.card.feed(f);
             }
             let said = self.rules.card_on_lines(dt, &mut e.card, None, track, &self.course, &self.lists, leader_time);
