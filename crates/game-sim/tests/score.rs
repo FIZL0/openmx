@@ -1234,3 +1234,106 @@ fn a_pack_ride_banks_after_a_fifth_of_a_second_down() {
     assert_eq!(card.total, F(1000.0), "banked");
     assert_eq!(Score::atv_scale(&atv, 3), F(0.8));
 }
+
+/// S410: a pack ride's trick is held (its node grows) in MX vs. ATV's own hold window. The rule
+/// (`Score::atv_hold_marks`) is run beside the port of the original's trick step
+/// (`handling::update::trick`, F42, itself run beside SLUS-21104 on 10 000 generated cases in
+/// `tests/mxvatv_bike_ride.rs`) on 20 000 generated clocks, hold times, durations, kinds and kept
+/// stunts, aimed at each edge of the window, and the marks the two make compared in order.
+#[test]
+fn a_pack_ride_holds_a_trick_in_mx_vs_atvs_window() {
+    use game_sim::handling::update::{self, Out, Quad, Updates};
+    use std::collections::HashMap;
+    const BIKE: u32 = 0x0001_0000;
+    const TABLE: u32 = 0x0002_0000;
+    const CLIP: u32 = 0x0003_0000;
+    struct Ram {
+        words: HashMap<u32, u32>,
+        marks: Vec<bool>,
+    }
+    impl Updates for Ram {
+        fn bike(&self) -> u32 {
+            BIKE
+        }
+        fn word(&mut self, at: u32) -> u32 {
+            self.words.get(&at).copied().unwrap_or(0)
+        }
+        fn set(&mut self, at: u32, w: u32) {
+            self.words.insert(at, w);
+        }
+        fn out(&mut self, c: Out) -> u32 {
+            if let Out::Mark { on, .. } = c {
+                self.marks.push(on != 0);
+            }
+            0
+        }
+        fn vector(&mut self, _: Out) -> Quad {
+            [0; 4]
+        }
+        fn noise(&mut self, _: F) -> F {
+            F::ZERO
+        }
+    }
+    let mut seed = 0x5410_u32;
+    let mut unit = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let (mut held, mut on, mut off) = (0, 0, 0);
+    for k in 0..20_000 {
+        let dt = if unit() < 0.5 { f32::from_bits(0x3d08_850a) } else { 0.002 + 0.05 * unit() };
+        let hold = match (unit() * 6.0) as u32 {
+            0 => 0.0,
+            1 => -0.5,
+            2 => 0.05 + 0.25 * unit(),
+            _ => 0.3 + 1.7 * unit(),
+        };
+        let duration = if unit() < 0.3 { hold } else { 2.0 * unit() };
+        let slack = f32::from_bits(0x3d23_d70a);
+        let time = match (unit() * 10.0) as u32 {
+            0 => hold,
+            1 => hold - dt,
+            2 => hold.min(0.3),
+            3 => hold.min(0.3) - dt / 4.0,
+            4 => hold + slack,
+            5 => hold + slack + dt / 4.0,
+            6 => duration - dt,
+            7 => duration,
+            _ => 2.5 * unit(),
+        };
+        let id = (unit() * 41.0) as u32;
+        let kind = 1 + (unit() * 6.0) as u32;
+        let same_kind = unit() < 0.6;
+        let kept = unit() < 0.15;
+        let driven = unit() < 0.5;
+        let special = kept && driven;
+        let mut ram = Ram { words: HashMap::new(), marks: vec![] };
+        let entry = update::stunt_entry(TABLE, id);
+        ram.set(entry, CLIP);
+        ram.set(entry + 8, kind);
+        ram.set(CLIP + 0x44, hold.to_bits());
+        ram.set(CLIP + 0x48, duration.to_bits());
+        ram.set(update::TRICK_SLACK, slack.to_bits());
+        ram.set(BIKE + 0x14f0, TABLE);
+        ram.set(BIKE + update::NEXT_STUNT, id);
+        for o in [0x13b8, 0x13bc, 0x13c0, 0x13c4, 0x13c8] {
+            ram.set(BIKE + o, if kept && o == 0x13b8 { id } else { 45 });
+        }
+        ram.set(BIKE + 0x1194, u32::from(driven));
+        // The kept stunts on a driven bike read as kind 4.
+        let stunt_kind = if kept && driven { 4 } else { kind };
+        ram.set(BIKE + 0x14ec, if same_kind { stunt_kind | 0x20 } else { (stunt_kind % 6 + 1) | 0x10 });
+        ram.set(BIKE + 0x14d8, time.to_bits());
+        update::trick(&mut ram, F(dt));
+        let marks = Score::atv_hold_marks(F(time), F(hold), F(duration), F(dt), same_kind, special);
+        let want: Vec<bool> = [(marks.on, true), (marks.off, false)].into_iter().filter(|m| m.0).map(|m| m.1).collect();
+        assert_eq!(ram.marks, want, "case {k}: time {time} hold {hold} duration {duration} dt {dt} same {same_kind} kept {kept} driven {driven}");
+        held += usize::from(marks.on && !marks.off);
+        on += usize::from(marks.on && marks.off);
+        off += usize::from(!marks.on && marks.off);
+    }
+    // Every way out was taken: held, marked and let go in the same step, and let go.
+    assert!(held > 500 && on > 500 && off > 500, "held {held}, on then off {on}, off {off}");
+}

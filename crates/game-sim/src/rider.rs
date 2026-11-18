@@ -969,14 +969,16 @@ impl Rider {
             frozen: false,
             progress: tricks.progress,
         };
-        let (was_trick, was_held) = (tricks.current, tricks.held);
+        let (was_trick, was_elapsed) = (tricks.current, tricks.elapsed);
         let clocked = tricks.update(dt, set, bike, false, ride::noise);
         // The clocks' three calls on the rider, which score (S79). The wheels are this frame's, the
         // wreck is the one the rider was in before this frame's machine.
         let at_clocks = Self::score_sense(ride, slow, state.wreck.is_some());
         if let (Some(moves), Some(t)) = (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
             // MX vs. ATV's way with a pack on (S358): a trick pushes its node at its start, off the
-            // ground and riding, grows while it is in its hold, and ends with its clock.
+            // ground and riding, grows while it is in its hold, and ends with its clock. The hold is
+            // the original's (S410): read on the clock as it was before it ran, with the gesture of
+            // the trick's own buttons held.
             if clocked.stopped_before {
                 score.atv_end(was_trick.0);
             }
@@ -985,8 +987,11 @@ impl Rider {
                     let name = set.stunt(id).map_or("", |s| s.name.as_str());
                     score.atv_start(&t.score, id.0, moves.values(name, score::ATV_TRICK), false);
                 }
-            } else if tricks.in_progress {
-                score.atv_mark(tricks.current.0, was_held < tricks.held);
+            } else if let Some(stunt) = set.stunt(tricks.current) {
+                let id = tricks.current;
+                let same_kind = trick_group(id).is_some_and(|k| trick::fallback_groups(tricks.gesture.group).contains(&k));
+                let marks = score::Score::atv_hold_marks(was_elapsed, stunt.hold_time, stunt.duration, dt, same_kind, score::Score::atv_kept(id.0));
+                score.atv_hold(id.0, marks);
             }
             if clocked.stopped {
                 score.atv_end(tricks.current.0);
@@ -1677,6 +1682,16 @@ fn pack_state(lib: &vehicle_anim::Library, trick: Trick) -> i32 {
         .map(|k| vehicle_anim::PACK_EXTRA + k as i32)
         .filter(|&state| lib.clip(state).is_some())
         .unwrap_or(trick::SLOTS as i32)
+}
+
+/// **S410:** the button group a trick is held on — its slot's, or its extra's — which MX vs. ATV's
+/// hold reads as the stunt's kind; `None` for an id that is neither.
+fn trick_group(trick: Trick) -> Option<u8> {
+    match (trick.slot(), trick.extra()) {
+        (Some(slot), _) => Some((slot / 4) as u8 + 1),
+        (None, Some(k)) => trick::extra_gesture(k).map(|(group, _)| group),
+        _ => None,
+    }
 }
 
 /// **MD21:** MX vs. ATV's 360 clip, from the frame the bike turns past [`air::SPIN_CLIP`] until it
