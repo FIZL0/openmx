@@ -673,7 +673,17 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
                         disable: ee.u32_at(e + 0xc) as u8,
                         live: flag & 1 != 0,
                         zone_off: flag & 2 != 0,
-                        emitter: Emitter { on: switch & 4 != 0, just_on: switch & 2 != 0, min_speed: F(ee.f32_at(em + 0x3c4)), place, pos, prev: vf(em + 0x60) },
+                        emitter: Emitter {
+                            on: switch & 4 != 0,
+                            just_on: switch & 2 != 0,
+                            min_speed: F(ee.f32_at(em + 0x3c4)),
+                            place,
+                            pos,
+                            prev: vf(em + 0x60),
+                            // S422: the view cull, `UseViewDependentCull` +0x244, its distances +0x24c / +0x250 and the last test +0x248.
+                            cull: (ee.u32_at(em + 0x244) != 0).then(|| dust::Cull { far: F(ee.f32_at(em + 0x24c)), directional: F(ee.f32_at(em + 0x250)) }),
+                            culled: ee.u32_at(em + 0x248) != 0,
+                        },
                         draws: 0,
                     }
                 })
@@ -714,11 +724,11 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
             // nodes' now: the drive moved the nodes after the image's last emit (tests/ai/draws.rs).
             let places = |p: Place| entries.iter().filter(|e| e.emitter.place == p).count();
             assert_eq!((places(Place::Front), places(Place::Exhaust)), (2, 1), "{}'s front and exhaust emitters", C33_NAMES[k]);
-            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust) })
+            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls: Vec::new() })
         })
         .collect();
     riders.sort_by_key(|r| r.0);
-    dust::Dust { riders: riders.into_iter().map(|r| r.1).collect() }
+    dust::Dust { riders: riders.into_iter().map(|r| r.1).collect(), view: None }
 }
 
 /// S421: rider `r`'s rear tyre emitter node in its image, and the Sim's chain for it. The vehicle holds

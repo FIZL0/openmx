@@ -57,6 +57,26 @@
 //!   (`node_set_rotation`, [`crate::kiowa`]'s turn), the clip's place kept — only while a wheel is on
 //!   the ground; in the air it stays as the clip posed it.
 //! - **The pipe's root**'s local is a copy of `Bike`'s world.
+//!
+//! # The collision entries (S422)
+//!
+//! A `CollisionModel` ([`Kind::Collision`]) and a `ParticleCollisionConstraint` ([`Kind::Spheres`],
+//! the foot dust among them) read no tyre: the manager switches them by the wreck flag alone. Their
+//! emitters hang from nothing and are emitted from inside the entry's own update, in the manager's
+//! pass, once per contact ([`Entry::touch_update`]); the emitter pass leaves them alone.
+//!
+//! - **A collision model** reads the wreck bike's collision object ([`Object`]): its contacts as the
+//!   wreck bike's node left them this frame (the node runs before the manager).
+//! - **A bone collision entry** reads the rider's bone collisions ([`Ball`]) as the body left them
+//!   the frame before (the body runs after the manager): the wreck's ragdoll, or the riding one.
+//! - **The emit** at a contact takes the contact as its point and the contact less the velocity
+//!   times the frame as its previous one, and makes the speed test. An emitter just switched on only
+//!   takes the point, as in the emitter pass; an emitter **culled** makes nothing at all.
+//! - **The view test** runs once a frame after the manager, on the emitter's point
+//!   ([`Emitter::view_test`]): culled past `FarCullDistance` from the camera, or behind it and past
+//!   `DirectionalCullDistance`. An emitter switched on carries the last frame's answer, made at its
+//!   stale point, so the first frame of a wreck far from the last one emits nothing. The camera is
+//!   the shell's ([`Dust::view`]); with none it is the bike's point.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -275,9 +295,59 @@ pub enum Kind {
     /// The tyre's spray: on while its wheel spins under throttle or the side load passes `threshold`,
     /// and for `clock` seconds more.
     Spray { threshold: F, clock: F },
-    /// An entry whose emitter does not draw on the shared generator here: the collision models, the
-    /// rider's foot dust, the tyre tracks (the module header).
+    /// A `CollisionModel`: one emit per contact of the wreck bike's collision object ([`Object`]),
+    /// in a zone with particles (S422). `zones` is the entry's sixteen zone groups, none = 0xff.
+    Collision { zones: [u8; 16] },
+    /// A `ParticleCollisionConstraint` (the foot dust among them): one emit per bone collision
+    /// ([`Ball`]) whose bit is in `mask`, touching as `Disable` allows, in a zone with particles (S422).
+    Spheres { mask: u32, zones: [u8; 16] },
+    /// An entry whose emitter does not draw on the shared generator here: the tyre tracks (the
+    /// module header).
     Quiet,
+}
+
+/// The wreck bike's collision object as a [`Kind::Collision`] reads it (S422): its record's ground
+/// and object contact, the collider's last relative velocity, and each contact's point and surface
+/// (-1 for none).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Object {
+    pub ground: bool,
+    pub object: bool,
+    pub relative: Vf,
+    pub contacts: Vec<(Vf, i32)>,
+}
+
+/// A bone collision as a [`Kind::Spheres`] reads it (S422): its contact's ground and scene flags,
+/// the surface the ground query last wrote, the last contact point, and its bone's velocity.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ball {
+    pub ground: bool,
+    pub object: bool,
+    pub surface: u8,
+    pub point: Vf,
+    pub velocity: Vf,
+}
+
+/// What the collision entries read in a frame (S422). The wreck bike's node runs before the manager,
+/// so its object is this frame's; the rider's body runs after it, so the balls are the frame
+/// before's. `None` for a ball the feed has no collision for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Touches {
+    pub object: Option<Object>,
+    pub balls: Vec<Option<Ball>>,
+}
+
+/// A zone group, by index, as the updates read it: an index past the sixteen reads the entry's
+/// neighbouring bytes, which are never 0xff on the discs (S422's journal), so it counts as a zone with
+/// particles.
+fn zone_on(zones: &[u8; 16], index: i64) -> bool {
+    usize::try_from(index).ok().and_then(|i| zones.get(i)).is_none_or(|&z| z != 0xff)
+}
+
+/// The flags of a contact: its ground and object contact, none when neither.
+fn contact_flags(ground: bool, object: bool) -> u8 {
+    let none = if !ground && !object { NO_CONTACT } else { 0 };
+    (if ground { GROUND } else { 0 }) | (if object { OBJECT } else { 0 }) | none
 }
 
 /// An emitter's switch and its two points.
@@ -293,9 +363,46 @@ pub struct Emitter {
     pub place: Place,
     pub pos: Vf,
     pub prev: Vf,
+    /// Its view cull, if it has one (`UseViewDependentCull`, S422).
+    pub cull: Option<Cull>,
+    /// Culled at the last frame's view test: a collision entry's emits make nothing until the next
+    /// test ([`Emitter::view_test`]).
+    pub culled: bool,
+}
+
+/// An emitter's view cull distances (S422): `FarCullDistance`, and `DirectionalCullDistance` for a
+/// point behind the camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cull {
+    pub far: F,
+    pub directional: F,
+}
+
+/// The camera an emitter's view test measures from (S422): its point and its forward row.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct View {
+    pub at: Vf,
+    pub forward: Vf,
 }
 
 impl Emitter {
+    /// **The view test** (S422), once a frame after the emitters have run: an emitter with a cull is
+    /// culled when its point is farther than `far` from the camera, or behind it (its offset
+    /// against the forward row below zero) and farther than `directional`.
+    pub fn view_test(&mut self, view: &View) {
+        let Some(c) = self.cull else { return };
+        let d = self.pos.sub(view.at);
+        let (x, y, z) = (F(d.x()), F(d.y()), F(d.z()));
+        let dist = F::dot([x, y, z], [x, y, z]).sqrt();
+        self.culled = if dist <= c.far {
+            let f = view.forward;
+            let behind = F::dot([F(f.x()), F(f.y()), F(f.z())], [x, y, z]) < F(0.0);
+            behind && !(dist <= c.directional)
+        } else {
+            true
+        };
+    }
+
     fn switch_on(&mut self) {
         if !self.on {
             self.on = true;
@@ -329,10 +436,36 @@ impl Emitter {
             self.prev = self.pos;
             return 0;
         }
+        self.gate(dt)
+    }
+
+    /// The emit's speed test on the two points: two draws if the point moved at least
+    /// `MinimumEmissionSpeed` over the frame, else none.
+    fn gate(&self, dt: F) -> u8 {
         let d = self.pos.sub(self.prev);
         let (x, y, z) = (F(d.x()), F(d.y()), F(d.z()));
         let speed = F::dot([x, y, z], [x, y, z]).sqrt() / dt;
         if speed < self.min_speed { 0 } else { 2 }
+    }
+
+    /// An emit at points the update set (S422, a collision entry's): with no node the emitter keeps
+    /// them. An emitter just switched on or off takes `pos` for both and draws nothing.
+    fn emit_at(&mut self, pos: Vf, prev: Vf, dt: F) -> u8 {
+        self.pos = pos;
+        self.prev = prev;
+        if self.just_on {
+            self.just_on = false;
+            self.prev = self.pos;
+            return 0;
+        }
+        if self.culled {
+            return 0;
+        }
+        if !self.on {
+            self.prev = self.pos;
+            return 0;
+        }
+        self.gate(dt)
     }
 }
 
@@ -397,8 +530,56 @@ impl Entry {
                     self.emitter.switch_on();
                 }
             }
-            Kind::Quiet => {}
+            Kind::Collision { .. } | Kind::Spheres { .. } | Kind::Quiet => {}
         }
+    }
+
+    /// **A collision entry's update** (S422): its emitter's switch and its emits, on `touches`; the
+    /// draws they make. Nothing for the other kinds, whose emitters draw in the emitter pass.
+    ///
+    /// - A collision model's flags are the frame's wreck flag and the object's contacts. While its
+    ///   `Disable` lets them through the emitter is on, and each contact in a zone with particles
+    ///   emits from the contact point, its previous point the point less the relative velocity times
+    ///   the frame (`xyz`). Otherwise the emitter is off.
+    /// - A bone collision entry's emitter is on while `Disable` lets the wreck flag through. Then
+    ///   each ball in `mask`, in a zone with particles and with contact flags `Disable` lets through,
+    ///   emits from its point, its previous point the point less its bone's velocity times the frame.
+    pub fn touch_update(&mut self, feed: &Feed, touches: &Touches, dt: F) -> u32 {
+        let wreck = if feed.wrecking { WRECKING } else { NOT_WRECKING };
+        let mut draws = 0;
+        match self.kind {
+            Kind::Collision { zones } => {
+                let none = Object::default();
+                let o = touches.object.as_ref().unwrap_or(&none);
+                if self.disable & (wreck | contact_flags(o.ground, o.object)) != 0 {
+                    self.emitter.switch_off();
+                    return 0;
+                }
+                self.emitter.switch_on();
+                let v = o.relative.mul_q(dt.0);
+                for &(point, surface) in &o.contacts {
+                    if zone_on(&zones, i64::from(surface)) {
+                        let prev = point.merge(Dest::XYZ, point.sub(v));
+                        draws += u32::from(self.emitter.emit_at(point, prev, dt));
+                    }
+                }
+            }
+            Kind::Spheres { mask, zones } => {
+                if self.disable & wreck == 0 { self.emitter.switch_on() } else { self.emitter.switch_off() }
+                for (k, b) in touches.balls.iter().enumerate() {
+                    let Some(b) = b else { continue };
+                    if k >= 32 || mask >> k & 1 == 0 {
+                        continue;
+                    }
+                    if zone_on(&zones, i64::from(b.surface)) && self.disable & contact_flags(b.ground, b.object) == 0 {
+                        let prev = b.point.merge(Dest::XYZ, b.point.sub(b.velocity.mul_q(dt.0)));
+                        draws += u32::from(self.emitter.emit_at(b.point, prev, dt));
+                    }
+                }
+            }
+            _ => {}
+        }
+        draws
     }
 }
 
@@ -415,6 +596,9 @@ pub struct RiderDust {
     pub front: Option<FrontNode>,
     /// The exhaust's node, for the entries at [`Place::Exhaust`].
     pub exhaust: Option<ExhaustNode>,
+    /// The bone collisions the [`Kind::Spheres`] entries read: the body's, as the frame before left
+    /// them (S422, [`Touches`]).
+    pub balls: Vec<Option<Ball>>,
 }
 
 impl RiderDust {
@@ -422,10 +606,26 @@ impl RiderDust {
     /// snapshot, then each emitter's point and draws, then this frame's snapshot, `now`, and the
     /// drive's step on it. Answers the draws, which the caller makes on the game's generator.
     pub fn frame(&mut self, now: Feed, bike: &Mat4, curve: &CurveTable, dt: F) -> u32 {
+        self.frame_with(now, None, Vec::new(), bike, curve, dt)
+    }
+
+    /// [`RiderDust::frame`] with the collision entries' inputs (S422): the wreck bike's `object` as
+    /// this frame left it, and the body's `balls` as this frame left them, which the next frame reads.
+    pub fn frame_with(
+        &mut self,
+        now: Feed,
+        object: Option<Object>,
+        balls: Vec<Option<Ball>>,
+        bike: &Mat4,
+        curve: &CurveTable,
+        dt: F,
+    ) -> u32 {
         let feed = &std::mem::replace(&mut self.feed, now);
+        let touches = Touches { object, balls: std::mem::replace(&mut self.balls, balls) };
+        let mut made = vec![0; self.entries.len()];
         let wreck = if feed.wrecking { WRECKING } else { NOT_WRECKING };
         let tyres = feed.tyres.map(|t| t.flags(feed.wrecking));
-        for e in &mut self.entries {
+        for (e, made) in self.entries.iter_mut().zip(&mut made) {
             let tyre = e.tyre.map_or(0, |t| tyres[t]);
             if e.disable & tyre == 0 && e.disable & wreck == 0 {
                 if !e.live {
@@ -436,6 +636,8 @@ impl RiderDust {
             }
             if e.live && !e.zone_off {
                 e.update(feed, dt);
+                // A collision entry emits in its update, in the manager's pass (S422).
+                *made = e.touch_update(feed, &touches, dt);
             }
         }
         let points = Points {
@@ -444,9 +646,14 @@ impl RiderDust {
             exhaust: self.exhaust.map(|n| n.point()),
         };
         let mut draws = 0;
-        for e in &mut self.entries {
+        for (e, made) in self.entries.iter_mut().zip(made) {
             e.draws = match e.kind {
                 Kind::Quiet => 0,
+                Kind::Collision { .. } | Kind::Spheres { .. } => {
+                    draws += made;
+                    e.draws = u8::try_from(made).unwrap_or(u8::MAX);
+                    continue;
+                }
                 _ => e.emitter.frame(bike, points, dt),
             };
             draws += u32::from(e.draws);
@@ -465,6 +672,9 @@ impl RiderDust {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dust {
     pub riders: Vec<RiderDust>,
+    /// The camera the emitters' view tests measure from (S422), an input like the controls: the
+    /// shell's, as it drew the frame. `None` measures from each rider's bike, with no forward row.
+    pub view: Option<View>,
 }
 
 /// An emitter's place in the chassis' frame, from where it is in the world with the bike at `bike`:
@@ -501,9 +711,27 @@ impl crate::Sim {
             grounded: r.air.on_ground,
         };
         let bike = r.transform();
+        // The wreck bike's collision object, and the body's bone collisions (S422).
+        let object = rider.crash.as_ref().map(|c| Object {
+            ground: c.bike.record.on_ground,
+            object: c.bike.record.on_object,
+            relative: c.bike.collider.relative,
+            contacts: c.bike.record.contacts.iter().map(|k| (k.point, k.surface)).collect(),
+        });
+        let balls = match (&rider.ragdoll, &rider.riding) {
+            (Some(down), _) => balls_of(&down.ragdoll, &down.contacts),
+            (None, Some(riding)) => balls_of(&riding.actor.ragdoll, &riding.actor.contacts),
+            (None, None) => Vec::new(),
+        };
         let tables = std::sync::Arc::clone(&self.tables);
         let Some(dust) = self.dust.as_deref_mut() else { return };
-        let draws = dust.riders[i].frame(feed, &bike, &tables.ride.curve, dt);
+        let view = dust.view.unwrap_or(View { at: bike.0[3], forward: Vf([0.0; 4]) });
+        let rider = &mut dust.riders[i];
+        let draws = rider.frame_with(feed, object, balls, &bike, &tables.ride.curve, dt);
+        // The emitters' view tests, after the manager has run (S422).
+        for e in &mut rider.entries {
+            e.emitter.view_test(&view);
+        }
         let rng: &mut Rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
             // In a race, the race's: the lane's own is for a ride with no race (S387).
             (_, Some(race)) => &mut race.rng,
@@ -514,4 +742,22 @@ impl crate::Sim {
             rng.rand();
         }
     }
+}
+
+/// A ragdoll's bone collisions as the collision entries read them (S422): each contact's flags, zone
+/// and point, and its bone's velocity.
+fn balls_of(doll: &crate::ragdoll::Ragdoll, contacts: &[crate::ragdoll_contact::Contact]) -> Vec<Option<Ball>> {
+    contacts
+        .iter()
+        .zip(&doll.collisions)
+        .map(|(c, k)| {
+            Some(Ball {
+                ground: c.ground,
+                object: c.scene,
+                surface: c.surface,
+                point: c.point,
+                velocity: doll.bones[k.bone].body.velocity,
+            })
+        })
+        .collect()
 }

@@ -588,6 +588,18 @@ impl State for Sim {
                         if let crate::dust::Kind::Spray { clock, .. } = e.kind {
                             w.f("clock", clock);
                         }
+                        // The view test's answer (S422).
+                        w.bool("culled", e.emitter.culled);
+                    });
+                }
+                // The bone collisions the next frame's collision entries read (S422).
+                for b in r.balls.iter().flatten() {
+                    w.group("ball", |w| {
+                        w.bool("ground", b.ground);
+                        w.bool("object", b.object);
+                        w.u32("surface", u32::from(b.surface));
+                        w.vf("point", b.point);
+                        w.vf("velocity", b.velocity);
                     });
                 }
             }
