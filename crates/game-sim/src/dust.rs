@@ -39,12 +39,30 @@
 //! - **`Bike`** is the chassis pose's, held at its seeded local: the bike's clips are not in the Sim.
 //! - The emitter's point is the node's world position plus its offset (zero on this disc).
 //!
-//! The front tyre's (under `Shocks` under `Handlebars`) and the exhaust's (under the pipe's own model)
-//! are still a fixed place in the chassis' frame ([`Place::Chassis`]).
+//! # The front tyre's and the exhaust's points (S446)
+//!
+//! The front tyre's sprays hang from `FrontTire_Particle01`, under `Shocks`, under `Handlebars`,
+//! under `Bike` ([`FrontNode`]); the exhaust from `250_Exhaust_Particle01` under the root of the
+//! pipe's own model ([`ExhaustNode`]). The bike's drive sets those nodes after the emitters have run,
+//! from the snapshot it has just taken and the root as the frame left it ([`RiderDust::frame`] runs
+//! it last), so each emitter reads the frame before's:
+//!
+//! - **The bike's clip** poses `Bike` and `Handlebars` first (a turn of the bars of about a degree
+//!   while riding). The clips are not in the Sim: both are held at their seeded locals
+//!   ([`FrontNode::pose`]).
+//! - **`Shocks`** slides along the steering axis: its place is the fork's rest place plus the axis
+//!   times the front compression times the slide scale, plus a fixed nudge, taken into the world by
+//!   `Bike`'s world and back into `Handlebars`' frame as the clip posed it. Its rotation is held.
+//! - **`Handlebars`** is then turned by the front wheel's steer about the steering axis
+//!   (`node_set_rotation`, [`crate::kiowa`]'s turn), the clip's place kept — only while a wheel is on
+//!   the ground; in the air it stays as the clip posed it.
+//! - **The pipe's root**'s local is a copy of `Bike`'s world.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::atv_moto::frame_mul;
+use crate::camera::CurveTable;
+use crate::kiowa::{axis_turn, node_unpoint};
 use crate::math::{Mat4, basis, transform_point};
 use crate::rng::Rng;
 use ps2_float::vu::{self, Dest};
@@ -89,6 +107,12 @@ pub struct Feed {
     pub tyres: [Tyre; 2],
     /// The rear wheel's compression, which aims the swingarm ([`RearNode`]).
     pub rear_compression: F,
+    /// The front wheel's compression, which slides the fork ([`FrontNode`]).
+    pub front_compression: F,
+    /// The front wheel's steer angle, which turns the bars ([`FrontNode`]).
+    pub steer: F,
+    /// Either wheel on the ground: the bars are turned only then.
+    pub grounded: bool,
 }
 
 /// Where an emitter's point comes from.
@@ -98,6 +122,18 @@ pub enum Place {
     Chassis(Vf),
     /// The rear tyre's node ([`RearNode`]).
     Rear,
+    /// The front tyre's node ([`FrontNode`]).
+    Front,
+    /// The exhaust's node ([`ExhaustNode`]).
+    Exhaust,
+}
+
+/// The nodes' points this frame, for the emitters that hang from them.
+#[derive(Clone, Copy, Debug, Default)]
+struct Points {
+    rear: Option<Vf>,
+    front: Option<Vf>,
+    exhaust: Option<Vf>,
 }
 
 /// **The rear tyre's emitter node and the two above it** (S421, the module header).
@@ -132,8 +168,100 @@ impl RearNode {
     pub fn point(&self, root: &Mat4, c: F) -> Vf {
         let bike = frame_mul(&self.bike.0, &root.0);
         let arm = frame_mul(&self.swingarm(c).0, &bike);
-        let node = frame_mul(&self.node.0, &arm);
-        Vf::new(0.0, 0.0, 0.0, 1.0).merge(Dest::XYZ, node[3].add(Vf::ZERO))
+        emitter_point(&frame_mul(&self.node.0, &arm))
+    }
+}
+
+/// `Shocks`' nudge, added to its place in the `Bike` frame after the slide.
+const FORK_NUDGE: Vf = Vf([-0.03, 0.0, 0.02, 1.0]);
+
+/// A node's world position with `w` 1, plus the (zero) emitter offset (`vadd.xyz`): an emitter's point.
+fn emitter_point(world: &[Vf; 4]) -> Vf {
+    Vf::new(0.0, 0.0, 0.0, 1.0).merge(Dest::XYZ, world[3].add(Vf::ZERO))
+}
+
+/// `transform_point`'s node form: a point in a node's frame into the world (`vaddax.xyz` row 3,
+/// `vmaddax`/`vmadday`/`vmaddz.xyz` the axes), `w` kept.
+fn node_point(m: &[Vf; 4], v: Vf) -> Vf {
+    let acc = m[3].add(Vf::ZERO);
+    let acc = Vf::madd(acc, m[0], v.bc(vu::Field::X));
+    let acc = Vf::madd(acc, m[1], v.bc(vu::Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m[2], v.bc(vu::Field::Z)))
+}
+
+/// **The front tyre's emitter node and the three above it** (S446, the module header). `bars` and
+/// `shocks` are the nodes' locals as the last drive left them; `pose` is the clip's `Handlebars`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrontNode {
+    /// `Bike`'s local under the bike's root: the chassis pose's, held.
+    pub bike: Mat4,
+    /// `Handlebars`' local under `Bike`.
+    pub bars: Mat4,
+    /// `Handlebars`' local as the bike's clip poses it before the drive: held.
+    pub pose: Mat4,
+    /// `Shocks`' local under `Handlebars`.
+    pub shocks: Mat4,
+    /// The emitter node's local under `Shocks`.
+    pub node: Mat4,
+    /// The steering axis, in the `Bike` frame.
+    pub axis: Vf,
+    /// The fork's rest place, in the `Bike` frame.
+    pub rest: Vf,
+    /// The fork's slide per unit of front compression.
+    pub slide: F,
+}
+
+impl FrontNode {
+    /// The emitter's point with the bike's root at `root`: the node's world down the tree.
+    pub fn point(&self, root: &Mat4) -> Vf {
+        let bike = frame_mul(&self.bike.0, &root.0);
+        let bars = frame_mul(&self.bars.0, &bike);
+        let shocks = frame_mul(&self.shocks.0, &bars);
+        emitter_point(&frame_mul(&self.node.0, &shocks))
+    }
+
+    /// The drive's step, after the emitters, on this frame's snapshot `now` and the root at `root`:
+    /// `Handlebars` posed, `Shocks` slid (`vmulx.xyz`, `vadd.xyz`, the nudge `vadd.xyz`; into the world
+    /// by `Bike`'s, back by the posed `Handlebars`', the place's `xyz` written), then on the ground
+    /// `Handlebars` turned by the steer, its place kept with `w` 1.
+    pub fn drive(&mut self, root: &Mat4, now: &Feed, curve: &CurveTable) {
+        let bike = frame_mul(&self.bike.0, &root.0);
+        let along = self.axis.merge(Dest::XYZ, self.axis.mul(Vf::splat((self.slide * now.front_compression).0)));
+        let at = self.rest.merge(Dest::XYZ, self.rest.add(along));
+        let at = at.merge(Dest::XYZ, at.add(FORK_NUDGE));
+        let world = node_point(&bike, at);
+        self.bars = self.pose;
+        let local = node_unpoint(&Mat4(frame_mul(&self.bars.0, &bike)), world);
+        self.shocks.0[3] = self.shocks.0[3].merge(Dest::XYZ, local);
+        if now.grounded {
+            let (cos, sin) = curve.at(now.steer);
+            let place = self.bars.0[3];
+            self.bars = axis_turn([self.axis.x(), self.axis.y(), self.axis.z()], cos, sin);
+            self.bars.0[3] = Vf::new(place.x(), place.y(), place.z(), 1.0);
+        }
+    }
+}
+
+/// **The exhaust's emitter node and the pipe's root above it** (S446, the module header).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExhaustNode {
+    /// `Bike`'s local under the bike's root: the chassis pose's, held.
+    pub bike: Mat4,
+    /// The pipe's root's local: `Bike`'s world as the last drive copied it.
+    pub pipe: Mat4,
+    /// The emitter node's local under the pipe's root.
+    pub node: Mat4,
+}
+
+impl ExhaustNode {
+    /// The emitter's point: the node's world under the pipe's root, whose world is its local.
+    pub fn point(&self) -> Vf {
+        emitter_point(&frame_mul(&self.node.0, &self.pipe.0))
+    }
+
+    /// The drive's step, after the emitters: the pipe's root takes `Bike`'s world with the root at `root`.
+    pub fn drive(&mut self, root: &Mat4) {
+        self.pipe = Mat4(frame_mul(&self.bike.0, &root.0));
     }
 }
 
@@ -180,16 +308,18 @@ impl Emitter {
         self.prev = self.pos;
     }
 
-    /// The emitter's frame: its new point, `rear` for one on the rear tyre's node, then the draws it
-    /// makes (0 or 2).
-    fn frame(&mut self, bike: &Mat4, rear: Option<Vf>, dt: F) -> u8 {
+    /// The emitter's frame: its new point, the node's for one on a node, then the draws it makes
+    /// (0 or 2).
+    fn frame(&mut self, bike: &Mat4, points: Points, dt: F) -> u8 {
         self.prev = self.pos;
-        self.pos = match (self.place, rear) {
-            (Place::Chassis(at), _) => transform_point(bike, at),
-            (Place::Rear, Some(p)) => p,
-            // A rider seeded without its rear node: the point stays where it was.
-            (Place::Rear, None) => self.pos,
+        let node = match self.place {
+            Place::Chassis(at) => Some(transform_point(bike, at)),
+            Place::Rear => points.rear,
+            Place::Front => points.front,
+            Place::Exhaust => points.exhaust,
         };
+        // A rider seeded without the node: the point stays where it was.
+        self.pos = node.unwrap_or(self.pos);
         if self.just_on {
             self.just_on = false;
             self.prev = self.pos;
@@ -281,13 +411,17 @@ pub struct RiderDust {
     pub feed: Feed,
     /// The rear tyre's node, for the entries at [`Place::Rear`].
     pub rear: Option<RearNode>,
+    /// The front tyre's node, for the entries at [`Place::Front`].
+    pub front: Option<FrontNode>,
+    /// The exhaust's node, for the entries at [`Place::Exhaust`].
+    pub exhaust: Option<ExhaustNode>,
 }
 
 impl RiderDust {
     /// **The rider's frame** (the module header): the manager's switches and updates on the last
-    /// snapshot, then each emitter's point and draws, then this frame's snapshot, `now`. Answers the
-    /// draws, which the caller makes on the game's generator.
-    pub fn frame(&mut self, now: Feed, bike: &Mat4, dt: F) -> u32 {
+    /// snapshot, then each emitter's point and draws, then this frame's snapshot, `now`, and the
+    /// drive's step on it. Answers the draws, which the caller makes on the game's generator.
+    pub fn frame(&mut self, now: Feed, bike: &Mat4, curve: &CurveTable, dt: F) -> u32 {
         let feed = &std::mem::replace(&mut self.feed, now);
         let wreck = if feed.wrecking { WRECKING } else { NOT_WRECKING };
         let tyres = feed.tyres.map(|t| t.flags(feed.wrecking));
@@ -304,14 +438,24 @@ impl RiderDust {
                 e.update(feed, dt);
             }
         }
-        let rear = self.rear.map(|n| n.point(bike, feed.rear_compression));
+        let points = Points {
+            rear: self.rear.map(|n| n.point(bike, feed.rear_compression)),
+            front: self.front.map(|n| n.point(bike)),
+            exhaust: self.exhaust.map(|n| n.point()),
+        };
         let mut draws = 0;
         for e in &mut self.entries {
             e.draws = match e.kind {
                 Kind::Quiet => 0,
-                _ => e.emitter.frame(bike, rear, dt),
+                _ => e.emitter.frame(bike, points, dt),
             };
             draws += u32::from(e.draws);
+        }
+        if let Some(n) = &mut self.front {
+            n.drive(bike, &self.feed, curve);
+        }
+        if let Some(n) = &mut self.exhaust {
+            n.drive(bike);
         }
         draws
     }
@@ -352,10 +496,14 @@ impl crate::Sim {
             airspeed: r.chassis.speed,
             tyres: [tyre(&r.front), tyre(&r.rear)],
             rear_compression: r.rear.w.compression,
+            front_compression: r.front.w.compression,
+            steer: r.front.w.steer_angle,
+            grounded: r.air.on_ground,
         };
         let bike = r.transform();
+        let tables = std::sync::Arc::clone(&self.tables);
         let Some(dust) = self.dust.as_deref_mut() else { return };
-        let draws = dust.riders[i].frame(feed, &bike, dt);
+        let draws = dust.riders[i].frame(feed, &bike, &tables.ride.curve, dt);
         let rng: &mut Rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
             // In a race, the race's: the lane's own is for a ride with no race (S387).
             (_, Some(race)) => &mut race.rng,

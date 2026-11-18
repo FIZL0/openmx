@@ -2299,7 +2299,7 @@ impl RotorTree {
 /// times each of `v`'s lanes, then `cos` on the diagonal and `v sin`'s lanes added and taken off
 /// either side of it. Row 3 is `(0, 0, 0, 1)`. The axis's `w` lane is the sign half of its `z` word,
 /// as the register pair the original moves it in holds it.
-fn axis_turn(axis: [f32; 3], cos: F, sin: F) -> Mat4 {
+pub(crate) fn axis_turn(axis: [f32; 3], cos: F, sin: F) -> Mat4 {
     let [x, y, z] = axis.map(F);
     let len2 = fpu::madd(fpu::adda((x * x).0, (y * y).0), z.0, z.0);
     let r = F(fpu::rsqrt(1.0, len2));
@@ -2486,7 +2486,7 @@ fn node_rotate(m: &Mat4, v: Vf) -> Vf {
 /// `transform_unpoint`: `p` less the origin, through the transpose of the axes, which the original
 /// builds with the multimedia word shuffles (its third column keeps row 2's upper half: a 64-bit `or`
 /// copies only the lower one). `w` is `p`'s.
-fn node_unpoint(m: &Mat4, p: Vf) -> Vf {
+pub(crate) fn node_unpoint(m: &Mat4, p: Vf) -> Vf {
     let [r0, r1, r2, origin] = m.0;
     let c0 = Vf::new(r0.x(), r1.x(), r2.x(), r2.y());
     let c1 = Vf::new(r0.y(), r1.y(), r2.y(), r2.w());
