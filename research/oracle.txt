@@ -9242,6 +9242,22 @@ body_stop                   boot 0x001f7910 (body): +0x70 velocity, +0x90 force,
 #   above is the post's measure.)
 #   free06 in C34's buggy state: car 0x005ff210 (body 0x006137a0); the six EyeBall bodies 0x00e0ac70,
 #   0x00e0b460, 0x00e15b60, 0x00e18650, 0x00e1b140, 0x00e1dc30 (port collections 0..5).
+# S340 — the car's strike wakes the ball and it searches at once (src car.rs Machine::step_props_in, knocked's
+#   late strike; shell vehicle.rs CarRide::step_traffic; test car_drive.rs the_ball_strike_runs_on_its_own,
+#   exact through 780, was 775). Journal: research/journal/*-s340-car-strike-searches-the-ball.
+# s340 states (s2's context): research/s340/capture.sh replays c34/ball.p2s with research/c34/ball.pad and
+#   saves a state when frame_counter (0x00479d04) reaches each listed value; context/states/s340-ball-
+#   {772,774..776,778..781,784,785}.ee.bin hold row fc exactly. collision_node_update 0x0026f800 on node
+#   0x007d0c00 (vt 0x00454a90 at +8) runs the frame; the record resolve 0x00270dc0.
+#   Collision records: car 0x01503650, ball 0 0x00e14790, ball 2 0x00e19e60, ball 5 0x00e21f30.
+# 775 -> 776: the car's strike on ball 2 (asleep) wakes it and it is filed and searched in the same pass:
+#   its list has the car's mirror and its own ground entry before its resolve (the B34 path). The port's car
+#   struck without the late search, so the ball resolved without its ground: ~2 % off.
+# 780 -> 781 (open): ball 2's rays meet balls 5 and 0. Its list: [k1 ball 0, k0 ball 5, k0 ball 0]; the
+#   port's [k1 ball 0, k0 ball 0, k0 ball 5]. The order is ball 2's kept nearby list's (record +0x10c,
+#   array +0, count +4; stride 8: collidable, distance): at 780 [.., ball 5's mesh 0x00e21300 (3),
+#   ball 0's 0x00e13250 (4), .., car 0x01502490 (29)] of 38; ball 0's [.., ball 2's 0x00e19230 (3),
+#   ball 5's (4), ..]. The port walks the other props in collection order (prop_props.rs strikes_of).
 # S337 — the car's edge throw and unwreck. Port: game_sim::car::Machine::{throw_back, unwreck, wreck_timer};
 # shell openmx vehicle.rs throw_at_edge; test tests/car_wreck.rs the_cars_wreck_step_matches_the_original
 # (car_wreck_step on a hand-laid car in recording2's image). Journal: research/journal/*-s337-car-edge-throw.

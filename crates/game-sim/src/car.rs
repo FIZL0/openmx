@@ -3157,6 +3157,49 @@ impl Machine {
         curve: &CurveTable,
         noise: &mut impl FnMut(F) -> F,
     ) {
+        self.step_among(car, world, collision, met, props, None, dt, acos, curve, noise);
+    }
+
+    /// **[`Machine::step_props`] in the props' collide pass** (S340): a prop the car's strike wakes
+    /// and files searches at once ([`PropSet::strike_in`]), as the original's node walk reaches it at
+    /// the list's end behind the car, filed first: its terrain and scene entries go on its list after
+    /// the car's mirrors and before its rays' on the hull, in `world`, its set's movers added to the
+    /// pass's `movers` (the props' search's, [`crate::traffic::Traffic::frame_held`]), as the plane's
+    /// [`crate::flight::Flight::frame_props_in`] has it. C34's ball strike: the ball's ground entry
+    /// is on its list in its first step.
+    ///
+    /// [`PropSet::strike_in`]: crate::prop_set::PropSet::strike_in
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_props_in(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        met: Option<&mut crate::flight::Met>,
+        props: CarProps<'_>,
+        movers: &mut crate::prop_set::PropMovers,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        self.step_among(car, world, collision, met, Some(props), Some(movers), dt, acos, curve, noise);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_among(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        met: Option<&mut crate::flight::Met>,
+        props: Option<CarProps<'_>>,
+        pass: Option<&mut crate::prop_set::PropMovers>,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
         let Some(mut props) = props else { return self.step_met(car, world, collision, met, dt, acos, curve, noise) };
         let shapes = std::sync::Arc::clone(&props.set.shapes);
         let posed = crate::flight::knocks(props.set, &shapes);
@@ -3166,7 +3209,8 @@ impl Machine {
             collision.file_mirrors(&m.mirrors);
         }
         let first = met.as_deref().map_or(0, |m| m.vehicles.len());
-        let mut bodies = self.knocked(collision, &mut props, first, &posed, knocked);
+        let late = pass.map(|m| (dt, &mut *world as &mut dyn crate::world::World, m));
+        let mut bodies = self.knocked(collision, &mut props, first, &posed, knocked, late);
         self.touching = collision.record.touching;
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
         physics.step(
@@ -3180,7 +3224,8 @@ impl Machine {
     /// [`Machine::step_props`]' strike: the props the search struck (`knocked`, the mirrors on each of
     /// `posed`) woken and their mirrors filed, in the order the car's entries first name them, then
     /// the props' rays on its hull; the car's entries and the hull's mirrors renamed to the struck
-    /// bodies' places after the `first` others of its resolve. Answers the struck bodies.
+    /// bodies' places after the `first` others of its resolve. Answers the struck bodies. With
+    /// `late`, put on in the props' collide pass ([`Machine::step_props_in`]).
     fn knocked(
         &mut self,
         collision: &mut Collision,
@@ -3188,6 +3233,7 @@ impl Machine {
         first: usize,
         posed: &[crate::flight::Posed<'_>],
         knocked: Vec<Vec<crate::contact::Contact>>,
+        late: Option<(F, &mut dyn crate::world::World, &mut crate::prop_set::PropMovers)>,
     ) -> Vec<crate::prop_contact::Pushed> {
         use crate::flight::KNOCK_FROM;
         let me = props.me;
@@ -3209,7 +3255,19 @@ impl Machine {
                 (posed[k].collection, posed[k].object, mirrors)
             })
             .collect();
-        let mut bodies = props.set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() });
+        let mut strike = crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() };
+        let mut bodies = match late {
+            // Named as the props' step's striker `me`; the late props' probes' mirrors that
+            // [`PropSet::strike_in`] puts on the strike's entries are a riding bike's frame's (B29),
+            // not the car's: its hull is met below.
+            //
+            // [`PropSet::strike_in`]: crate::prop_set::PropSet::strike_in
+            Some((dt, world, movers)) => {
+                strike.by = Some((me, first));
+                props.set.strike_in(&mut strike, dt, world, movers)
+            }
+            None => props.set.strike(&strike),
+        };
         for e in &mut collision.record.contacts {
             if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
                 e.other = order.iter().position(|&j| j == k).map(|i| first + i);
