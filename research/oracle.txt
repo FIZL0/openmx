@@ -8265,6 +8265,18 @@ atv_record_impulse          atv 0x00206320 = collision_impulse (own body's turn 
 atv_record_friction         atv 0x00206c70 = collision_friction
 atv_record_damp             atv 0x00206e60 = collision_damp
 atv_record_apply            atv 0x00207240 = collision_apply
+# C38 — two quads' records touching (journal research/journal/2026-11-18-c38-quad-touch-images; research/c38).
+# Comment rows only. MD166's atv-race.p2s (Desert Oasis Open Class race, ATV) run on with no input, saved each
+# frame at NominalScalar 0.05: context/mxvatv-ps2/c38/c38-37521.{p2s,ee.bin,spr.bin} (vsync 0x3fa6d8 = 37521,
+# the frame before; every quad record's count 0) and c38-37523.* (37523, the touch: the first frame two
+# records hold entries since 37477). Five quads (vtable 0x003ce250 at +4; record = *(*(quad+0x1434)+0x90),
+# body quad+0xb8): player 0x01551620 (record 0x0159ba10, standing ~450 ft back), AI 0x015ca4b0 (0x0160d130),
+# 0x016219d0 (0x01663830), and the touching pair, both AI: 0x01a0fc70 (body 0x0166e0f0, record 0x01a511b0)
+# and 0x01a65ba0 (body 0x01a57da0, record 0x01aa5020), side by side ~3.85 ft apart at ~71 ft/s. At 37523
+# each record holds 4 entries (list +0xf8, 0x90 each, +0x40 = 1), every +0x84 the other record, +0x88 0,
+# +0x80 0xffffffff: 0x01a511b0 kind 0, 1, 1, 1 and 0x01aa5020 kind 1, 0, 0, 0 — each kind 1 entry is the
+# other's kind 0 entry at the same index with the same point (+0x40) and the normal (+0x30) turned round
+# (0x01a511b0's own: (0.999, 0.033, -0.034) at (2774.6, 125.15, 2604.42)). Touch stays on to 37531 (5, 5, 4).
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the
