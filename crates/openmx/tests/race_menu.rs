@@ -10,6 +10,11 @@ use std::process::Command;
 
 /// Ride sx01 headless for five seconds with these arguments, or `None` with no disc to ride.
 fn ride(args: &[&str]) -> Option<String> {
+    ride_for("5", args)
+}
+
+/// [`ride`] for `seconds` of the steady clock.
+fn ride_for(seconds: &str, args: &[&str]) -> Option<String> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
@@ -17,7 +22,7 @@ fn ride(args: &[&str]) -> Option<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--steady-clock", "--track", "sx01", "--seconds", "5", "--no-sound"])
+        .args(["--headless", "--steady-clock", "--track", "sx01", "--seconds", seconds, "--no-sound"])
         .args(args)
         .output()
         .expect("the shell runs");
@@ -147,4 +152,35 @@ fn a_two_seat_race_has_one_grid_and_one_lap_line() {
     let held = line(&said, "race: player 2 at ").unwrap_or_else(|| panic!("the second seat not seen at the drop:\n{said}"));
     assert!(xyz(held, "at")[2] < gate[2], "{held}: through the closed gate at {gate:?}");
     assert!(said.lines().any(|l| l.starts_with("race: player 4 in place ")), "the second seat's card is not ranked:\n{said}");
+}
+
+/// P313: a race with AI riders runs its laps to the results. `--race-bot` puts the human on a brain
+/// too, so a one-lap race of four on sx01 is ridden with nobody at the pad: every card laps, every
+/// rider finishes, the race is over, and the results board lists all four, placed 1 to 4 with their
+/// race times, the human's card among them; then the outro's wait runs out.
+#[test]
+fn a_race_with_ai_riders_laps_to_its_results() {
+    let Some(said) = ride_for("95", &["--race", "--laps", "1", "--racers", "4", "--race-bot"]) else { return };
+    assert!(line(&said, "race: 3 AI riders, skills ").is_some(), "no AI riders:\n{said}");
+    assert!(line(&said, "race: player 1 rides on a brain").is_some(), "no bot on the human:\n{said}");
+    assert!(line(&said, "race: 4 cards, 3 computer").is_some(), "{said}");
+    let dropped = said.find("race: gate dropped at tick ").unwrap_or_else(|| panic!("the gate never dropped:\n{said}"));
+    for k in 1..=4 {
+        let finished = said[dropped..].lines().find(|l| l.starts_with(&format!("race: player {k} finished in place ")));
+        assert!(finished.is_some(), "player {k} never finished:\n{said}");
+    }
+    let over = line(&said, "race: over — places ").unwrap_or_else(|| panic!("the race was never over:\n{said}"));
+    let results = line(&said, "race: results — ").unwrap_or_else(|| panic!("no results after {over}:\n{said}"));
+    let rows: Vec<&str> = results.trim_start_matches("race: results — ").split(", ").collect();
+    assert_eq!(rows.len(), 4, "{results}");
+    let mut last = 0.0;
+    for (k, row) in rows.iter().enumerate() {
+        assert!(row.starts_with(&format!("{}. ", k + 1)), "{results}: row {k} out of place");
+        let time: f32 = row.rsplit(' ').next().and_then(|t| t.trim_end_matches('s').parse().ok()).unwrap_or_else(|| panic!("{row}"));
+        assert!(time > 30.0 && time >= last, "{results}: a lap of sx01 in {time}s");
+        last = time;
+    }
+    assert_eq!(rows.iter().filter(|r| r.contains(" Player 1 ")).count(), 1, "{results}");
+    assert_eq!(rows.iter().filter(|r| r.contains(" Rider ")).count(), 3, "{results}");
+    assert!(line(&said, "race: outro over").is_some(), "the outro never ran out:\n{said}");
 }

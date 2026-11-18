@@ -3210,6 +3210,9 @@ struct Args {
     /// P327: the ride is a race — `--race`, `--laps N`, `--racers N`, or the menu's Race. Its track
     /// is [`Args::track`]'s; the ride starts on the start grid behind the closed gate.
     race: Option<menu::RaceSetup>,
+    /// `--race-bot` (P313): a race's first human rides on an AI brain, so a headless race laps to
+    /// its end with nobody at the pad. The port's own, for the tests; off, the race is the original's.
+    race_bot: bool,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -8271,21 +8274,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     });
     let racers = race_start.as_ref().map_or(1, |s| s.riders.max(riders as i32).max(1) as usize);
     let note_models = vec![bike_member.as_str(); racers];
-    if let (Some(sounds), Some(_)) = (note_sounds.as_ref(), race_start.as_ref().filter(|s| s.ai.is_empty())) {
+    if let (Some(sounds), Some(_)) = (note_sounds.as_ref(), race_start.as_ref().filter(|s| s.ai.is_empty() && !args.race_bot)) {
         seats[0].sim.load_notes(sounds, &note_models);
     }
     // P313a: the race's AI riders get their brains, off the bike's character file, once the
     // seeker world is in.
-    if let Some(start) = race_start.as_ref().filter(|s| !s.ai.is_empty()) {
+    if let Some(start) = race_start.as_ref().filter(|s| !s.ai.is_empty() || args.race_bot) {
         let file = disc.res(&bike_member).and_then(|res| res.read_suffix("AIChrctr.aip"));
         if let Err(e) = &file {
             println!("race: no AI character file — {e}");
         }
         let file = file.ok().map(|b| game_sim::phy::Ini::parse_bytes(&b));
         let notes = note_sounds.as_ref().map(|n| (n, note_models.as_slice()));
-        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED, notes);
+        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED, notes, args.race_bot);
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
+        if args.race_bot {
+            println!("race: player 1 rides on a brain, skill {}", race_start::bot_rider().skill);
+        }
         // S331b: and the track's AI net their race drivers follow, beside the race file.
         let name = race_start::ai_file_name(&stem);
         let file = second.as_ref().and_then(|m| disc.res(m).ok()).and_then(|res| res.read(&name).ok());
@@ -10445,6 +10451,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     race_start::Change::Over => {
                         let places: Vec<String> = laps.cards.iter().map(|e| format!("{}:{}", e.player + 1, e.card.lap.place)).collect();
                         println!("race: over — places {}", places.join(" "));
+                        // P313: the board the results screen gets, as its rows read, front end or not.
+                        let players = world.seats[0].sim.players();
+                        let named: Vec<(usize, String)> = (0..world.seats.len()).map(|k| (race_player(k, players), format!("Player {}", k + 1))).collect();
+                        let board = race_start::hand_over_seats(laps, laps_run, &named, &race_watch.overs);
+                        let rows: Vec<String> = board.cards.iter().map(|c| {
+                            let who = match &c.who {
+                                menu::results::Who::Player(n) | menu::results::Who::Ai(n) => n.as_str(),
+                                menu::results::Who::Other => "-",
+                            };
+                            format!("{}. {who} {:.2}s", c.words[0].0, c.words[1].0)
+                        }).collect();
+                        println!("race: results — {}", rows.join(", "));
                         if let Some(front) = front.as_deref_mut() {
                             let name = front.menu.racer_name(0);
                             // P334: the human's card for the Hall of Fame's name entry.
@@ -16177,6 +16195,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         race: None,
+        race_bot: false,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -16244,6 +16263,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     r.riders = n.clamp(1, menu::race::MOST_RIDERS);
                 }
             }
+            "--race-bot" => args.race_bot = true,
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),
             "--where" => args.where_only = true,
