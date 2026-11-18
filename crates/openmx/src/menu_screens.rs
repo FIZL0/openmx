@@ -1851,6 +1851,7 @@ impl Pen<'_> {
             Screen::Split => self.split(menu),
             Screen::Race => self.race(menu),
             Screen::Shop => self.shop(menu),
+            Screen::Stats => self.stats(menu),
             Screen::RaceSetup => self.race_setup(menu),
             Screen::Results => self.results(menu),
             Screen::Keyboard => self.keyboard(menu),
@@ -3118,10 +3119,12 @@ impl Pen<'_> {
         const SHOWN: usize = 9;
         let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
         let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
-        let hints = [(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
+        // P363: Square's Statistics named only where the touch pad leaves the hints their room.
+        let stats_hint = [(Btn::Circle, "Back"), (Btn::Square, "Statistics"), (Btn::LeftRight, "Supercross / National|Series"), (Btn::Cross, "Select")];
+        let hints: &[(Btn, &str)] = if self.pad_up() { &[stats_hint[0], stats_hint[2], stats_hint[3]] } else { &stats_hint };
         // F10a: the rows closer where the touch pad is up and the title needs their room to rise;
         // the down arrow an em under them, clear of it too.
-        let floor = self.above_the_raised_title(Screen::Race.title(), &hints, LIST_BOTTOM + 1.0);
+        let floor = self.above_the_raised_title(Screen::Race.title(), hints, LIST_BOTTOM + 1.0);
         self.list_to(&rows, at - first, 19.0, 10.4, 18.0, floor - 1.0);
         if first > 0 {
             self.arrow(19.0, 9.6, [0.0, -1.0], 0.7, BONE);
@@ -3137,7 +3140,36 @@ impl Pen<'_> {
         let id = tracks.get(at).map_or(String::new(), |(id, _)| id.clone());
         self.chips(&[format!("*{}* of {}", at + 1, tracks.len()), id], x, y + 1.0, w);
         self.title(Screen::Race.title());
-        self.hints(&hints);
+        self.hints(hints);
+    }
+
+    /// P363's statistics page: player 0's record (the one rider with a profile) as the original's
+    /// statistics page lists it, its Global Statistics and its Racing Statistics side by side, a
+    /// glass row a statistic, the name in peach and the value at the row's end.
+    fn stats(&mut self, menu: &Menu) {
+        self.logo(true);
+        let record = menu.race.records.seats.first().copied().unwrap_or_default();
+        let (x, w) = (12.0, 56.0);
+        let name = if menu.settings.name.trim().is_empty() { "Rider" } else { menu.settings.name.as_str() };
+        let about = "Counted as you race: a race when the gate drops, a win at the flag, and the rest when you leave the results.";
+        let top = self.heading("Player 1", name, about, x, 8.0, w, 2.6) + 1.4;
+        let size = 1.0;
+        let h = size * 2.0;
+        let cw = (w - 2.0) / 2.0;
+        for (k, (heading, rows)) in stats_rows(&record, menu.stats_metric).iter().enumerate() {
+            let cx = x + k as f32 * (cw + 2.0);
+            self.text(Weight::Bold, &heading.to_uppercase(), cx + 0.9, top + CAP, 1.0, 0.0, DUST, Align::Left);
+            let mut y = top + 1.8;
+            for (title, value) in rows {
+                self.round([cx, y, cw, h], 0.6 * size, GLASS, GLASS);
+                let mid = Pen::mid(y + h / 2.0, size);
+                self.text(Weight::Heavy, title, cx + 0.9, mid, size, 0.0, PEACH, Align::Left);
+                self.text(Weight::Heavy, value, cx + cw - 0.9, mid, size, 0.0, CHALK, Align::Right);
+                y += h + 0.3;
+            }
+        }
+        self.title(Screen::Stats.title());
+        self.hints(&[(Btn::Circle, "Back"), (Btn::LeftRight, if menu.stats_metric { "Miles" } else { "Kilometres" })]);
     }
 
     /// P369's unlock shop: the lit category's items, nine at a time round the cursor, each with its
