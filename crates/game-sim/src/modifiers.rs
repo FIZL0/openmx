@@ -41,7 +41,12 @@
 //! `kiowa.phy` ([`Mods::kiowa`]: [`Knob::KiowaSpeed`], [`Knob::KiowaClimb`], [`Knob::KiowaTurn`],
 //! [`Knob::KiowaCeiling`]) and the three cars' on theirs ([`Mods::car`]: [`Knob::CarSpeed`],
 //! [`Knob::CarAccel`], [`Knob::CarGrip`], [`Knob::CarSuspension`]), each skipped at its default as
-//! every other one is. Gravity, air drag and the time scale stay the bike's and the biplane's.
+//! every other one is. Gravity, air drag and the time scale stayed the bike's and the biplane's.
+//!
+//! P290 took the world's gravity and air drag to the Kiowa and the three cars as well ([`Mods::kiowa`],
+//! [`Mods::car`]): each machine's `[Mass Properties]` `GravityScale` x k, its force worked out again as
+//! the loader does, and its air drag (the Kiowa's `CD0` and `LowSpeedDrag`, the cars' wings'
+//! `BasicDrag` and `InducedDrag`) x k, skipped at the default as every other knob is.
 //!
 //! P287 gave MX vs. ATV's quad, an addition, its own [`Category::Atv`] on its loaded `.phy`
 //! ([`Mods::atv`]: [`Knob::AtvSpeed`], [`Knob::AtvAccel`], [`Knob::AtvGrip`], [`Knob::AtvSuspension`]),
@@ -70,7 +75,7 @@ use crate::r#move as mv;
 use crate::{car, kiowa};
 use crate::off_map;
 use crate::ride::Ride;
-use ps2_float::F;
+use ps2_float::{F, Vf};
 use std::sync::Arc;
 
 /// One modifier.
@@ -454,8 +459,8 @@ impl Knob {
             Knob::PlaneTurn => "how hard the biplane pulls round a turn",
             Knob::PlaneCeiling => "how high the biplane's engine still pulls; at the top, no ceiling",
             Knob::PlaneMaxG => "the most g a pull takes a fast biplane to, and its roll eased with it",
-            Knob::Gravity => "gravity, bike and biplane",
-            Knob::AirDrag => "air drag, bike and biplane",
+            Knob::Gravity => "gravity, every machine",
+            Knob::AirDrag => "air drag, every machine",
             Knob::TimeScale => "how fast the game runs",
             Knob::KiowaSpeed => "the Kiowa's top speed, stick held forward",
             Knob::KiowaClimb => "how fast the Kiowa climbs and comes down on the collective",
@@ -500,8 +505,8 @@ impl Knob {
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
             Knob::PlaneCeiling => "biplane [Engine] MaxAltitude (and the fade's start, which is 0) x k; Uncapped: no fade, and no 200 ft cap on the plane camera's eye",
             Knob::PlaneMaxG => "not a key: each step the elevator command held to the angle of attack whose lift is k times the weight, and the ailerons x corner speed / speed above the corner speed",
-            Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
-            Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
+            Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane, kiowa and car GravityScale x k",
+            Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0, kiowa CD0 and LowSpeedDrag, car every wing's BasicDrag and InducedDrag x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
             Knob::KiowaSpeed => "kiowa [Flight Controller] Max/MinSpeedCommand, SpeedCommandRate, Min/MaxPitchRateFeedForwardSpeed x k, SpeedGain / k; [Aerodynamics] CD0 / k^2",
             Knob::KiowaClimb => "kiowa [Flight Controller] ClimbRateGain, DescentRateGain x k; above 100%, [Main Rotor] MaxCollectivePitchAngle x k^(1/2)",
@@ -1016,11 +1021,33 @@ impl Mods {
             // No climbing above MaxAltitude: k times as high.
             c.max_altitude = c.max_altitude * k;
         }
+        // The world's (P290). The ride takes its gravity and its scale off the part when it is
+        // taken, the turn's feed-forward reading the scale; the wreck's own gravity is left, as the
+        // biplane's is.
+        if let Some(k) = self.factor(seat, Knob::Gravity) {
+            part_gravity(&mut phy.mass_properties, k);
+        }
+        if let Some(k) = self.factor(seat, Knob::AirDrag) {
+            // The body's drag along its travel, and the slow drag on its level velocity.
+            phy.aero.cd0 = phy.aero.cd0 * k;
+            phy.aero.low_speed_drag = phy.aero.low_speed_drag * k;
+        }
     }
 
     /// Player `seat`'s car, any of the three, on its loaded `.phy` before it is taken (P272).
     pub fn car(&self, seat: usize, car: &mut car::Car) {
         self.car_knobs(seat, [Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension], car);
+        // The world's (P290): the gravity the car is taken with, and every wing's drag, read off the
+        // file each substep (lift and downforce left alone).
+        if let Some(k) = self.factor(seat, Knob::Gravity) {
+            part_gravity(&mut car.mass_properties, k);
+        }
+        if let Some(k) = self.factor(seat, Knob::AirDrag) {
+            for w in &mut car.aero.wings {
+                w.basic_drag = w.basic_drag * k;
+                w.induced_drag = w.induced_drag * k;
+            }
+        }
     }
 
     /// Player `seat`'s MX vs. ATV car, any of the five (P288), on what its `.phy` loaded
@@ -1223,6 +1250,14 @@ fn car_power(e: &mut car::Engine, k: F) {
     }
     e.pump_torque_scale = e.pump_torque_scale * k;
     e.max_pump_torque = e.max_pump_torque * k;
+}
+
+/// A rigid-body part's gravity `k` times (P290): its `GravityScale`, and the force worked out from it
+/// as the loader does ([`phy::Part::read`]), so the part is the one a file with `k` times the scale
+/// loads.
+fn part_gravity(part: &mut phy::Part, k: F) {
+    part.gravity_scale = part.gravity_scale * k;
+    part.gravity = Vf::new(0.0, (-part.gravity_scale * part.weight).0, 0.0, 1.0);
 }
 
 /// The driven tire's grip along itself, `k` times: the force it passes before it spins, and the
