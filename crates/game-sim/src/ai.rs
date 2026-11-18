@@ -4395,17 +4395,22 @@ pub mod follow {
         out: Option<&mut Spot>, distance: Option<&mut F>,
     ) -> bool {
         let unset = (Spot::default(), Spot::default());
-        route_locate_over(t, limit, route, hint, point, refuse, holding_only, out, distance, unset)
+        route_locate_over(t, limit, route, hint, point, refuse, holding_only, out, distance, unset).0
     }
 
     /// [`route_locate`] with its unset words given: the place it starts with and its scratch spot.
+    /// Also the path whose node the place names (S311): the original's spot holds a node pointer,
+    /// and the scratch a path that placed nothing hands on is the node another path placed (or the
+    /// unset word's), so the place can name one path with another's node. `None` for a place with
+    /// no path.
     #[allow(clippy::too_many_arguments)]
     fn route_locate_over(
         t: &mut TrackPaths, limit: F, route: &[usize], hint: Option<Spot>, point: Vf, refuse: bool, holding_only: bool,
         out: Option<&mut Spot>, distance: Option<&mut F>, (mut took, mut scratch): (Spot, Spot),
-    ) -> bool {
+    ) -> (bool, Option<usize>) {
+        let (mut took_owner, mut scratch_owner) = (took.at().map(|(p, _)| p), scratch.at().map(|(p, _)| p));
         if route.is_empty() {
-            return false;
+            return (false, took_owner);
         }
         let mut best = F(-1.0);
         for &p in route {
@@ -4414,10 +4419,16 @@ pub mod follow {
             }
             let mut d = F(0.0);
             if !locate_on(t, limit, p, hint, point, refuse, holding_only, &mut scratch, Some(&mut d)) {
-                return false;
+                return (false, took_owner);
+            }
+            // A path that placed a node answers its distance (never −1: a root, or NaN); one that
+            // placed none answers −1 and leaves the node as it was.
+            if d.0.to_bits() != (-1.0f32).to_bits() {
+                scratch_owner = Some(p);
             }
             if seen(best) == F(-1.0) || (!(seen(d) < F(0.0)) && seen(d) < seen(best)) {
                 took = scratch;
+                took_owner = scratch_owner;
                 best = d;
             }
         }
@@ -4427,7 +4438,7 @@ pub mod follow {
         if let Some(d) = distance {
             *d = best;
         }
-        true
+        (true, took_owner)
     }
 
     /// The path `from` leads on to, as the look-ahead picks it; `None` where the original reads past
@@ -4502,18 +4513,28 @@ pub mod follow {
         t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
         holding_only: bool, out: &mut Spot, near: Option<&mut Spot>,
     ) -> bool {
-        let Some((first, from)) = spot.at() else { return false };
+        look_ahead_owned(t, reach, speed, limit, spot, point, draws, refuse, holding_only, out, near).0
+    }
+
+    /// [`look_ahead`], and the path whose node `near` names (see [`route_locate_over`]).
+    #[allow(clippy::too_many_arguments)]
+    fn look_ahead_owned(
+        t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
+        holding_only: bool, out: &mut Spot, near: Option<&mut Spot>,
+    ) -> (bool, Option<usize>) {
+        let fail = (false, None);
+        let Some((first, from)) = spot.at() else { return fail };
         if refuse && t.paths[first].flags & path_flags::KEEP_OFF != 0 {
-            return false;
+            return fail;
         }
         let last = t.paths[first].nodes.len() - 1;
         if last == 0 {
-            return false;
+            return fail;
         }
         let end = Spot::on(first, last - 1, F(1.0));
         let to_end = t.distance(spot, end, false);
         if t.free_routes == 0 {
-            return false;
+            return fail;
         }
         t.free_routes -= 1;
         let mut route = vec![first];
@@ -4523,12 +4544,12 @@ pub mod follow {
             loop {
                 let Some(next) = pick_link(t, path, speed, draws[0], refuse) else {
                     t.free_route(&mut route);
-                    return false;
+                    return fail;
                 };
                 (path, node, along, length) = (next, 0, F(0.0), t.paths[next].length);
                 if t.free_routes == 0 {
                     t.free_route(&mut route);
-                    return false;
+                    return fail;
                 }
                 t.free_routes -= 1;
                 total = total + length;
@@ -4551,7 +4572,7 @@ pub mod follow {
             along = F(0.0);
             if node == t.paths[path].nodes.len() {
                 t.free_route(&mut route);
-                return false;
+                return fail;
             }
         }
         let span = t.paths[path].nodes[node].span;
@@ -4562,7 +4583,7 @@ pub mod follow {
             Some(near) => {
                 route_locate_over(t, limit, &route, Some(spot), point, refuse, holding_only, Some(near), None, (end, spot))
             }
-            None => true,
+            None => (true, None),
         };
         t.free_route(&mut route);
         found
@@ -4676,15 +4697,22 @@ pub mod follow {
     }
 
     /// The path and node a spot names, where its path has that node. The route locate can hand back a
-    /// spot on one path with another path's node (see [`route_locate`]); the port's spot cannot say
-    /// which, and reads it as naming nothing.
+    /// spot on one path with another path's node (see [`route_locate_over`]); the port's spot cannot
+    /// say which, and reads it as its own path's node, or none past its end.
     fn node_of(t: &TrackPaths, spot: Spot) -> Option<(usize, usize)> {
-        spot.at().filter(|&(p, n)| p < t.paths.len() && n < t.paths[p].nodes.len())
+        node_in(t, spot.at().map(|(p, _)| p), spot)
     }
 
-    /// The `+4` word of the node a spot is on (0 for a spot on no node: the original reads its null).
-    fn node_word(t: &TrackPaths, spot: Spot) -> u32 {
-        node_of(t, spot).map_or(0, |(p, n)| t.paths[p].nodes[n].word_04)
+    /// The node a spot names in the node list of path `owner` (the path the original's node pointer
+    /// points into), where that path has it.
+    fn node_in(t: &TrackPaths, owner: Option<usize>, spot: Spot) -> Option<(usize, usize)> {
+        let (p, n) = (owner?, spot.at()?.1);
+        (p < t.paths.len() && n < t.paths[p].nodes.len()).then_some((p, n))
+    }
+
+    /// The `+4` word of a node (0 for none: the original reads its null).
+    fn node_word(t: &TrackPaths, node: Option<(usize, usize)>) -> u32 {
+        node.map_or(0, |(p, n)| t.paths[p].nodes[n].word_04)
     }
 
     /// A node's speed word as the follower takes it: [`DEFAULT_SPEED`] for −1.
@@ -4770,18 +4798,28 @@ pub mod follow {
         t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
         holding_only: bool, goal: Option<Spot>, out: &mut Spot, near: Option<&mut Spot>,
     ) -> bool {
+        route_look_ahead_owned(t, reach, speed, limit, spot, point, draws, refuse, holding_only, goal, out, near).0
+    }
+
+    /// [`route_look_ahead`], and the path whose node `near` names (see [`route_locate_over`]).
+    #[allow(clippy::too_many_arguments)]
+    fn route_look_ahead_owned(
+        t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
+        holding_only: bool, goal: Option<Spot>, out: &mut Spot, near: Option<&mut Spot>,
+    ) -> (bool, Option<usize>) {
         let Some(goal) = goal else {
-            return look_ahead(t, reach, speed, limit, spot, point, draws, refuse, holding_only, out, near);
+            return look_ahead_owned(t, reach, speed, limit, spot, point, draws, refuse, holding_only, out, near);
         };
         if node_of(t, spot).is_none() || node_of(t, goal).is_none() {
-            return false;
+            return (false, None);
         }
         let mut route = Vec::new();
         let found = t.route(spot, goal, Some(&mut route), None, refuse);
         let walked = t.route_walk(reach, spot, &route, out);
-        let near_found = route_locate_over(t, limit, &route, Some(spot), point, refuse, holding_only, near, None, (goal, spot));
+        let (near_found, owner) =
+            route_locate_over(t, limit, &route, Some(spot), point, refuse, holding_only, near, None, (goal, spot));
         t.free_route(&mut route);
-        found & i32::from(walked) & i32::from(near_found) != 0
+        (found & i32::from(walked) & i32::from(near_found) != 0, owner)
     }
 
     /// The vehicle brain's route follower (vt+0x8c): `reach` on along the paths ([`route_look_ahead`]
@@ -4808,21 +4846,29 @@ pub mod follow {
     ///   blended along the stretch to the next node's under [`BLENDS_SPEED`].
     ///
     /// The angles are [`ANGLES_REST`] either way.
+    ///
+    /// The nearest place can name one path with another path's node (S311, see
+    /// [`route_locate_over`]): the drift's node word and the speeds are then that other path's node's
+    /// (and the next node after it on that path), and the path it is on comes back, `None` when the
+    /// spot's node is its own path's. The original's next measure on such a spot ([`TrackPaths::distance`]:
+    /// the path branch's hand-over, or the next tick's reach) recurses for good; the port's spot
+    /// keeps no owner, and reads its own path's node after.
     #[allow(clippy::too_many_arguments)]
     pub fn route_follow(
         f: &mut Follower, t: &mut TrackPaths, dt: F, reach: F, follow: bool, goal: Option<Spot>, race_word: Option<u32>,
         rng: &mut crate::rng::Rng,
-    ) {
+    ) -> Option<usize> {
         let (mut ahead, mut near) = (Spot::default(), Spot::default());
         let draws = f.draws;
-        let found =
-            route_look_ahead(t, reach, f.own_speed, f.reach.max, f.spot, f.position, &draws, false, false, goal, &mut ahead, Some(&mut near));
+        let (found, owner) = route_look_ahead_owned(
+            t, reach, f.own_speed, f.reach.max, f.spot, f.position, &draws, false, false, goal, &mut ahead, Some(&mut near),
+        );
         if !found {
             f.speed = f.own_speed;
             f.aim = f.position;
             f.heading = f.forward;
             f.angles = ANGLES_REST;
-            return;
+            return None;
         }
         if near.path != f.spot.path {
             for d in &mut f.draws {
@@ -4844,7 +4890,8 @@ pub mod follow {
         t.spot_point(&mut ahead, &mut f.aim);
         t.path_ahead(ahead, &mut f.heading);
         // The original also takes the way the path runs at the new spot, into a word it never reads.
-        if node_word(t, f.spot) & NO_DRIFT != 0 || f.flags & DRIFTS == 0 {
+        let node = node_in(t, owner, f.spot);
+        if node_word(t, node) & NO_DRIFT != 0 || f.flags & DRIFTS == 0 {
             f.drift = F(0.0);
         } else {
             let step = f.drift_rate * dt;
@@ -4879,7 +4926,7 @@ pub mod follow {
         f.heading = unit(level(add(f.heading, turn)));
         if !follow {
             f.speed = f.cruise;
-        } else if let Some((p, n)) = node_of(t, f.spot) {
+        } else if let Some((p, n)) = node {
             let nodes = &t.paths[p].nodes;
             f.speed = node_speed(nodes[n].word_44);
             if f.flags & BLENDS_SPEED != 0
@@ -4895,6 +4942,7 @@ pub mod follow {
             }
         }
         f.angles = ANGLES_REST;
+        owner.filter(|&p| Some(p) != near.at().map(|(q, _)| q))
     }
 
     /// The tick's path branch (the original's ai_tick_flag when the seeker has no state and the brain
@@ -4908,7 +4956,8 @@ pub mod follow {
     /// [`super::seek::CLOSING`] cleared.
     ///
     /// The goal's spot has to name a node by the measure; the port leaves the hand-over out where it
-    /// does not (the original reads its null).
+    /// does not (the original reads its null), and where the route follower left the rider's spot
+    /// naming another path's node (the original's measure never returns).
     pub fn path(
         f: &mut Follower, t: &mut TrackPaths, dt: F, mut goal: Option<&mut Goal>, race_word: Option<u32>,
         rng: &mut crate::rng::Rng,
@@ -4923,8 +4972,11 @@ pub mod follow {
         }
         let position = f.position;
         let r = reach(f, t, F(0.0), F(0.0), true, position, None);
-        route_follow(f, t, dt, r, true, goal.as_ref().map(|g| g.spot), race_word, rng);
+        let cross = route_follow(f, t, dt, r, true, goal.as_ref().map(|g| g.spot), race_word, rng);
         let Some(g) = goal else { return };
+        if cross.is_some() {
+            return;
+        }
         let d = sub(f.position, g.point);
         let straight = Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z()).sqrt();
         if node_of(t, f.spot).is_none() || node_of(t, g.spot).is_none() {
