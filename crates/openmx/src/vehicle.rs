@@ -638,6 +638,25 @@ pub fn parked_by(name: &str, file: Vec<Vec<Spawn>>) -> Vec<Vec<Spawn>> {
     file.into_iter().zip(Machine::ALL).map(|(s, m)| if m.parks_by(name) { s } else { Vec::new() }).collect()
 }
 
+/// A world's lot with each car parked at its own track's tile (S266): `file` is the home tile's
+/// spots ([`world_spots`] then [`parked_by`]), and `tiles` each tile's `machine.txt`, by its member
+/// name, with the tile's offset (`x`, `z`). A car whose home track ([`Machine::home`]) is a tile here
+/// is parked by that tile's file, its spots moved by the tile's offset alone: the tile keeps its own
+/// heights in the world, so each spot keeps its own and stands where it stands on the track. A car
+/// with no tile of its own keeps `file`'s list (empty, unless the home tile is its track). The
+/// port's own placement: the original has no worlds.
+pub fn tile_cars(file: Vec<Vec<Spawn>>, tiles: &[(&str, &[u8], [f32; 2])]) -> Vec<Vec<Spawn>> {
+    file.into_iter()
+        .zip(Machine::ALL)
+        .map(|(s, m)| {
+            let Some(&(_, txt, at)) = m.home().and_then(|_| tiles.iter().find(|(name, ..)| m.parks_by(name))) else {
+                return s;
+            };
+            spots(txt, m).into_iter().map(|spot| Spawn { at: Vf::new(spot.at.x() + at[0], spot.at.y(), spot.at.z() + at[1], 1.0), facing: spot.facing }).collect()
+        })
+        .collect()
+}
+
 /// Every machine a ride parks, one of each per player, sized to the player count as players join and
 /// leave.
 #[derive(Clone, Debug, Default)]
@@ -4321,6 +4340,38 @@ mod tests {
         assert_eq!(lot.of(Machine::Helicopter).count(), 2);
         // A file with no spots stays empty.
         assert!(world_spots(b"[Machines]\n", home, start, 4.0, &mut ground).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn a_world_parks_each_car_on_its_own_tile() {
+        // The home tile is free06, which parks no car; free09 and free07 are tiles too, free11 not.
+        let home = "tracks\\free06\\machine.txt";
+        let mut ground = |_: Vf| 0.0;
+        let start = Spawn { at: Vf::new(7000.0, 0.0, 9000.0, 1.0), facing: Vf::new(1.0, 0.0, 0.0, 0.0) };
+        let file = parked_by(home, world_spots(TWO_OF_EACH.as_bytes(), [0.0, 0.0], start, 4.0, &mut ground));
+        let truck = "[Monster1]\nPosition = 300, 25, 400\nDirection = 0, 0, 1\n[Biplane1]\nPosition = 1, 2, 3\nDirection = 1, 0, 0\n";
+        let tiles: [(&str, &[u8], [f32; 2]); 3] = [
+            (home, TWO_OF_EACH.as_bytes(), [0.0, 0.0]),
+            ("tracks\\free09\\machine.txt", truck.as_bytes(), [15840.0, -720.0]),
+            ("tracks\\free07\\machine.txt", b"[Machines]\n", [10368.0, -720.0]),
+        ];
+        let lot = tile_cars(file.clone(), &tiles);
+        for (i, m) in Machine::ALL.iter().enumerate() {
+            match m {
+                // Free09's own spot, moved by free09's offset, its height its own.
+                Machine::Monster => {
+                    assert_eq!(lot[i].len(), 1);
+                    assert_eq!(lot[i][0].at, Vf::new(300.0 + 15840.0, 25.0, 400.0 - 720.0, 1.0));
+                    assert_eq!(lot[i][0].facing, Vf::new(0.0, 0.0, 1.0, 0.0));
+                }
+                // Free07's file parks no baja, and free11 is no tile: none.
+                Machine::Baja | Machine::Buggy => assert!(lot[i].is_empty(), "{m:?}"),
+                // The fliers keep the home tile's spots, not free09's plane.
+                _ => assert_eq!(lot[i], file[i], "{m:?}"),
+            }
+        }
+        // With no tiles, the home lot is as it was.
+        assert_eq!(tile_cars(file.clone(), &[]), file);
     }
 
     #[test]
