@@ -155,6 +155,35 @@ pub(crate) const C33_NOTES_ON: [(u64, &str); 2] = [(9, "ai2"), (14, "ai0")];
 /// `+0x2d8`, its last low pick at `+0x2c4`.
 pub(crate) const C33_NOTE_PICKS: (u64, [&str; 2], usize) = (15, ["ai0", "ai2"], 1);
 
+/// S328c: the emitters that draw on the shared generator in C33, two draws each a tick: each run is
+/// a rider, its entry in its manager's list, and the first and last ticks it draws (63 is the window's
+/// end). 5 is the exhaust, 6 the generic rear-tyre dust, 8, 10 and 11 the rear sprays; the front
+/// sprays (7, 9), the foot dust (4) and the human's (no throttle) never draw here.
+pub(crate) const C33_DUST: [(&str, usize, u64, u64); 15] = [
+    ("ai0", 5, 17, 23),
+    ("ai0", 6, 18, 63),
+    ("ai0", 8, 20, 51),
+    ("ai0", 10, 20, 51),
+    ("ai0", 11, 20, 51),
+    ("ai1", 5, 21, 28),
+    ("ai1", 6, 22, 63),
+    ("ai1", 8, 24, 63),
+    ("ai1", 10, 24, 63),
+    ("ai1", 11, 24, 63),
+    ("ai2", 5, 17, 23),
+    ("ai2", 6, 18, 54),
+    ("ai2", 8, 20, 54),
+    ("ai2", 10, 20, 54),
+    ("ai2", 11, 20, 54),
+];
+
+/// The emitters [`C33_DUST`] has drawing at `tick`, sorted.
+pub(crate) fn c33_dust(tick: u64) -> Vec<(&'static str, usize)> {
+    let mut v: Vec<(&'static str, usize)> = C33_DUST.iter().filter(|r| (r.2..=r.3).contains(&tick)).map(|r| (r.0, r.1)).collect();
+    v.sort();
+    v
+}
+
 /// A body's animation object: its look-around clock (`+0xa30`), and the request block it reads
 /// (`+0x488`) with the gate's cut flag at `+0x140`.
 const BODY_LOOK: u32 = 0xa30;
@@ -223,6 +252,18 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
             }
         }),
     );
+    // S328c: each emitter's draws, by its rider and its entry in the rider's manager (`+0x1490`).
+    let emitters: Vec<(u32, &str, usize)> = c33_emitters(&ee);
+    let emitted: Rc<RefCell<Vec<(u32, usize)>>> = Rc::default();
+    let (e, l) = (Rc::clone(&emitted), Rc::clone(&log));
+    ee.hooks.insert(
+        addr("emit").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let (before, a0) = (l.borrow().len(), ee.r(4) as u32);
+            through(ee);
+            e.borrow_mut().push((a0, l.borrow().len() - before));
+        }),
+    );
     // A body's animation object is held at its rider's +0xdb4.
     let anim = |ee: &Ee, k: usize| ee.u32_at(C33_RIDERS[k].0 + 0xdb4);
     // No body is at the gate: the Sim's riders are seeded without a start line (race4.rs).
@@ -266,6 +307,18 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         if tick >= 17 {
             assert!(count(Site::Dust) > 0, "tick {tick}: no dust");
         }
+        // S328c: the emitters that drew, two draws each, as C33_DUST says.
+        let mut dust = Vec::new();
+        for (em, n) in std::mem::take(&mut *emitted.borrow_mut()) {
+            let &(_, name, entry) = emitters.iter().find(|e| e.0 == em).unwrap_or_else(|| panic!("tick {tick}: emitter {em:#x} is no rider's"));
+            assert!(n == 0 || n == 2, "tick {tick}: {name}'s entry {entry} drew {n}");
+            if n == 2 {
+                dust.push((name, entry));
+            }
+        }
+        dust.sort();
+        assert_eq!(dust, c33_dust(tick), "tick {tick}: the emitters that drew");
+        assert_eq!(2 * dust.len(), count(Site::Dust), "tick {tick}: the dust draws are the emitters'");
         // S328b: the notes switch on, and pick, as C33_NOTES_ON and C33_NOTE_PICKS say.
         if tick <= 16 {
             for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
@@ -295,3 +348,17 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     assert_eq!(generator_through, 16, "the generator agrees through");
 }
 
+
+/// Every rider's emitters: the emitter, its rider and its entry in the rider's manager (`+0x1490`,
+/// the entries' count at `+0x34` and their list at `+0x3c`; an entry's emitter at `+0x14`).
+pub(crate) fn c33_emitters(ee: &Ee) -> Vec<(u32, &'static str, usize)> {
+    let mut out = Vec::new();
+    for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
+        let m = ee.u32_at(r + 0x1490);
+        for i in 0..ee.u32_at(m + 0x34) {
+            let entry = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
+            out.push((ee.u32_at(entry + 0x14), C33_NAMES[k], i as usize));
+        }
+    }
+    out
+}

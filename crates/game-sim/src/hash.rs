@@ -571,6 +571,23 @@ impl State for Sim {
                 });
             }
         }
+        // The bikes' emitters (S328c), on a Sim that runs them, like the notes.
+        if let Some(dust) = &self.dust {
+            for r in &dust.riders {
+                for e in &r.entries {
+                    w.group("dust", |w| {
+                        w.bool("live", e.live);
+                        w.bool("on", e.emitter.on);
+                        w.bool("just_on", e.emitter.just_on);
+                        w.vf("pos", e.emitter.pos);
+                        w.vf("prev", e.emitter.prev);
+                        if let crate::dust::Kind::Spray { clock, .. } = e.kind {
+                            w.f("clock", clock);
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 

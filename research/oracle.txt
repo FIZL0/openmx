@@ -6567,6 +6567,32 @@ vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98
 # The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
 # nothing that tick: the manager runs before the emitter, which only takes its position (S109's
 # animandpump capture: exhaust on at 2001, rear sprays at 2006, each emitting from the row after).
+vehicle_fx_generic_update boot 0x003d70f0 a Generic entry's update (vt +0x10): the emitter on (vt +0x98), every frame
+vehicle_fx_entry_off  boot 0x003d8660 Generic's vt +0x18: flag &= ~1, the emitter off (vt +0x9c)
+vehicle_fx_spray_off  boot 0x003d8720 Spray's vt +0x18: flag &= ~1, clock +0x28 = 0, the emitter off
+# S328c — the emitters' draws on the shared generator (crates/game-sim/src/dust.rs; tests ai/draws.rs
+#   C33_DUST, ai/race4.rs). Vtables: Exhaust 0x0045e780 (on 0x003d88a0, update vehicle_fx_exhaust),
+#   Generic 0x0045e6f0 (on 0x003d8610), Spray 0x0045e720 (on vehicle_fx_entry_on, update
+#   vehicle_fx_spray_update), CollisionModel 0x0045e690, PCC 0x0045e660, TireTrack 0x0045e630. Manager
+#   frame (vehicle_fx_update): a record's flags = wreck (8 / 0x10) | ground 2 | object 4 | none 1 (no
+#   ground and no object); an entry is allowed when (no record or !(Disable & record flags)) and
+#   !(Disable & wreck flag): allowed and not live -> vt +0x14, not allowed and live -> vt +0x18; then
+#   flag == 1 -> vt +0x10 update. The manager's feed (+0x30: count, records +4, throttle* +0x18, clutch*
+#   +0x1c, speed* +0x20, wreck* +0x24; record +8 ground*, +0xc object*, +0x14 spinning*, +0x20 side*)
+#   points into the bike's stunt-state snapshot, which stunt_state_pack writes after the attachment walk
+#   (0x00133500) that runs the manager: the manager reads the frame before's (C33: the Sim's exhaust a
+#   tick early until the feed lagged). emit (0x00150540): emit_timing, then emitter +0x23c -> emit_other;
+#   node +4 model set and its +4 +0xb4 stamp != gp-0x7f64 frame id -> nothing (C33's nodes have no
+#   model); speed = sqrt(mula/madda/madd of pos +0x40 - prev +0x60) / dt; speed < +0x3c4 -> nothing;
+#   else rand at 0x0015070c (rate fraction, into emit_count) and 0x00150744 (pattern): two draws a
+#   frame per emitter, not per particle. C33's riders: 14 entries each (0-1 CollisionModel, 2-3 PCC, 4
+#   PCC Foot Dust MES 30, 5 Exhaust MES 0, 6 Generic on RearTire_Particle01 MES 5, 7/9 front sprays and
+#   8/10/11 rear sprays MES 3/3/1 (9 and 10 take emit_other), 12-13 TireTrack). Each rider's dust draws
+#   follow its own AI draws in the walk (tick 34: Ai, 8 dust, Ai, 8 dust, Ai, 8 dust) and come before
+#   the notes'. Emitter nodes: RearTire_Particle01 (local t 0.000362, -0.969077, -2.757981) under
+#   SwingArm (local t 0, 1.923728, -0.572021, rotation from the rear compression) under Bike under
+#   bike\anim\bike.psg; FrontTire_Particle01 under Shocks under Handlebars; the exhaust's under
+#   YZ250_Exhaust_Pipe. The Sim holds each at a fixed place in the chassis frame (S421).
 
 # S100 — the 125 into a free09 trunk, live (tests crates/game-sim/tests/eco.rs
 #   a_free09_tree_against_the_original; captures context/capture/s100/{tree,nowreck}.csv in s2).
