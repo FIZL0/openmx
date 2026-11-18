@@ -19,3 +19,16 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       - run: cargo test --locked -p ps2-float -p game-sim --lib
       - run: cargo build --locked --workspace
+  # the sideloading source lists every release's IPA, newest first, its top-level fields versions[0]'s: the latest
+  # release's as published, and one built now from the API (a stand-in IPA under the latest tag) by tools/ios-source.sh
+  altstore-source:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - run: tools/check-altstore-source.sh https://github.com/FIZL0/openmx/releases/latest/download/altstore-source.json
+      - run: |
+          tag=$(gh api repos/FIZL0/openmx/releases/latest --jq .tag_name)
+          head -c 1000 /dev/zero > "$RUNNER_TEMP/openmx-ios.ipa"
+          tools/ios-source.sh "$tag" "$RUNNER_TEMP/openmx-ios.ipa"
