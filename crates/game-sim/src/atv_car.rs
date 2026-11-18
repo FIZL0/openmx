@@ -4091,7 +4091,7 @@ impl Ride {
     pub fn record_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
         let Some(r) = self.recorded.as_mut() else { return };
         r.record.heightfield = self.car.tipped;
-        let mut on = crate::quad::RecordOn { world, scene: &mut self.vehicle.scene, rays: &r.riding, damped: None, category: 0, nobody: Default::default() };
+        let mut on = crate::quad::RecordOn { world, scene: &mut self.vehicle.scene, rays: &r.riding, damped: None, category: 0, nobody: Default::default(), stood: None };
         crate::handling::record::clear(&mut r.record, &mut on);
         let mut view = self.body.view();
         let body = if r.record.body { Some(&mut view) } else { None };

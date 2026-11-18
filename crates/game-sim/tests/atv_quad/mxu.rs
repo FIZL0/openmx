@@ -135,7 +135,7 @@ fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
     let record = game_sim::handling::record::read(&|a| pre.u32_at(a), at.record);
     let held = game_sim::handling::record::held(&|a| pre.u32_at(a), at.record).expect("the record's resolution fields");
     let handles = quad::Rays { active: riding, active_too: riding, record: riding, wreck, riding };
-    ride.recorded = Some(quad::Recorded { record, held, riding: rays(riding), wreck: rays(wreck), rays: handles, parts: Default::default() });
+    ride.recorded = Some(quad::Recorded { record, held, riding: rays(riding), wreck: rays(wreck), rays: handles, parts: Default::default(), kept: false });
     // The wreck body built on WreckATVm.col when the file is there: its rays are the image's wreck part's.
     let col = Kit::load().ok().map(|kit| kit.ctx("mxvatv-ps2/md37a").join(quad::WRECK_FILE));
     if let Some(bytes) = col.and_then(|p| std::fs::read(p).ok()) {
