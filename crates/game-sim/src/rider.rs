@@ -317,6 +317,11 @@ pub struct Rider {
     /// The idle pool: which of the ten gate idles have been used, and the generator they are drawn
     /// with.
     pub idles: rider_anim::Pool,
+    /// The Sim lent its one generator to this frame (S387): [`Rider::idles`]' generator is the race's
+    /// for the frame, and the riding ragdoll's tick at its end draws on it too, after every draw the
+    /// update made, as the original's one `rand()` has them. Only ever set inside a Sim's step; not
+    /// sent and not hashed.
+    pub(crate) lent_rng: bool,
     /// What the body's clock did on the last [`Rider::body_frame`], for whoever draws the body: the
     /// transition that posed the frame and the pose snapshot its put asked for
     /// ([`rider_anim::Clocked`], and V17 on why neither can be read back off the motion object once
@@ -493,6 +498,7 @@ impl Rider {
             body_numbers: rider_anim::Params::built(),
             body_rates: vehicle_anim::Params::default(),
             idles: rider_anim::Pool::default(),
+            lent_rng: false,
             body_clocked: rider_anim::Clocked::default(),
             feet: crate::foot_down::Feet::default(),
             // At the gate: the cut flag is what the body's selection takes its get-ready sequence
@@ -632,7 +638,16 @@ impl Rider {
         // history for the wreck entry to measure the bones' move from).
         let at = before.0[3];
         let mut riding = self.riding.take().filter(|r| !r.strayed(at)).unwrap_or_else(|| Box::new(Riding::new(&kit)));
+        // On the Sim's lent generator (S387) the body draws where the update's draws left it; its own
+        // is kept for a ride with no race.
+        let lent = self.lent_rng;
+        if lent {
+            std::mem::swap(&mut riding.rng, &mut self.idles.rng);
+        }
         riding.ride(&kit, self, &holds, before, table, clip, dt, world);
+        if lent {
+            std::mem::swap(&mut riding.rng, &mut self.idles.rng);
+        }
         self.riding = Some(riding);
     }
 

@@ -760,6 +760,7 @@ impl Wire for Rider {
             body_numbers: _,
             body_rates,
             idles,
+            lent_rng: _,
             body_clocked,
             feet,
             body_request,
@@ -845,6 +846,7 @@ impl Wire for Rider {
             cut_put_back: false,
             ragdoll_shown: None,
             score: Wire::take(r)?,
+            lent_rng: false,
         })
     }
 }

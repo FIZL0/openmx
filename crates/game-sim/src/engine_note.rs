@@ -669,8 +669,8 @@ pub struct Notes {
 
 impl crate::Sim {
     /// **The engine notes' frame** (S328b, the module header): every player's note in the walk's order
-    /// (the last player first), on the game's generator — the AI lane's, or the race's when there is no
-    /// lane. A Sim with no notes, or no generator, draws nothing here. `rode` is the controls each bike
+    /// (the last player first), on the game's generator — the race's, or the AI lane's when there is no
+    /// race (S387). A Sim with no notes, or no generator, draws nothing here. `rode` is the controls each bike
     /// rode, for its clutch lever.
     pub(crate) fn notes_frame(&mut self, dt: F, rode: &[Controls]) {
         if self.notes.is_none() {
@@ -695,8 +695,9 @@ impl crate::Sim {
             })
             .collect();
         let rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
-            (Some(lane), _) => &mut lane.rng,
-            (None, Some(race)) => &mut race.rng,
+            // In a race, the race's: the lane's own is for a ride with no race (S387).
+            (_, Some(race)) => &mut race.rng,
+            (Some(lane), None) => &mut lane.rng,
             (None, None) => return,
         };
         let Some(notes) = self.notes.as_deref_mut() else { return };

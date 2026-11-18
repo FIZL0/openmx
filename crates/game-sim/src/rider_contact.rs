@@ -1163,7 +1163,9 @@ impl Sim {
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
+        let kept = self.lend_rng(0);
         let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump.as_deref_mut());
+        self.rng_back(0, kept);
         self.props_back(0);
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
