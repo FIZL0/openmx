@@ -1639,7 +1639,8 @@ fn the_rides_bones_gather_the_wreck_bike_once_off_it() {
     }
     let (off, first) = (off.expect("the bones leave the bike"), first.expect("the bike is gathered"));
     eprintln!("off the bike at tick {off}, the bike first listed at {first}");
-    assert_eq!((off, first), (35, 43), "off the bike, then listed at the next rebuild");
+    // 43 until S473 measured the search from where the first sphere last stood, not first.
+    assert_eq!((off, first), (35, 58), "off the bike, then listed at the next rebuild");
 }
 
 /// **The bones gather without the wreck bike once it has left the broad phase** (S108): the S105

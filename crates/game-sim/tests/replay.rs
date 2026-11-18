@@ -11304,18 +11304,22 @@ fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
                 dv[c] += (v[c] - want_v[c]) / b.bones.len() as f32;
             }
         }
-        seen.push(format!("s466 t{t:2}: down {} worst {worst:.3} mean dv ({:+.2},{:+.2},{:+.2}) touch {}", b.down, dv[0], dv[1], dv[2], row["touch"]));
+        seen.push(format!("s466 t{t:2}: down {} worst {worst:.3} mean dv ({:+.2},{:+.2},{:+.2}) touch {} (port {})", b.down, dv[0], dv[1], dv[2], row["touch"], b.touch));
         assert_eq!(b.down, row["riding"] == 0.0, "tick {t}: the port's bones down against the original's riding word");
+        // Each tick's bone collisions touch as the original's: none but collisions 7 and 8 (bones 13
+        // and 16, the legs) on the tick after the entry (row 5's word, 384), against the wreck bike's
+        // mesh (S473: the bike's search round where the first sphere last stood).
+        assert_eq!(f64::from(b.touch), f64::from(row["touch"]), "tick {t}: the port's touch word against the original's:\n{}", seen.join("\n"));
         // Measured: 0.010, 0.038 and 0.053 ft to the entry, the mean velocity under 0.6 ft/s off.
         if t <= throw + 1 {
             assert!(worst < 0.1 && dv.iter().all(|d| d.abs() < 1.0), "tick {t}: the bones apart:\n{}", seen.join("\n"));
         }
-        // From the tick after the entry: the original's collisions 7 and 8 touch (row 5's touch word,
-        // 384), the port's do not, and the bones are 1.4 ft/s low in y from there (S473). Measured
-        // 0.21 ft that tick, 1.31 on tick 10, 1.99 by tick 23.
+        // From the touch on (S473): measured 0.072 ft that tick, 0.203 on tick 11, 1.29 by tick 23 (it
+        // grows from tick 19), the mean velocity under 0.4 ft/s off in every lane. Before S473 the
+        // port's legs missed the bike there and the bones went 1.4 ft/s low in y: 1.99 ft by tick 23.
         if t > throw + 1 {
-            assert!(worst < (0.25 * (t - throw) as f32).min(2.5), "tick {t}: the bones apart:\n{}", seen.join("\n"));
-            assert!(dv[1] < -1.0, "tick {t}: the touch's y gap closed (S473?):\n{}", seen.join("\n"));
+            assert!(worst < if t <= 18 { 0.6 } else { 1.5 }, "tick {t}: the bones apart:\n{}", seen.join("\n"));
+            assert!(dv.iter().all(|d| d.abs() < 0.5), "tick {t}: the bones' velocity apart:\n{}", seen.join("\n"));
         }
     }
     println!("{}", seen.join("\n"));
@@ -11328,6 +11332,8 @@ fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
 struct B19Bones {
     down: bool,
     bones: Vec<(Vf, Vf)>,
+    /// While down, a bit for each bone collision a push-out touched, as the capture's `touch` (S473).
+    touch: u32,
 }
 
 /// **The human's body actor in `st` as the port's riding body** (B19): the actor whose main bone is
@@ -11472,9 +11478,9 @@ fn b19_ride(dir: &str, name: &str, ticks: usize) -> Option<(Vec<S211Tick>, Vec<B
             let r = &sim.rider;
             let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
             bones.push(match (&r.ragdoll, &r.riding) {
-                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
-                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
-                (None, None) => B19Bones { down: false, bones: Vec::new() },
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones), touch: d.contacts.iter().enumerate().map(|(i, c)| u32::from(c.touched) << i).sum() },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones), touch: 0 },
+                (None, None) => B19Bones { down: false, bones: Vec::new(), touch: 0 },
             });
         },
     )?;
@@ -13774,9 +13780,9 @@ fn r24_ride_held(dir: &str, name: &str, ticks: usize, draws: u32, held: &[game_s
             let r = &sim.rider;
             let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
             bones.push(match (&r.ragdoll, &r.riding) {
-                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
-                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
-                (None, None) => B19Bones { down: false, bones: Vec::new() },
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones), touch: d.contacts.iter().enumerate().map(|(i, c)| u32::from(c.touched) << i).sum() },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones), touch: 0 },
+                (None, None) => B19Bones { down: false, bones: Vec::new(), touch: 0 },
             });
             if let Some(d) = &r.ragdoll {
                 force.get_or_insert(d.ragdoll.launch.force);
