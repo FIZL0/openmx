@@ -775,3 +775,85 @@ fn the_seats_wreck_bikes_are_on_the_node() {
         assert!(struck.first() == Some(&first), "{}: the props' rays struck seat 2's wreck bike in ticks {struck:?}", run.name);
     }
 }
+
+/// The wreck bike's side to the props' step in [`a_ball_a_strike_wakes_meets_the_wreck_bike_beside_it`]:
+/// any index no other entry names.
+const LATE_SIDE: usize = 7;
+
+/// How far along x from free09's ball [`a_ball_a_strike_wakes_meets_the_wreck_bike_beside_it`] stands
+/// the wreck bike's hull, in feet.
+const LATE_GAPS: [f32; 4] = [1.5, 2.5, 3.5, 4.5];
+
+/// One free09 set: the asleep ball woken by a riding bike's strike in the props' pass, its search
+/// late in the pass ([`PropSet::strike_in_among`]) with the wreck bike's hull at `gap` past it, or
+/// (`in_pass`) woken first and searched by the pass itself. Answers the ball's list and what its rays
+/// struck on the wreck bike.
+fn late_beside(free: &mut Free09, gap: f32, in_pass: bool, hulled: bool) -> (Vec<Contact>, prop_wreck::WreckStrike) {
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let mut ground = game_sim::world::Place { ground: Ground::new(&terrain, &free.scene.terrain), props: std::mem::take(&mut free.props) };
+    let set = &mut free.set;
+    let o = set.collections[BALL].objects[0].node.origin;
+    let at = Mat4([Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(o.x() + gap, o.y(), o.z(), 1.0)]);
+    let hull = prop_world::Wreck { hull: Plane { mesh: &free.mesh.mesh, at, velocity: Vf::ZERO }, side: LATE_SIDE };
+    let wrecks = if hulled { std::slice::from_ref(&hull) } else { &[] };
+    let dt = F(1.0 / 30.0);
+    let strike = if in_pass {
+        set.struck(BALL, 0);
+        set.search_in_among(dt, &mut ground, wrecks).1
+    } else {
+        let (mut movers, _) = set.search_in_among(dt, &mut ground, wrecks);
+        assert!(!set.collections[BALL].objects[0].filed, "the ball is not on the node before the strike");
+        let mut strike = game_sim::prop_contact::Strike { struck: vec![(BALL, 0, Vec::new())], by: Some((0, 1)), ..Default::default() };
+        set.strike_in_among(&mut strike, dt, &mut ground, &mut movers, wrecks).1
+    };
+    let list = set.collections[BALL].objects[0].collision.as_ref().unwrap().record.contacts.clone();
+    (list, strike.into_iter().next().unwrap_or_default())
+}
+
+/// **A ball a riding bike's strike wakes meets the wreck bike beside it in that tick** (S384): the
+/// original's node walk searches an object filed in the walk at its end, with the wreck bikes' objects
+/// still on the node, so its rays meet a wreck bike's hull as a filed prop's do (S243, proved on the
+/// hit2 states above). free09 off the disc, its asleep ball struck in the props' pass with a wreck
+/// bike's hull at each of [`LATE_GAPS`] past it: the ball's list and its mirrors for the wreck bike are
+/// the ones it gets woken before the pass and searched by it; without the hulls (before S384) its
+/// list names no wreck bike. Port against port: the hit2/hit3 states are no longer in the context, so
+/// no original walk is compared here (journal 2026-11-18-s384).
+#[test]
+fn a_ball_a_strike_wakes_meets_the_wreck_bike_beside_it() {
+    let mut met = 0;
+    for gap in LATE_GAPS {
+        let Some(mut free) = free09() else { return };
+        let (want, want_strike) = late_beside(&mut free, gap, true, true);
+        let mut free = free09().unwrap();
+        let (got, got_strike) = late_beside(&mut free, gap, false, true);
+        let mut free = free09().unwrap();
+        let (bare, _) = late_beside(&mut free, gap, false, false);
+        let names = |l: &[Contact]| l.iter().filter(|e| e.other == Some(LATE_SIDE)).count();
+        eprintln!("{gap} ft: in the pass {} entries ({} on the wreck), late {} ({}), late without hulls {} ({})", want.len(), names(&want), got.len(), names(&got), bare.len(), names(&bare));
+        assert_eq!(got, want, "{gap} ft: the late ball's list");
+        assert_eq!(got_strike.mirrors, want_strike.mirrors, "{gap} ft: the late ball's mirrors on the wreck bike");
+        let bodies = |s: &prop_wreck::WreckStrike| s.struck.iter().map(|p| (p.collection, p.object)).collect::<Vec<_>>();
+        assert_eq!(bodies(&got_strike), bodies(&want_strike), "{gap} ft: the bodies the wreck bike's frame pushes");
+        assert_eq!(names(&bare), 0, "{gap} ft: without the hulls the late ball meets no wreck bike");
+        if names(&want) > 0 {
+            assert!(!got_strike.mirrors.is_empty(), "{gap} ft: entries on the wreck bike, no mirrors for it");
+            met += 1;
+        }
+    }
+    assert!(met > 0, "the ball's rays meet the wreck bike at none of {LATE_GAPS:?}");
+}
+
+/// A late prop's strike on a wreck bike goes after the pass's (S384, [`prop_wreck::late_struck`]): its
+/// mirrors after the pass's, a body already struck named by its place, a new one put at the end.
+#[test]
+fn a_late_strike_goes_after_the_passs() {
+    use game_sim::prop_contact::Pushed;
+    let body = |collection, object| Pushed { collection, object, collider: Default::default(), body: Default::default(), mass: F(1.0) };
+    let mirror = |o: usize, s: i32| Contact { other: Some(o), surface: s, kind: 1, ..Default::default() };
+    let mut into = prop_wreck::WreckStrike { mirrors: vec![mirror(0, 1), mirror(1, 2)], struck: vec![body(2, 0), body(3, 0)], entries: vec![mirror(0, 9)] };
+    let late = prop_wreck::WreckStrike { mirrors: vec![mirror(0, 3), mirror(1, 4)], struck: vec![body(4, 0), body(3, 0)], entries: Vec::new() };
+    prop_wreck::late_struck(&mut into, late);
+    assert_eq!(into.mirrors, vec![mirror(0, 1), mirror(1, 2), mirror(2, 3), mirror(1, 4)]);
+    assert_eq!(into.struck.iter().map(|p| (p.collection, p.object)).collect::<Vec<_>>(), vec![(2, 0), (3, 0), (4, 0)]);
+    assert_eq!(into.entries, vec![mirror(0, 9)]);
+}

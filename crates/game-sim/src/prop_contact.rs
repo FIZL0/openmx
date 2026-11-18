@@ -417,15 +417,32 @@ impl PropSet {
     /// and walked after them. A strike that is not a riding bike's ([`Strike::by`]) is
     /// [`PropSet::strike`].
     pub fn strike_in(&mut self, strike: &mut Strike, dt: F, world: &mut dyn crate::world::World, movers: &mut crate::prop_set::PropMovers) -> Vec<Pushed> {
-        let Some((me, first)) = strike.by else { return self.strike(strike) };
+        self.strike_in_among(strike, dt, world, movers, &[]).0
+    }
+
+    /// [`PropSet::strike_in`] with the downed riders' wreck bikes on the node (S384), as the pass had
+    /// them ([`crate::Sim::frame_held_wrecked`]): a prop the strike files searches with their hulls
+    /// `wrecks` in its world, as the walk's late objects do, so its entry on a wreck bike beside it
+    /// is filed this tick. Also answers what the late props' rays struck on each of `wrecks`, in its
+    /// order, for [`crate::prop_wreck::late_struck`] to put after what the pass struck on it.
+    pub fn strike_in_among(
+        &mut self,
+        strike: &mut Strike,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        movers: &mut crate::prop_set::PropMovers,
+        wrecks: &[crate::prop_world::Wreck<'_>],
+    ) -> (Vec<Pushed>, Vec<crate::prop_wreck::WreckStrike>) {
+        let mut strikes = vec![crate::prop_wreck::WreckStrike::default(); wrecks.len()];
+        let Some((me, first)) = strike.by else { return (self.strike(strike), strikes) };
         let mut late = Vec::new();
         let pushed = self.strike_then(strike, &mut |set, fresh| {
             for &(c, o) in fresh {
                 set.stamp_filed();
-                set.search_late(c, o, dt, world, &[], movers, &mut []);
+                set.search_late(c, o, dt, world, wrecks, movers, &mut strikes);
                 late.push((c, o));
             }
-            let own = |set: &mut PropSet, world: &mut dyn crate::world::World, c: usize, k: usize| set.search_late(c, k, dt, world, &[], movers, &mut []);
+            let own = |set: &mut PropSet, world: &mut dyn crate::world::World, c: usize, k: usize| set.search_late(c, k, dt, world, wrecks, movers, &mut strikes);
             crate::prop_props::strike_props_late(set, fresh.to_vec(), &mut crate::prop_props::InWorld { world: &mut *world, own });
         });
         for (c, o) in late {
@@ -436,7 +453,7 @@ impl PropSet {
                 }
             }
         }
-        pushed
+        (pushed, strikes)
     }
 
     /// [`PropSet::strike`]'s work: every struck body woken first, as the striker's search wakes them,
@@ -578,6 +595,29 @@ impl crate::Sim {
     ) {
         bump.props = self.traffic.props.strike_in(&mut strike, dt, world, movers);
         bump.contacts = crate::mover_contact::merged(std::mem::take(&mut bump.contacts), strike.contacts);
+    }
+
+    /// [`Sim::strike_into`] with the downed riders' wreck bikes on the node (S384,
+    /// [`PropSet::strike_in_among`]): `hulls` as the props' pass had them ([`crate::Sim::wreck_hulls`]).
+    /// What the late props' rays struck on a wreck bike goes after what the pass struck on it
+    /// ([`crate::Sim::late_struck`]) for its frame, if that frame has not run yet (`framed` says).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn strike_into_among(
+        &mut self,
+        bump: &mut rider_contact::Bump,
+        mut strike: Strike,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        movers: &mut crate::prop_set::PropMovers,
+        hulls: &[crate::prop_wreck::Hull],
+        framed: &dyn Fn(usize) -> bool,
+    ) {
+        let wrecks = crate::prop_wreck::hulls_on_node(hulls);
+        let (props, strikes) = self.traffic.props.strike_in_among(&mut strike, dt, world, movers, &wrecks);
+        drop(wrecks);
+        bump.props = props;
+        bump.contacts = crate::mover_contact::merged(std::mem::take(&mut bump.contacts), strike.contacts);
+        self.late_struck(hulls, strikes, framed);
     }
 
     /// The props' step after the riders' frames (S197): the struck bodies' mirrors read every player's

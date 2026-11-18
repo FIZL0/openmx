@@ -542,6 +542,33 @@ fn joined(entries: Vec<Contact>, mut struck: Vec<Pushed>, by_props: WreckStrike)
     WreckStrike { mirrors, struck, entries }
 }
 
+/// A wreck bike on the props' node ([`crate::Sim::wreck_hulls`]): its player, its side to the props'
+/// step, its mesh, where its record stands it, and its body's velocity.
+pub(crate) type Hull = (usize, usize, std::sync::Arc<crate::ragdoll_scene::Bike>, Mat4, Vf);
+
+/// `hulls` as the props' searches take them.
+pub(crate) fn hulls_on_node(hulls: &[Hull]) -> Vec<Wreck<'_>> {
+    hulls.iter().map(|(_, side, mesh, at, velocity)| Wreck { hull: flight_search::Plane { mesh: &mesh.mesh, at: *at, velocity: *velocity }, side: *side }).collect()
+}
+
+/// **A late prop's strike on a wreck bike after the pass's** (S384): the prop searched at the walk's
+/// end, so its mirrors go on the bike's list after every mirror the pass put there, each naming its
+/// body by its place in `into`'s struck bodies (one already there kept, a new one put at the end).
+pub fn late_struck(into: &mut WreckStrike, late: WreckStrike) {
+    let WreckStrike { mirrors, struck, entries } = late;
+    let places: Vec<usize> = struck
+        .into_iter()
+        .map(|p| {
+            into.struck.iter().position(|q| (q.collection, q.object) == (p.collection, p.object)).unwrap_or_else(|| {
+                into.struck.push(p);
+                into.struck.len() - 1
+            })
+        })
+        .collect();
+    into.mirrors.extend(mirrors.into_iter().map(|m| Contact { other: m.other.map(|o| places[o]), ..m }));
+    into.entries.extend(entries);
+}
+
 impl WreckBike {
     /// [`WreckBike::tick_struck`] in a world with objects in it, as [`WreckBike::tick_among`] searches
     /// it.
@@ -603,17 +630,8 @@ impl crate::Sim {
     /// in place of [`crate::Sim::wreck_strike`]'s search after the pass.
     pub(crate) fn frame_held_wrecked(&mut self, dt: F, world: &mut dyn crate::world::World, players: &[(usize, usize)]) -> crate::prop_set::PropMovers {
         self.hear_ridden();
-        let mut kept = Vec::new();
-        if !self.traffic.props.is_empty() {
-            for &(i, side) in players {
-                let Some((mesh, at, velocity)) = self.wreck_hull(i) else { continue };
-                kept.push((i, side, mesh, at, velocity));
-            }
-        }
-        let wrecks: Vec<Wreck<'_>> = kept
-            .iter()
-            .map(|(_, side, mesh, at, velocity)| Wreck { hull: flight_search::Plane { mesh: &mesh.mesh, at: *at, velocity: *velocity }, side: *side })
-            .collect();
+        let kept = self.wreck_hulls(players);
+        let wrecks = hulls_on_node(&kept);
         let (movers, strikes) = self.traffic.frame_held_among(dt, world, &wrecks);
         drop(wrecks);
         for ((i, ..), strike) in kept.iter().zip(strikes) {
@@ -638,6 +656,32 @@ impl crate::Sim {
         self.traffic.props.hear_ridden(&bikes);
         // The plane lane's props' step has the plane for its one striker.
         self.traffic.props.file_ridden(!flying);
+    }
+
+    /// Each of `players` (a player and its side, as [`crate::Sim::frame_held_wrecked`] takes them)
+    /// whose wreck bike is a hull on the props' node ([`crate::Sim::wreck_hull`]), in their order;
+    /// none on a track with no props.
+    pub(crate) fn wreck_hulls(&self, players: &[(usize, usize)]) -> Vec<Hull> {
+        if self.traffic.props.is_empty() {
+            return Vec::new();
+        }
+        players.iter().filter_map(|&(i, side)| self.wreck_hull(i).map(|(mesh, at, velocity)| (i, side, mesh, at, velocity))).collect()
+    }
+
+    /// **What a late prop's rays struck on the wreck bikes** (S384, [`PropSet::strike_in_among`]):
+    /// each of `hulls`' strike put after what the pass struck on its bike ([`late_struck`]), for the
+    /// bike's frame, unless that frame already ran this tick (`framed` says, by player): it took
+    /// what the pass struck, and these mirrors go nowhere.
+    pub(crate) fn late_struck(&mut self, hulls: &[Hull], strikes: Vec<WreckStrike>, framed: &dyn Fn(usize) -> bool) {
+        for ((i, ..), late) in hulls.iter().zip(strikes) {
+            if late.is_empty() || framed(*i) {
+                continue;
+            }
+            let rider = if *i == 0 { &mut self.rider } else { &mut self.others[*i - 1].rider };
+            if let Some(crash) = rider.crash.as_mut() {
+                late_struck(&mut crash.bike.struck, late);
+            }
+        }
     }
 
     /// **Player `i`'s wreck bike as a hull on the props' node** (S243): its mesh, where its record's
