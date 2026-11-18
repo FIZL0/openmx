@@ -619,7 +619,7 @@ fn quad_cols() -> Option<(game_sim::track::Rays, game_sim::track::Rays)> {
 /// word the ride does not move: the collision record's flags and tuning, its resolution's fields, the
 /// riding and the wreck rays bit for bit, the tail's mode, stunt speed and surfaces, and the wreck's
 /// time and class. The record's last sweep and contacts, and its resolution's speeds, are state; its
-/// inverse inertia is MD134's one float off.
+/// inverse inertia is bit for bit too, read at the start spot as MD134 found.
 #[test]
 fn the_quad_rigged_from_its_files_is_md123as() {
     let (Some(files), Some(cols)) = (quad_files(), quad_cols()) else { return };
@@ -628,7 +628,9 @@ fn the_quad_rigged_from_its_files_is_md123as() {
     let mut img = quad::Ride::new(r.s.p.clone(), r.s.q.clone(), seed::body(&|a| pre.u32_at(a), at.body), r.bike.clone(), Vec::<Call>::new());
     md123a_rigs(&pre, &at, &mut img);
     let v = |a: u32| Vf::new(pre.f32_at(a), pre.f32_at(a + 4), pre.f32_at(a + 8), pre.f32_at(a + 12));
-    let (mut ours, load) = from_files(&files, v(image::IMAGE_QUAD + 0x50), v(image::IMAGE_QUAD + 0x60), None);
+    // The part reader reads the box at the start spot the quad was made at, not where it has settled
+    // since (MD134): this image keeps that spot at 0x668e70 (C28's at 0x669e40, the same point).
+    let (mut ours, load) = from_files(&files, v(0x0066_8e70), v(image::IMAGE_QUAD + 0x60), None);
     ours.rig(&load, &cols.0, &cols.1);
     let (a, b) = (ours.recorded.as_ref().unwrap(), img.recorded.as_ref().unwrap());
     let mut diffs = Vec::new();
@@ -645,11 +647,9 @@ fn the_quad_rigged_from_its_files_is_md123as() {
         (c, h.mass, h.body.is_some(), h.entries.len(), h.movers.len())
     };
     same("held", &collider(&a.held), &collider(&b.held), &mut diffs);
-    // The record's inverse inertia is the part reader's from the model's box: MD134's one float.
+    // The record's inverse inertia is the part reader's from the model's box at the start spot (MD134).
     let (ii, ij) = (a.held.record.collider.inv_inertia, b.held.record.collider.inv_inertia);
-    let off = ii.0.iter().zip(ij.0).map(|(x, y)| (x - y).abs() / y.abs().max(1e-6)).fold(0.0f32, f32::max);
-    println!("MD123 rigs: the record's inverse inertia is {off} (relative) off the image's (MD134)");
-    assert!(off < 1e-5, "the record's inverse inertia: ours {ii:?}, the image's {ij:?}");
+    assert_eq!(ii.0.map(f32::to_bits), ij.0.map(f32::to_bits), "the record's inverse inertia: ours {ii:?}, the image's {ij:?}");
     let bits = |r: &[[Vf; 2]]| r.iter().flat_map(|s| s.iter().flat_map(|v| v.0.map(f32::to_bits))).collect::<Vec<_>>();
     same("riding rays", &bits(&a.riding), &bits(&b.riding), &mut diffs);
     same("wreck rays", &bits(&a.wreck), &bits(&b.wreck), &mut diffs);
