@@ -302,6 +302,9 @@ const U_NOISE_FROM: u32 = 0x004d_6cac;
 const U_RESOLVE: u32 = 0x0020_6170;
 /// The tire probe's ground query returns here (SLUS-21104's probe 0x004b51f0 is 0x004d7890).
 const U_TIRE_PROBE_FROM: u32 = 0x004d_7af4;
+/// The tire step's contact velocity (`a0` the tire; SLUS-21104's at the same tire and object
+/// offsets, its registers moved).
+const U_CONTACT_VELOCITY: u32 = 0x004d_7dd0;
 const U_RAYS_VTABLE: u32 = 0x003d_9120;
 const U_MESH_VTABLE: u32 = 0x003d_9200;
 
@@ -495,6 +498,43 @@ pub(crate) struct UHeld {
     others: Vec<game_sim::atv_contact::Held>,
 }
 
+/// What a tire of the truck stood on when the original's contact velocity read it: the tire, its
+/// stands-on words, what they point at (read before the call) and the object's world centre of mass
+/// the call wrote back (`+0x90`, after it).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UStood {
+    tire: u32,
+    on: [u32; 2],
+    under: atv_car::Under,
+    cofg_world: Vf,
+}
+
+/// What `on` points at in `ee`, as the contact velocity reads it (research/oracle.txt `# MD131`): an
+/// object on its rigid body (`+0xe4`), else on its chassis (`+0xe0`) with its transform (`+0xe8`).
+/// A mover, or an object without a body, is not met on MD160's drives.
+fn u_under(ee: &Ee, on: [u32; 2]) -> atv_car::Under {
+    assert_ne!(on[0], 0, "a tire on a mover ({on:x?})");
+    let o = on[0];
+    let b = ee.u32_at(o + 0xe4);
+    assert_ne!(b, 0, "a tire on an object without a body ({on:x?})");
+    let on = atv_car::Holder::Body { position: get_v(ee, b + 0x70), velocity: get_v(ee, b + 0x80), quat: get_v(ee, b + 0x190), rates: get_v(ee, b + 0x1d0) };
+    atv_car::Under::Object { cofg: get_v(ee, o + 0x80), on }
+}
+
+/// The truck's tires' contact velocities, each one standing on something kept in `log`.
+fn u_hook_stood(ee: &mut Ee, car: u32, log: Shared<Vec<UStood>>) {
+    ee.hooks.insert(U_CONTACT_VELOCITY, Box::new(move |ee: &mut Ee| {
+        let tire = ee.r(4) as u32;
+        let ours = (0..4).any(|k| ee.u32_at(car + u(0x1254) + 4 * k) == tire);
+        let on = [ee.u32_at(tire + 0x19c), ee.u32_at(tire + 0x1a0)];
+        let under = (ours && on != [0, 0]).then(|| u_under(ee, on));
+        u_run_inside(ee, U_CONTACT_VELOCITY);
+        if let Some(under) = under {
+            log.borrow_mut().push(UStood { tire, on, under, cofg_world: get_v(ee, on[0] + 0x90) });
+        }
+    }));
+}
+
 /// [`UHeld`] read from `w` (the view) for the car's record at `record` with `contacts` contacts;
 /// `None` when none is with another record. A mover is not met.
 fn u_held(w: &Ee, record: u32, contacts: u32) -> Option<UHeld> {
@@ -525,9 +565,14 @@ pub(crate) struct UBeside {
     sort: SortAnswer,
     held: Option<UHeld>,
     resolves: usize,
-    /// The tire steps (and since MD131 the stands-on asks) handed out for a tire standing on an object,
-    /// which this harness cannot answer: the frame is not compared.
-    unported: Vec<Call>,
+    /// What the original's tires stood on, in its order ([`UStood`]): the port's
+    /// [`Call::StandsOn`] takes the first with its words, and its [`Call::ObjectCofg`] must write
+    /// what the original wrote.
+    stood: Vec<UStood>,
+    /// The asks answered from [`Self::stood`], and the centres of mass written back.
+    pub(crate) stands_on: usize,
+    pub(crate) cofgs: usize,
+    last_stood: Option<UStood>,
     /// The original unwrecked and put the truck back this frame (MD183): the put-back's calls may be
     /// handed out ([`U_PUT_BACK_HANDED`]).
     put_back: bool,
@@ -543,11 +588,7 @@ pub(crate) struct UBeside {
 impl UBeside {
     fn answer(&mut self, at: Vf) -> UGround {
         self.asked += 1;
-        let mut k = self.ground.iter().position(|g| g.asked == at.to_bits());
-        if k.is_none() && !self.unported.is_empty() {
-            let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
-            k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
-        }
+        let k = self.ground.iter().position(|g| g.asked == at.to_bits());
         let k = k.unwrap_or_else(|| panic!("{}: the port asked the ground at {:08x?}, the original never did (it asked {:08x?})", self.at, at.to_bits(), self.ground.iter().map(|g| g.asked).collect::<Vec<_>>()));
         let g = self.ground.remove(k);
         self.used.push(g);
@@ -563,7 +604,7 @@ impl UBeside {
         let (mut point, mut normal, mut record) = (at, orig.normal, surface.unwrap_or(0));
         game_sim::atv_ground::query(port.terrain, &mut point, Some(&mut normal), surface.is_some().then_some(&mut record));
         let mine = UGround { point, normal, record: surface.map(|_| record), ..orig };
-        if !self.put_back && self.unported.is_empty() {
+        if !self.put_back {
             assert!(
                 mine.point.to_bits() == orig.point.to_bits() && mine.normal.to_bits() == orig.normal.to_bits() && mine.record == orig.record,
                 "{}: the port's terrain answers {:08x?} at {:08x?} ({:08x?}, record {:?}), the original {:08x?} ({:08x?}, record {:?})",
@@ -630,9 +671,20 @@ impl Steps for UBeside {
                     port.noised += 1;
                 }
             }
-            // Since MD131 the tire step asks what a tire stands on itself; nothing answers it for
-            // Untamed yet, so the frame is not compared, as a tire step handed out was not.
-            Call::TireStep(..) | Call::StandsOn(..) | Call::ObjectCofg(..) => self.unported.push(c),
+            Call::StandsOn(on) => {
+                let k = self.stood.iter().position(|s| s.on == on);
+                let k = k.unwrap_or_else(|| panic!("{}: the port asked what a tire stands on ({on:x?}), the original's tires stood on {:x?}", self.at, self.stood.iter().map(|s| s.on).collect::<Vec<_>>()));
+                let s = self.stood.remove(k);
+                car.stood_on = s.under;
+                self.last_stood = Some(s);
+                self.stands_on += 1;
+            }
+            Call::ObjectCofg(o, v) => {
+                let s = self.last_stood.take().expect("a centre of mass written with nothing stood on");
+                assert_eq!(o, s.on[0], "{}: the port wrote another object's centre of mass", self.at);
+                assert_eq!(v.to_bits(), s.cofg_world.to_bits(), "{}: the object's world centre of mass: port {v:?}, original {:?}", self.at, s.cofg_world);
+                self.cofgs += 1;
+            }
             Call::SortSearch => {
                 car.sort = self.sort;
                 self.rest.push(c);
@@ -658,8 +710,11 @@ pub(crate) struct USeen {
     pub(crate) handed: std::collections::BTreeMap<String, usize>,
     pub(crate) other_worlds: usize,
     pub(crate) wrecked: usize,
-    /// Frames not compared: a tire stood on an object ([`UBeside::unported`]).
+    /// Frames compared where a tire stood on an object ([`UStood`]), and the asks and centres of
+    /// mass answered on them.
     pub(crate) on_objects: Vec<usize>,
+    pub(crate) stands_on: usize,
+    pub(crate) cofgs: usize,
     /// Frames the truck unwrecked and was put back at its spot (compared, MD183).
     pub(crate) respawned: Vec<usize>,
     /// Frames whose record held contacts with another record.
@@ -691,6 +746,8 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
     u_hook_ground(&mut ee, ground.clone());
     let noise: Shared<Vec<(u32, u32, F)>> = Rc::default();
     u_hook_noise(&mut ee, noise.clone());
+    let stood: Shared<Vec<UStood>> = Rc::default();
+    u_hook_stood(&mut ee, d.car, stood.clone());
     // The car's record's resolution, when a contact is with another record: the records and bodies
     // as they are when it runs (the others' may have stepped earlier in the world step).
     let resolving: Shared<Vec<UHeld>> = Rc::default();
@@ -739,6 +796,7 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
         ground.borrow_mut().clear();
         noise.borrow_mut().clear();
         resolving.borrow_mut().clear();
+        stood.borrow_mut().clear();
         let (_, dt) = u_world_step_inside(ee);
         // The world steps every car; keep this car's tire probes and engine noise.
         let tires: Vec<u32> = (0..4).map(|k| ee.u32_at(car_at_ + u(0x1254) + 4 * k) + 0xf0).collect();
@@ -751,7 +809,8 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
         let resolves = resolved_with.len();
         let held = (!resolved_with.is_empty()).then(|| resolved_with.remove(0));
         let all_from: Vec<u32> = ground.borrow().iter().map(|g| g.from).collect();
-        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() };
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, stood: std::mem::take(&mut *stood.borrow_mut()), stands_on: 0, cofgs: 0, last_stood: None, put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() };
+        let on_object = !beside.stood.is_empty();
         let put_back = car.state != atv_car::RIDING && read_car(&va, &p).state == atv_car::RIDING;
         let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), put_back, port: port.clone(), ..beside } };
         if ride {
@@ -759,7 +818,7 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
             let r = r.get_or_insert_with(|| super::drives::ride_of(table));
             r.update.untamed = true;
             (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
-            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() });
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, stood: Vec::new(), stands_on: 0, cofgs: 0, last_stood: None, put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() });
             pieces.rest = r.frame_with(dt, rest);
             (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
             (car, body) = (r.car.clone(), r.body.clone());
@@ -771,10 +830,6 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
             let mut s = keep.borrow_mut();
             s.port_grounds += w.answered;
             s.port_noises += w.noised;
-        }
-        if !pieces.rest.unported.is_empty() {
-            keep.borrow_mut().on_objects.push(k);
-            return;
         }
         // The unwreck's respawn stands the truck at its spot through Untamed's put-back (MD183):
         // compared with the respawn's words.
@@ -819,7 +874,13 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
             pieces.rest.asked,
             unasked.iter().map(|g| g.from).collect::<Vec<_>>()
         );
+        assert!(pieces.rest.stood.is_empty(), "{name} frame {k}: the original's tires stood on {:x?}, the port's never asked", pieces.rest.stood.iter().map(|s| s.on).collect::<Vec<_>>());
         let mut s = keep.borrow_mut();
+        if on_object {
+            s.on_objects.push(k);
+        }
+        s.stands_on += pieces.rest.stands_on;
+        s.cofgs += pieces.rest.cofgs;
         for c in &pieces.rest.rest {
             let n = format!("{c:?}").split([' ', '(', '{']).next().unwrap().to_string();
             let put_back_call = put_back && U_PUT_BACK_HANDED.contains(&n.as_str());
@@ -839,7 +900,7 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
-        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}; put back (compared): {:?}{}",
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; a tire on an object on {:?} ({} asks, {} centres of mass written back); put back (compared): {:?}{}",
         d.name,
         if ride { "through Ride" } else { "frame_untamed" },
         seen.frames,
@@ -850,32 +911,43 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
         seen.other_worlds,
         seen.with_others,
         seen.on_objects,
+        seen.stands_on,
+        seen.cofgs,
         seen.respawned,
         if seen.port_grounds + seen.port_noises > 0 { format!("; the port's world answered {} ground queries and {} noise samples", seen.port_grounds, seen.port_noises) } else { String::new() }
     );
     Some(seen)
 }
 
-/// Drive `d` beside, through the frame or the Ride: every frame compared but those with a tire on an
-/// object, and none of those but where the original's tire stands on one.
-fn u_beside_test(d: &UDrive, ride: bool) {
-    let Some(s) = u_beside(d, ride) else { return };
+/// Drive `d` beside, through the frame or the Ride: every frame compared.
+fn u_beside_test(d: &UDrive, ride: bool) -> Option<USeen> {
+    let s = u_beside(d, ride)?;
     assert!(s.frames > 0, "{}: no frame compared", d.name);
     // MD183: the wreck drive's unwreck puts the truck back on frame 83, compared through the port's
     // respawn with Untamed's ground reset.
     if d.name == U_WRECK.name {
         assert_eq!(s.respawned, [83], "{}: the frames put back", d.name);
     }
+    Some(s)
+}
+
+/// The throttle drive's frames with a tire on a loose prop (MD233): compared like the rest, each ask
+/// answered with what the original's tire stood on and each centre of mass written back as the
+/// original's.
+fn u_throttle_test(ride: bool) {
+    let Some(s) = u_beside_test(&U_THROTTLE, ride) else { return };
+    assert_eq!(s.on_objects, [161, 258, 259, 260, 268], "the frames with a tire on an object");
+    assert!(s.stands_on > 0 && s.cofgs == s.stands_on, "asked {} times, {} centres of mass", s.stands_on, s.cofgs);
 }
 
 #[test]
 fn untamed_throttle_frame_beside() {
-    u_beside_test(&U_THROTTLE, false);
+    u_throttle_test(false);
 }
 
 #[test]
 fn untamed_throttle_ride_beside() {
-    u_beside_test(&U_THROTTLE, true);
+    u_throttle_test(true);
 }
 
 #[test]
