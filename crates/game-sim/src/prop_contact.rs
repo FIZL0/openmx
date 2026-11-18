@@ -350,7 +350,8 @@ impl PropSet {
                 set.search_late(c, o, dt, world, &[], movers, &mut []);
                 late.push((c, o));
             }
-            crate::prop_props::strike_props_late(set, fresh.to_vec(), &mut |set, c, k| set.search_late(c, k, dt, world, &[], movers, &mut []));
+            let own = |set: &mut PropSet, world: &mut dyn crate::world::World, c: usize, k: usize| set.search_late(c, k, dt, world, &[], movers, &mut []);
+            crate::prop_props::strike_props_late(set, fresh.to_vec(), &mut crate::prop_props::InWorld { world: &mut *world, own });
         });
         for (c, o) in late {
             let Some(at) = strike.struck.iter().position(|s| (s.0, s.1) == (c, o)) else { continue };

@@ -33,9 +33,16 @@
 //! copy: its collection's world integrates it, and a sibling's entries name it by its place after
 //! the step's other sides ([`step_named`], [`Collection::lists`]).
 //!
+//! A striker whose rays meet two props or more meets them in its kept nearby list's order (S385): the
+//! original gathers that list in the static tree, where every prop's `f.col` stands asleep or awake,
+//! keyed where it stands (F68), so the props come in the order the query's walk reaches them, as the
+//! bike's gather lists them ([`flight_search::knocks_walked`], `tests/prop_wheel_gather.rs`). The
+//! port meets them in flat order first, and only when two or more are met asks the walk (the
+//! [`Pass`]'s world, round where the striker's list was gathered) and searches again in its order.
+//!
 //! What is not here: the original's one narrow pass ordering a scene mesh and a prop by the walk's list and keeping
-//! one contact per ray between them — a prop's entries go after its scene's; the broad phase's gather,
-//! which is every prop with a mesh by its distance from the rays' centre.
+//! one contact per ray between them — a prop's entries go after its scene's; the kept list's
+//! contents — a prop the walk does not list is still met, after those it does, in flat order.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -46,6 +53,9 @@ use crate::prop_contact::Pushed;
 use crate::prop_set::PropSet;
 use crate::prop_world::{self, Collection, Object};
 use crate::ray_probe::{self, Facet, RayProbe};
+use crate::contact_search::Heightfield;
+use crate::eco::Trees;
+use crate::world::{Props, World};
 use crate::ragdoll::Tables;
 use crate::track::Mesh;
 use crate::world::Prop;
@@ -97,6 +107,66 @@ impl PropSet {
         order.sort_unstable();
         order.into_iter().map(|(_, c, k)| (c, k)).collect()
     }
+}
+
+/// **What the props' pass asks of its caller** ([`strike_props`]): a struck prop's own search, and the
+/// order a striker's gather walks the props in.
+pub trait Pass {
+    /// Search object `k` of collection `c` at once: the terrain and the scene, as
+    /// [`Collection::search_object`].
+    fn own(&mut self, set: &mut PropSet, c: usize, k: usize);
+
+    /// The indices into `knocks` a nearby list gathered round `centre` lists, in its walk's order
+    /// ([`flight_search::knocks_walked`]), in the world near `at`; `None` where there is no world to
+    /// walk (no terrain, no scene, no plants), and the props are met in flat order. The tree is laid
+    /// over the terrain's box, and the props are filed after the scene's meshes and the plants, so a
+    /// world of terrain alone walks the props in the same order as the whole scene's.
+    fn walked(&mut self, knocks: flight_search::Knocks<'_>, at: Vf, centre: Vf, radius: F) -> Option<Vec<usize>>;
+}
+
+/// A [`Pass`] whose world is the scene's meshes `props` and the plants `trees` over the terrain
+/// `field`, the same wherever the striker stands.
+pub struct Among<'a, S> {
+    pub field: Option<&'a dyn Heightfield>,
+    pub props: Option<&'a Props>,
+    pub trees: Option<&'a Trees>,
+    pub own: S,
+}
+
+impl<S: FnMut(&mut PropSet, usize, usize)> Pass for Among<'_, S> {
+    fn own(&mut self, set: &mut PropSet, c: usize, k: usize) {
+        (self.own)(set, c, k);
+    }
+
+    fn walked(&mut self, knocks: flight_search::Knocks<'_>, _at: Vf, centre: Vf, radius: F) -> Option<Vec<usize>> {
+        (self.field.is_some() || self.props.is_some() || self.trees.is_some())
+            .then(|| flight_search::knocks_walked(self.props, self.trees, knocks, self.field.map(field_box), centre, radius))
+    }
+}
+
+/// A [`Pass`] in a `world`: the striker's gather walks the shapes near it ([`World::wooded_near`]), or
+/// the whole set where the world has one ([`World::wooded`]), and `own` searches in the world too.
+pub struct InWorld<'w, S> {
+    pub world: &'w mut dyn World,
+    pub own: S,
+}
+
+impl<S: FnMut(&mut PropSet, &mut dyn World, usize, usize)> Pass for InWorld<'_, S> {
+    fn own(&mut self, set: &mut PropSet, c: usize, k: usize) {
+        (self.own)(set, &mut *self.world, c, k);
+    }
+
+    fn walked(&mut self, knocks: flight_search::Knocks<'_>, at: Vf, centre: Vf, radius: F) -> Option<Vec<usize>> {
+        let (field, props, trees) = if self.world.near_set(at).is_some() { self.world.wooded_near(at) } else { self.world.wooded() };
+        (field.is_some() || props.is_some() || trees.is_some())
+            .then(|| flight_search::knocks_walked(props, trees, knocks, field.as_deref().map(field_box), centre, radius))
+    }
+}
+
+/// A heightfield's box on the ground plane, (x, z) low and high.
+fn field_box(f: &(dyn Heightfield + '_)) -> ([F; 2], [F; 2]) {
+    let (lo, hi) = (f.min(), f.max());
+    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
 }
 
 /// One prop's collidable mesh where its node stands it.
@@ -180,8 +250,9 @@ fn frame(node: &Node) -> [Vf; 4] {
 type Met = Vec<((usize, usize, usize), Vec<ray_probe::Contact>)>;
 
 /// Object `k` of collection `c`'s ray probe against every other prop with a mesh, its own
-/// collection's other bodies too.
-fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>>]) -> Met {
+/// collection's other bodies too: in flat order, or, where it meets two or more, again in the order
+/// its gather walks them ([`Pass::walked`]), those the walk does not list after, in flat order.
+fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>>], pass: &mut dyn Pass) -> Met {
     let coll = &set.collections[c];
     let o = &coll.objects[k];
     let (Some(Some(tree)), Some(col)) = (set.rays[c].get(k), o.collision.as_ref()) else { return Vec::new() };
@@ -224,19 +295,50 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
         categories: Categories { mode: 1, list: Vec::new() },
         ..Collidable::default()
     }));
-    let found = posed
-        .iter()
-        .enumerate()
-        .map(|(i, p)| Candidate { object: PROPS + i, distance: distance(centre, p.centre) - p.radius })
-        .collect();
     let mut cache: Vec<Option<Vec<Facet>>> = posed.iter().map(|p| facets[p.flat].take()).collect();
-    let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
-    let mut narrow = OnTheProps { rays: tree, at, posed: &posed, facets: &mut cache, ray };
-    world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
-    let contacts = std::mem::take(&mut narrow.ray.contacts);
+    let flat_order: Vec<usize> = (0..posed.len()).collect();
+    let mut met = met_in(&mut objects, &posed, &mut cache, tree, at, centre, &flat_order);
+    if met.len() > 1 {
+        // Where the striker's kept list was gathered, else where its rays reach now.
+        let gathered = &col.nearby;
+        let round = if gathered.built { Vf::new(gathered.centre[0].0, gathered.centre[1].0, gathered.centre[2].0, 1.0) } else { centre };
+        let knocks: Vec<flight_search::Knock<'_>> = posed
+            .iter()
+            .map(|p| {
+                let other = &set.collections[p.collection];
+                flight_search::Knock {
+                    mesh: p.mesh,
+                    to_world: crate::math::Mat4(p.to_world),
+                    centre: p.centre,
+                    radius: p.radius,
+                    velocity: other.bones[p.object].body.velocity,
+                    capacity: other.objects[p.object].collision.as_ref().map_or(0, |c| c.record.capacity),
+                }
+            })
+            .collect();
+        let knocks = flight_search::Knocks { knocks: &knocks, asleep: &[] };
+        if let Some(walked) = pass.walked(knocks, o.node.origin, round, radius) {
+            let mut order: Vec<usize> = walked.into_iter().filter(|&i| i < posed.len()).collect();
+            order.dedup();
+            order.extend(flat_order.iter().filter(|i| !order.contains(i)).collect::<Vec<_>>());
+            if order != flat_order {
+                met = met_in(&mut objects, &posed, &mut cache, tree, at, centre, &order);
+            }
+        }
+    }
     for (p, kept) in posed.iter().zip(cache) {
         facets[p.flat] = kept;
     }
+    met
+}
+
+/// The striker's rays at `at` (reach centred on `centre`) against `posed`, its candidates in `order`.
+fn met_in(objects: &mut [Collidable], posed: &[Posed<'_>], cache: &mut [Option<Vec<Facet>>], tree: &Rays, at: [Vf; 4], centre: Vf, order: &[usize]) -> Met {
+    let found = order.iter().map(|&i| Candidate { object: PROPS + i, distance: distance(centre, posed[i].centre) - posed[i].radius }).collect();
+    let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
+    let mut narrow = OnTheProps { rays: tree, at, posed, facets: cache, ray };
+    world_search::search_nearby(objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
+    let contacts = std::mem::take(&mut narrow.ray.contacts);
     let mut met: Met = Vec::new();
     for h in contacts {
         let p = &posed[h.object as usize - PROPS];
@@ -256,21 +358,20 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
 /// (`PROP_OTHER + flat`), the striker's flags set as a hit sets them and its listeners told as its
 /// search's are; the struck prop is woken ([`PropSet::struck`]) and gets the mirror, at the head of
 /// its list if it is later in the node's list, at the end if earlier. A struck prop that was not filed
-/// is filed at the end, searched at once by `own` (its collection, its object: the terrain and the
-/// scene, as [`Collection::search_object`]) and walked in its turn.
-pub fn strike_props(set: &mut PropSet, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
+/// is filed at the end, searched at once by the pass ([`Pass::own`]) and walked in its turn.
+pub fn strike_props(set: &mut PropSet, pass: &mut dyn Pass) {
     let order = set.node_order();
-    strike_props_from(set, order, own);
+    strike_props_from(set, order, pass);
 }
 
 /// [`strike_props`]' walk from the objects `late` filed at the node list's end, in that order (B34b):
 /// a vehicle's strike put on in the props' pass ([`PropSet::strike_in`]) files them after every object
 /// the pass walked, so the walk reaches them, and what their rays file, last.
-pub(crate) fn strike_props_late(set: &mut PropSet, late: Vec<(usize, usize)>, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
-    strike_props_from(set, late, own);
+pub(crate) fn strike_props_late(set: &mut PropSet, late: Vec<(usize, usize)>, pass: &mut dyn Pass) {
+    strike_props_from(set, late, pass);
 }
 
-fn strike_props_from(set: &mut PropSet, mut order: Vec<(usize, usize)>, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
+fn strike_props_from(set: &mut PropSet, mut order: Vec<(usize, usize)>, pass: &mut dyn Pass) {
     let total: usize = set.collections.iter().map(|c| c.objects.len()).sum();
     if set.tables.is_none() || total < 2 {
         return;
@@ -283,7 +384,7 @@ fn strike_props_from(set: &mut PropSet, mut order: Vec<(usize, usize)>, own: &mu
         let (c, k) = order[i];
         i += 1;
         let me = flat(set, c, k);
-        for ((sc, so, sf), hits) in strikes_of(set, c, k, &mut facets) {
+        for ((sc, so, sf), hits) in strikes_of(set, c, k, &mut facets, pass) {
             let coll = &mut set.collections[c];
             let asleep = !coll.bones[k].body.enabled;
             let r = &mut coll.objects[k].collision.as_mut().expect("a striker has a collision object").record;
@@ -322,7 +423,7 @@ fn strike_props_from(set: &mut PropSet, mut order: Vec<(usize, usize)>, own: &mu
             } else {
                 set.stamp_filed();
                 order.push((sc, so));
-                own(set, sc, so);
+                pass.own(set, sc, so);
                 heads[sf] = 0;
                 true
             };
