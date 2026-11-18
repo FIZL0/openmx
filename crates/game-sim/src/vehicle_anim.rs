@@ -441,6 +441,11 @@ pub struct Request {
     /// How many requests the caller has made. The restart test compares it against the count the step
     /// was last run with, so a repeat of the *same* state still restarts.
     pub seq: i32,
+    /// **The port's own (S467):** how many times the 360's clip has started
+    /// ([`crate::air::Spin::starts`]). A count that moves while a 360 state runs restarts it, as MX
+    /// vs. ATV's second pass past the clip angle starts the stunt again (its restart ask): the fade
+    /// from the saved pose at the 360's rate, the clip from 0.
+    pub spin_starts: u8,
 }
 
 /// The id the gesture field holds when nothing is asked for: the slot count, one past the last
@@ -703,6 +708,8 @@ pub struct Driver {
     /// [`Update::serviced`] is what stores the count, after the step, which is why a count that
     /// moves restarts the state on exactly one frame.
     pub seq: u8,
+    /// **S467:** the request's [`Request::spin_starts`] as the last frame saw it.
+    pub spin_starts: u8,
     /// The rate the cross-fade ramp falls at, picked out of [`Params`] by the asked-for state on every
     /// restart. Also the length of the cross the played-once groups put their clip on with.
     pub rate: F,
@@ -781,6 +788,9 @@ impl Driver {
         // 2 — the restart test. The second half of it is what makes a repeat of the state that is
         // already running start over: both ids are equal, but the request's count has moved.
         let restart = self.want != self.state || (r.seq >= 2 && r.seq != i32::from(self.seq));
+        // S467: a 360 that runs on past coming round starts again on its clip's next start.
+        let restart = restart || (spinning(lib, self.want) && r.spin_starts != self.spin_starts);
+        self.spin_starts = r.spin_starts;
         // 3 — the fade rate, by the state that was asked for. Out of range takes the default and no
         // arm of the switch runs at all.
         if restart {
@@ -1228,6 +1238,7 @@ impl hash::State for Driver {
         w.i32("state", self.state);
         w.i32("prev", self.prev);
         w.u8("seq", self.seq);
+        w.u8("spin_starts", self.spin_starts);
         w.f("rate", self.rate);
         w.f("ramp", self.ramp);
         w.bool("started", self.started);

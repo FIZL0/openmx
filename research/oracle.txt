@@ -13428,6 +13428,13 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   +0x44 vt +0x4ec (0x004e4810) holds the clip (+0x1788 = 1, clock frozen). 360 rows: +0x44 0.72, +0x48 1.5,
 #   kind 0. So a 360 ends only by the 360 step (id 255: ground, touch, yaw floor).
 
+# S467 — a 360's restart on its second clip start (tests/mxvatv_stunt_cross.rs *_restarts_a_360_*; journal
+# 2026-11-18-s467-*). The restart ask bike +0x1650 is copied each frame into the rider record +0x1d0 (bike
+# +0x900, beside the stunt byte +0x904 and the phase +0x908): 0x004ba97c, 0x004da19c. The rider layer
+# (0x004eb380) restarts on record +0x1d0 at the fifth rate; the bike animate (0x004dd8f0) restarts on a new
+# id or +0x1650 (0x004dd98c): fade 1, phase 0 that tick. +0x1650 zeroed at 0x004de614, 0x004e1c50,
+# 0x004e23f0; set at 0x004e6444.
+
 # MD161 — MX vs. ATV Untamed's (SLUS-21701) monster-truck changes ported behind atv_car::Load::untamed, proved by
 # crates/game-sim/tests/untamed_truck.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81c.
 # Journal: research/journal/2026-11-14-md161-untamed-monster-pack.

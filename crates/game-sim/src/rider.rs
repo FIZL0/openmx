@@ -1551,6 +1551,7 @@ impl Rider {
         body_request.band = if *cut_put_back && put_back.told_early() { F::ZERO } else { F(ride.air.contact_vel.z()) };
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
+        body_request.spin_starts = ride.tricks.as_ref().map_or(0, |t| t.spin.starts);
         (ask, front)
     }
 
@@ -1717,14 +1718,15 @@ fn trick_group(trick: Trick) -> Option<u8> {
     }
 }
 
-/// **MD21:** MX vs. ATV's 360 clip, from the frame the bike turns past [`air::SPIN_CLIP`] until it
-/// comes round or lands: `threesixtyR` for a 360 flicked left then right, `threesixtyL` the other way.
+/// **MD21:** MX vs. ATV's 360 clip, from the frame the bike turns past [`air::SPIN_CLIP`] until the
+/// 360 ends — coming round does not end it (S467, [`air::Spin::shown`]): `threesixtyR` for a 360
+/// flicked left then right, `threesixtyL` the other way.
 /// `None` when no 360 is past its angle, or the pack has no clip for this one — which only drops the
 /// clip: the 360's clip state, its score and its landing wreck run without it (MD59, [`air::spin_clip`]).
 fn spin_state(lib: &vehicle_anim::Library, ride: &Ride) -> Option<i32> {
     let spin = &ride.tricks.as_ref()?.spin;
     let state = if spin.dir >= 1 { vehicle_anim::SPIN_RIGHT } else { vehicle_anim::SPIN_LEFT };
-    (spin.clip != 0 && lib.clip(state).is_some()).then_some(state)
+    (spin.shown() && lib.clip(state).is_some()).then_some(state)
 }
 
 impl State for Rider {

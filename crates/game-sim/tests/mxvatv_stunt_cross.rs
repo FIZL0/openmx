@@ -213,8 +213,14 @@ fn airborne() -> Driver {
 
 /// One port frame asking for `want`: the ramp it leaves, and the 360 clip's phase when it plays one.
 fn port_tick(d: &mut Driver, lib: &Library, want: i32) -> (F, Option<F>) {
+    port_tick_at(d, lib, want, 0)
+}
+
+/// [`port_tick`] with the 360's clip-start count (S467) in the request.
+fn port_tick_at(d: &mut Driver, lib: &Library, want: i32, spin_starts: u8) -> (F, Option<F>) {
     d.want = want;
-    let frame = d.frame(F::from_bits(DT), &body_params(), &Request::default(), lib, true, |_| SPIN_CLIP);
+    let r = Request { spin_starts, ..Request::default() };
+    let frame = d.frame(F::from_bits(DT), &body_params(), &r, lib, true, |_| SPIN_CLIP);
     let phase = match frame.blend {
         Blend::One { phase, ramp, clip: Some(ClipId(99)) } => {
             assert_eq!(ramp, d.ramp, "the 360 is drawn at the ramp");
@@ -237,17 +243,18 @@ fn the_ports_rider_crosses_a_360_as_the_original() {
     set_byte(&mut ee, STUNT_BYTE, SPIN_RIGHT);
     ee.set_u32(STUNT, SPIN_RIGHT);
     ee.set_u32(CLOCK, 0);
-    // 45 ticks are 1.49985 s; on the 46th the clock's phase would reach 1, and the original's stunt
-    // clock ends the stunt instead (the clock zeroed, the phase left at the 45th's).
+    // 45 ticks are 1.49985 s; on the 46th the phase reaches 1. The stunt clock run here zeroes its
+    // clock there and ends the stunt, but it is the remote (network-driven) bike's only: a local
+    // bike's trick step runs its own clock, never zeroed, and keeps a turning 360 at phase 1 (R47,
+    // `tests/mxvatv_stunt_end.rs`). Either way the phase stored on the 46th is 1.
     for k in 1..=46 {
         rider_tick(&mut ee);
         ee.call(STUNT_CLOCK, &[u64::from(BIKE)], &[f32::from_bits(DT)], 2_000_000);
         let (ramp, phase) = port_tick(&mut d, &lib, va::SPIN_RIGHT);
         assert_eq!(ramp, f(&ee, RIDER_FADE), "in, tick {k}");
-        if k <= 45 {
-            assert_eq!(phase, Some(f(&ee, CLOCK_PHASE)), "in, tick {k}: the clip's phase (clock {:?})", f(&ee, CLOCK));
-        } else {
-            assert_eq!((f(&ee, CLOCK), phase), (F::ZERO, Some(F::ONE)), "tick 46: the original's stunt ends, the port's clip holds its end");
+        assert_eq!(phase, Some(f(&ee, CLOCK_PHASE)), "in, tick {k}: the clip's phase (clock {:?})", f(&ee, CLOCK));
+        if k == 46 {
+            assert_eq!((f(&ee, CLOCK), phase), (F::ZERO, Some(F::ONE)), "tick 46: the remote clock zeroes, the clip holds its end");
         }
     }
     set_byte(&mut ee, STUNT_BYTE, 0xff);
@@ -300,4 +307,108 @@ fn only_the_360_takes_the_originals_fade() {
     port_tick(&mut d, &lib, va::SPIN_RIGHT);
     port_tick(&mut d, &lib, va::HOLD);
     assert_eq!(d.rate, F(0.25), "a wreck pose out of a 360 keeps its own");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S467: a 360's second clip start restarts it
+// ---------------------------------------------------------------------------------------------------
+
+/// The local bike's trick step (R47), its 360-applied word and the stunt's restart ask, which the
+/// bike's record copy carries to the rider (`+0x1650` into record `+0x1d0`, beside the stunt byte).
+const TRICK_STEP: u32 = 0x004e_49c0;
+const SPIN_APPLIED: u32 = BIKE + 0x11d0;
+const RESTART: u32 = BIKE + 0x1650;
+const RECORD_RESTART: u32 = RECORD + 0x1d0;
+
+/// The original's state through a 360's restart: the stunt id on, the torque applied, the clock at 0
+/// — what the stunt start leaves, the restart ask set on the restart tick only.
+fn restart_image() -> Option<Ee> {
+    let mut ee = image()?;
+    ee.set_u32(BIKE + 0x324, 0);
+    ee.set_u32(BIKE + 0x1194, 0);
+    let asked = ee.u32_at(BIKE + 0x14ec);
+    ee.set_u32(BIKE + 0x14ec, asked & !0xff);
+    ee.set_u32(SPIN_APPLIED, 1);
+    set_byte(&mut ee, STUNT_BYTE, SPIN_RIGHT);
+    ee.set_u32(STUNT, SPIN_RIGHT);
+    ee.set_u32(CLOCK, 0);
+    Some(ee)
+}
+
+/// One of the original's frames on the 360: the trick step's clock (the stunt start zeroes it and
+/// sets the restart ask when `start`), then the rider's layer and the bike's animate.
+fn original_tick(ee: &mut Ee, start: bool) {
+    if start {
+        ee.set_u32(CLOCK, 0);
+    }
+    let ask = u32::from(start);
+    ee.set_u32(RESTART, ask);
+    ee.set_u32(RECORD_RESTART, ask);
+    ee.call(TRICK_STEP, &[u64::from(BIKE)], &[f32::from_bits(DT)], 4_000_000);
+    rider_tick(ee);
+    bike_tick(ee);
+}
+
+/// **The port's rider restarts a 360 on its second clip start as the original's does**: 60 ticks in
+/// the 360 (past coming round, the stunt still on and its phase held at 1 from tick 46), then the
+/// second pass past the clip angle: the original's restart ask puts the rider's fade back at 1 at the
+/// stunt rate and the clock back to 0, and the port's moved start count does the same — every tick's
+/// saved-pose weight and clip phase bit for bit, before and after.
+#[test]
+fn the_ports_rider_restarts_a_360_as_the_original() {
+    let Some(mut ee) = restart_image() else { return };
+    let lib = spin_lib(false);
+    let mut d = airborne();
+    for (starts, ticks) in [(1u8, 60), (2, 30)] {
+        for k in 1..=ticks {
+            original_tick(&mut ee, k == 1 && starts == 2);
+            assert_eq!(ee.u32_at(STUNT), SPIN_RIGHT, "start {starts}, tick {k}: the stunt runs");
+            let (ramp, phase) = port_tick_at(&mut d, &lib, va::SPIN_RIGHT, starts);
+            assert_eq!(ramp, f(&ee, RIDER_FADE), "start {starts}, tick {k}: the fade");
+            assert_eq!(phase, Some(f(&ee, CLOCK_PHASE)), "start {starts}, tick {k}: the phase");
+            if k == 1 {
+                assert_eq!(ramp, fall(F::ONE, F(2.0)), "start {starts}: a restart, at the stunt rate");
+            }
+        }
+    }
+}
+
+/// **The port's bike restarts its 360 as the original's does**: the restart ask holds the bike's fade
+/// at 1 on its tick and it falls 3 a second from the next, as on the 360's first start; the port's
+/// moved start count does the same, and its clip runs from 0 again.
+#[test]
+fn the_ports_bike_restarts_a_360_as_the_original() {
+    let Some(mut ee) = restart_image() else { return };
+    let lib = spin_lib(true);
+    let mut d = airborne();
+    for (starts, ticks) in [(1u8, 60), (2, 20)] {
+        let mut clock = F::ZERO;
+        for k in 1..=ticks {
+            original_tick(&mut ee, k == 1 && starts == 2);
+            let (ramp, phase) = port_tick_at(&mut d, &lib, va::SPIN_RIGHT, starts);
+            assert_eq!(ramp, f(&ee, BIKE_FADE), "start {starts}, tick {k}: the fade");
+            clock = clock + F::from_bits(DT);
+            assert_eq!(phase, Some((clock / SPIN_CLIP).min(F::ONE)), "start {starts}, tick {k}: clock over the clip");
+        }
+    }
+}
+
+/// **Coming round does not end the port's 360** (S467): a 360 that has started its clip shows from
+/// then until it ends, through the clip coming round; a second start moves the count.
+#[test]
+fn a_360_shows_from_its_clip_start_to_its_end() {
+    use game_sim::air::{Spin, spin_clip};
+    let mut s = Spin { active: true, armed: true, ..Spin::default() };
+    assert!(!s.shown(), "not yet past the clip angle");
+    spin_clip(&mut s, F(1.0));
+    assert_eq!((s.clip, s.starts, s.shown()), (1, 1, true));
+    spin_clip(&mut s, F(1.0));
+    spin_clip(&mut s, F(0.1));
+    assert!(s.came_round);
+    assert_eq!((s.clip, s.shown()), (0, true), "come round, still the 360");
+    spin_clip(&mut s, F(1.0));
+    assert_eq!((s.clip, s.starts), (1, 2), "the second pass starts it again");
+    s.active = false;
+    s.clip = 0;
+    assert!(!s.shown(), "the 360 over");
 }
