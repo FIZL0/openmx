@@ -210,3 +210,48 @@ fn a_kiowa_knob_changes_the_kiowas_ride() {
     println!("yaw rate: {stock} -> {quick} at 150%");
     assert!(quick > stock * 1.2, "turn {stock} -> {quick}");
 }
+
+#[test]
+fn the_worlds_gravity_and_air_drag_reach_the_cars_and_the_kiowa() {
+    let Some(machines) = machines() else { return println!("skipped: no disc") };
+    // P290: on the files, the part's scale and its force move together, as the loader writes them.
+    let heli = vehicle::KiowaRide::new(&machines.read_suffix(game_sim::kiowa::KIOWA_PHY).unwrap(), 0, None);
+    let mut phy = heli.phy.clone();
+    with(Knob::Gravity, 200).kiowa(0, &mut phy);
+    let (was, now) = (heli.phy.mass_properties, phy.mass_properties);
+    assert_eq!(now.gravity_scale, was.gravity_scale * F(2.0));
+    assert_eq!(now.gravity.y(), was.gravity.y() * 2.0);
+    assert_eq!(now.gravity.w(), 1.0);
+    let mut phy = heli.phy.clone();
+    with(Knob::AirDrag, 200).kiowa(0, &mut phy);
+    assert_eq!((phy.aero.cd0, phy.aero.low_speed_drag), (heli.phy.aero.cd0 * F(2.0), heli.phy.aero.low_speed_drag * F(2.0)));
+
+    let gas = |_: usize| Control::Cross.mask();
+    for machine in CARS {
+        let run = |k: Knob, pct: u16, ticks: usize, held: &dyn Fn(usize) -> u16| drive(&machines, machine, &with(k, pct), ticks, held);
+        // Gravity: heavier, the car sags lower on its springs once settled.
+        let stand = |pct: u16| run(Knob::Gravity, pct, 120, &|_| 0)[119].position.y();
+        let (light, stock, heavy) = (stand(50), stand(100), stand(200));
+        println!("{machine:?} rest height: {light} / {stock} / {heavy} at 50/100/200% gravity");
+        assert!(light > stock && stock > heavy, "{machine:?}: gravity {light} {stock} {heavy}");
+        // Air drag: the wings' drag, so a draggier car tops out lower.
+        let top = |pct: u16| run(Knob::AirDrag, pct, 900, &gas).iter().map(ground_speed).fold(0.0, f32::max);
+        let (stock, draggy) = (top(100), top(400));
+        println!("{machine:?} top speed: {stock} -> {draggy} ft/s at 400% air drag");
+        assert!(draggy < stock, "{machine:?}: air drag {stock} -> {draggy}");
+    }
+
+    // The Kiowa: four seconds of Cross climbs less under twice the gravity, more under half.
+    let run = |k: Knob, pct: u16, ticks: usize, held: &dyn Fn(usize) -> u16| fly(&machines, &with(k, pct), ticks, held);
+    let height = |pct: u16| run(Knob::Gravity, pct, 120, &gas)[119].position.y();
+    let (light, stock, heavy) = (height(50), height(100), height(200));
+    println!("Kiowa climb: {light} / {stock} / {heavy} ft at 50/100/200% gravity");
+    assert!(light > stock && stock > heavy, "Kiowa gravity {light} {stock} {heavy}");
+    // And tops out lower, stick forward, under three times the air drag: a little (130 -> 123 ft/s),
+    // as the controller's speed command, not the drag, is what holds its top.
+    let forward = |t: usize| if t < 60 { Control::Cross.mask() } else { Control::Up.mask() };
+    let top = |pct: u16| run(Knob::AirDrag, pct, 660, &forward).iter().map(ground_speed).fold(0.0, f32::max);
+    let (stock, draggy) = (top(100), top(300));
+    println!("Kiowa top speed: {stock} -> {draggy} ft/s at 300% air drag");
+    assert!(draggy < stock, "Kiowa air drag {stock} -> {draggy}");
+}
