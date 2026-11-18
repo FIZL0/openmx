@@ -28,7 +28,6 @@ Prefixes: `D` disc · `R` decompilation · `C` the frame and captures · `F` ari
 
 ### Critical: flaky tests and breakages, side by side with the work below
 
-- [ ] **K79** (follow-up, critical) openmx tests/one_fps.rs nothing_is_read_or_decoded_after_the_first_frame is red on S473's base (d2a6f1fff) with no change of S473's in reach: 'after the first frame: ... 1 bytes read' against 0, three runs in a row in slot 5. The count is /proc/self/io rchar (stages.rs bytes_read_mark), which also counts pipe/eventfd reads; find what reads the one byte (a wake pipe in the 4-player ride?) and make the check robust to it. It fails every gate that reaches openmx. | files: crates/openmx/tests/one_fps.rs, crates/openmx/src/stages.rs
 ### Next: the buggy and monster truck fixes, side by side
 
 - [ ] **V133** Race AI riders animate like the original (user 2026-11-18: 'the bots dont have proper animations ... like they do in original'): the race's AI riders do not play the rider's proper clips (steer, lean, sit/stand, jumps, landings) the way the human rider and the original's AI do. Drive each AI rider's body from its own sim state through the same rider animation path the human uses (not S90's ragdoll spring, which is the human's). Check: a race shot/video beside a PCSX2 capture of the same race start and first jumps | files: crates/game-render/src/rider.rs, crates/openmx/src/main.rs, crates/game-sim/src/ai.rs
