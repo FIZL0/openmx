@@ -852,7 +852,8 @@ impl crate::Sim {
         let track = laps.zip(edge.as_deref()).and_then(|(l, e)| crate::ai::on_track_of(l, e, i));
         // S364: the habits' keeper word, the score keeper's mode for this ride.
         pilots[k].1.racer.habits.keeper_state = keeper;
-        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, racing, track, rng, dt);
+        // S461: the map's parked machines in its scene, between the map's movers and the bikes.
+        pilots[k].1.think_amid(mount, world, &self.parked, &bikes, seek, tables, &others, tricks, racing, track, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());
