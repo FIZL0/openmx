@@ -141,8 +141,8 @@ fn steps_between(mut from: u64, to: u64) -> Option<usize> {
     })
 }
 
-/// The ticks the whole frame is run through.
-const TICKS: usize = 60;
+/// The ticks the whole frame is run through: to tick 132 (S482), the last row before ai1's torn 133.
+const TICKS: usize = 129;
 
 /// S328a: the bodies whose look-around clock re-arms in C33 before tick 15, by tick, in the order they
 /// draw: the three AI bodies at 7 and the human's at 8. The bodies walk after the riders in the game's
@@ -168,23 +168,36 @@ pub(crate) const C33_NOTES_ON: [(u64, &str); 2] = [(9, "ai2"), (14, "ai0")];
 /// `+0x2d8`, its last low pick at `+0x2c4`.
 pub(crate) const C33_NOTE_PICKS: (u64, [&str; 2], usize) = (15, ["ai0", "ai2"], 1);
 
+/// S482: the landing lags the AI riders' habits roll in C33's window, by tick: the first draw of the
+/// roll (`ai_habits` + [`LAG_ROLL`]), taken once a flight's air time on the rider's card (`+0xfc`,
+/// the free ride keeper's jump watch) reaches its hang time of 1 s. None of the three wins it.
+pub(crate) const C33_LAGS: [(u64, &str); 3] = [(85, "ai2"), (94, "ai1"), (95, "ai0")];
+
+/// The landing lag's roll: the return address of its first `rand()` in `ai_habits`.
+const LAG_ROLL: u32 = 0x3b8;
+
 /// S328c: the emitters that draw on the shared generator in C33, two draws each a tick: each run is
-/// a rider, its entry in its manager's list, and the first and last ticks it draws (63 is the window's
-/// end). 5 is the exhaust, 6 the generic rear-tyre dust, 8, 10 and 11 the rear sprays; the front
-/// sprays (7, 9), the foot dust (4) and the human's (no throttle) never draw here.
-pub(crate) const C33_DUST: [(&str, usize, u64, u64); 15] = [
+/// a rider, its entry in its manager's list, and the first and last ticks it draws (132 is the
+/// window's end). 4 is the foot dust, 5 the exhaust, 6 the generic rear-tyre dust, 8, 10 and 11 the
+/// rear sprays; the front sprays (7, 9) and the human's (no throttle) never draw here. S482: from 65
+/// to 104 the three AI riders are all in the air and nothing draws.
+pub(crate) const C33_DUST: [(&str, usize, u64, u64); 19] = [
+    ("ai0", 4, 132, 132),
     ("ai0", 5, 17, 23),
-    ("ai0", 6, 18, 63),
+    ("ai0", 6, 18, 64),
+    ("ai0", 6, 123, 132),
     ("ai0", 8, 20, 51),
     ("ai0", 10, 20, 51),
     ("ai0", 11, 20, 51),
     ("ai1", 5, 21, 28),
     ("ai1", 6, 22, 63),
+    ("ai1", 6, 118, 132),
     ("ai1", 8, 24, 63),
     ("ai1", 10, 24, 63),
     ("ai1", 11, 24, 63),
     ("ai2", 5, 17, 23),
     ("ai2", 6, 18, 54),
+    ("ai2", 6, 105, 132),
     ("ai2", 8, 20, 54),
     ("ai2", 10, 20, 54),
     ("ai2", 11, 20, 54),
@@ -201,13 +214,13 @@ pub(crate) fn c33_dust(tick: u64) -> Vec<(&'static str, usize)> {
 /// jitter): each run is a rider, its entry in its manager's list (12 the front tyre's track, 13 the
 /// rear's) and the first and last ticks it lays one. The manager's render walk updates its tracks in
 /// rider order ai1, ai0, ai2, human; a track lays a row each 2 ft its tyre moves, so a slow tick
-/// lays none. The human (no throttle) never lays one here.
+/// lays none. The human (no throttle) never lays one here, and none lays one after 64 (S482).
 pub(crate) const C33_TRACKS: [(&str, usize, u64, u64); 10] = [
     ("ai0", 12, 57, 60),
     ("ai0", 13, 17, 26),
     ("ai0", 13, 28, 35),
     ("ai0", 13, 37, 42),
-    ("ai0", 13, 62, 63),
+    ("ai0", 13, 62, 64),
     ("ai1", 13, 21, 28),
     ("ai1", 13, 30, 63),
     ("ai2", 13, 17, 26),
@@ -235,7 +248,8 @@ const REQUEST_CUT: u32 = 0x140;
 /// dust emitters from 17 (S328a: each re-armed look clock is the port's remap of its draw, the
 /// bodies drawing in the game's player order). S328d: the render runs after each frame too, and its
 /// draws are the tyre tracks' rows; with them the frame draws exactly what the capture steps on every
-/// tick, and the generator agrees through the window's end.
+/// tick, and the generator agrees through the window's end. S482: the window runs to 132, and the
+/// AI's draws there include the habits' landing lag rolls (C33_LAGS).
 #[test]
 fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     let kit = match Kit::load() {
@@ -269,7 +283,9 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
     assert_eq!(rows[0].2, s12e_u64(&ee, rand_state), "row 0 is the image");
     // Each draw's return address and the animation object (a0) of the selection it came from.
     let log: Rc<RefCell<Vec<u32>>> = Rc::default();
-    let l = Rc::clone(&log);
+    // S482: the rider ($16 in the habits) of each landing lag's roll.
+    let lagged: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let (l, lg, lag_roll) = (Rc::clone(&log), Rc::clone(&lagged), starts[1] + LAG_ROLL);
     ee.hooks.insert(
         rand,
         Box::new(move |ee: &mut Ee| {
@@ -277,6 +293,9 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
             ee.write(rand_state, 8, u128::from(n));
             ee.set(2, (n >> 32) & 0x7fff_ffff);
             l.borrow_mut().push(ee.r(31) as u32);
+            if ee.r(31) as u32 == lag_roll {
+                lg.borrow_mut().push(ee.r(16) as u32);
+            }
         }),
     );
     let looked: Rc<RefCell<Vec<u32>>> = Rc::default();
@@ -433,9 +452,13 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
             _ => (count(Site::Note), count(Site::Dust), count(Site::Ai), &looks),
         };
         assert_eq!((count(Site::Note), count(Site::Dust), count(Site::Ai), &looks[..]), want, "tick {tick}");
-        if tick >= 17 {
+        if (17..=64).contains(&tick) {
             assert!(count(Site::Dust) > 0, "tick {tick}: no dust");
         }
+        // S482: the landing lags rolled, as C33_LAGS says.
+        let lags: Vec<&str> = std::mem::take(&mut *lagged.borrow_mut()).iter().map(|&r| C33_NAMES[C33_RIDERS.iter().position(|c| c.0 == r).unwrap()]).collect();
+        let want_lags: Vec<&str> = C33_LAGS.iter().filter(|l| l.0 == tick).map(|l| l.1).collect();
+        assert_eq!(lags, want_lags, "tick {tick}: the landing lags rolled");
         // S421: every rear tyre emitter took its point from the node chain; the swingarm's compression is
         // the rear wheel's of the frame before, and the bike's root is not moved after the emitters run.
         let points = std::mem::take(&mut *rear_points.borrow_mut());
