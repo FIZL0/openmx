@@ -496,6 +496,14 @@ impl State for Sim {
         if let Some(quad) = &self.quad {
             w.blob("quad", &quad.hash_bytes());
         }
+        // And the parked cars the bikes strike (S485), as their bytes: only on a Sim that has them.
+        if !self.parked_cars.is_empty() {
+            let mut bytes = Vec::new();
+            for p in &self.parked_cars {
+                crate::snapshot::Wire::put(&p.machine, &mut bytes);
+            }
+            w.blob("parked_cars", &bytes);
+        }
         // And the AI riders (S327), as their bytes: only on a Sim that has them.
         if let Some(ai) = &self.ai {
             w.blob("ai", &crate::snapshot::ai_bytes(ai));

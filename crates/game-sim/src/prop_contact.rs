@@ -567,6 +567,12 @@ impl crate::Sim {
         self.prop_strike_by(0, me, first, dt, Some(world))
     }
 
+    /// [`Sim::prop_strike_in`] with the struck bodies after the `first` others of player `i`'s bump:
+    /// its players' vehicles and the parked cars it may push (S485, [`crate::Sim::parked_cars`]).
+    pub(crate) fn prop_strike_after(&self, i: usize, first: usize, dt: F, world: &dyn crate::world::World) -> Strike {
+        self.prop_strike_by(i, i, first, dt, Some(world))
+    }
+
     /// Player `i`'s strike, its mirrors naming striker `me` and its entries' bodies from `first`; in
     /// `world`'s seams' copies too where it wraps.
     fn prop_strike_by(&self, i: usize, me: usize, first: usize, dt: F, world: Option<&dyn crate::world::World>) -> Strike {

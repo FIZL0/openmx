@@ -180,6 +180,10 @@ pub struct Sim {
     /// free09's monster truck is one. Empty — what every ride had before — walks as it did. Fixed
     /// for the ride, like [`Sim::home`]: not walked, hashed or sent.
     pub parked: Arc<[world::Prop]>,
+    /// The parked cars as the riders' bikes meet them (S485, [`car::Parked`]): each one's hull in
+    /// the bikes' list, struck, woken and pushed, and stepped while awake. Empty — what every ride
+    /// had before — steps and hashes as it did. Not on the wire yet: a resync keeps this machine's.
+    pub parked_cars: Vec<car::Parked>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -295,6 +299,7 @@ impl Sim {
             dust: None,
             tracks: None,
             parked: Arc::default(),
+            parked_cars: Vec::new(),
         }
     }
 
@@ -320,6 +325,27 @@ impl Sim {
     /// body sleeps ([`ai::parked_hull`]), in the order given.
     pub fn park<'m>(&mut self, machines: impl IntoIterator<Item = (track::Mesh, &'m car::Machine)>) {
         self.parked = machines.into_iter().map(|(hull, m)| ai::parked_hull(hull, &m.body)).collect();
+    }
+
+    /// **The map's parked cars as the riders' bikes meet them** (S485, [`car::Parked`]): held in
+    /// [`Sim::parked_cars`], their hulls in the bikes' list, and [`Sim::parked`] the AI riders' hulls of
+    /// them where they rest ([`car::Parked::ai_hull`]), in the order given.
+    pub fn park_cars(&mut self, cars: Vec<car::Parked>) {
+        self.parked = cars.iter().map(car::Parked::ai_hull).collect();
+        self.parked_cars = cars;
+    }
+
+    /// The woken parked cars' frame, ahead of the bikes' (S485, [`car::Parked::frame`]); when one falls
+    /// asleep again, [`Sim::parked`] (one hull a car) stands the AI riders' hulls where they now rest.
+    fn parked_cars_frame(&mut self, dt: F, world: &mut dyn World) {
+        let tables = &self.tables.ride;
+        let mut slept = false;
+        for p in &mut self.parked_cars {
+            slept |= p.frame(world, dt, &tables.acos, &tables.curve);
+        }
+        if slept && self.parked.len() == self.parked_cars.len() {
+            self.parked = self.parked_cars.iter().map(car::Parked::ai_hull).collect();
+        }
     }
 
     /// The pad half of a frame: the device manager's update, and the rider's hands off it.
@@ -365,7 +391,8 @@ impl Sim {
     /// own pad holds ([`Sim::step_all`]; a player with no pad of their own holds nothing). A caller
     /// that has every player's controls — online play, a fixture of several — calls `step_all`.
     pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
-        if !self.others.is_empty() && self.plane.is_none() {
+        // A lone rider among parked cars rides `step_all` too, which strikes them (S485).
+        if (!self.others.is_empty() || !self.parked_cars.is_empty()) && self.plane.is_none() {
             let mut all = self.pad_controls();
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
@@ -754,7 +781,7 @@ impl Sim {
     /// plane ride is one player's: with a plane up, only it is stepped, as before.
     pub fn step_all(&mut self, dt: F, controls: &[Controls], world: &mut dyn World) -> Vec<crate::rider::Frame> {
         assert_eq!(controls.len(), self.players(), "one set of controls per player");
-        if self.others.is_empty() || self.plane.is_some() {
+        if (self.others.is_empty() && self.parked_cars.is_empty()) || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
         }
         // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]); every
@@ -770,9 +797,14 @@ impl Sim {
             self.feed_cards();
         }
         let mut rode = controls.to_vec();
+        // The parked cars a bike woke, stepped ahead of the bikes (S485).
+        self.parked_cars_frame(dt, world);
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
-        // On a world that wraps (MD44), each bike against every other's nearest copy.
-        let mut lists = self.bike_contacts_in(dt, &*world);
+        // On a world that wraps (MD44), each bike against every other's nearest copy. The parked
+        // cars' hulls are in the same list (S485): one a bike strikes is woken.
+        let (mut lists, parked) = self.bike_contacts_parked(dt, &*world);
+        self.parked_struck(&parked);
+        let first = self.players() + self.parked_cars.len();
         // And every bike's body rays against the cars (S137), from the same tick's places.
         let mut cars: Vec<Vec<contact::Contact>> = Vec::with_capacity(self.players());
         for i in 0..self.players() {
@@ -781,11 +813,16 @@ impl Sim {
         for (i, c) in controls.iter().enumerate().rev() {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
-            let strike = self.prop_strike_in(i, dt, &*world);
+            let strike = self.prop_strike_after(i, first, dt, &*world);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
-                .map(|l| self.bump_in(i, l, &*world));
+                .map(|l| {
+                    let mut b = self.bump_in(i, l, &*world);
+                    // The parked cars' bodies, which its resolve pushes (S485).
+                    b.planes = self.parked_flown(i, &*world);
+                    b
+                });
             if let Some(b) = bump.as_mut() {
                 // The riders after it in player order framed already (the walk is backwards).
                 self.strike_into_among(b, strike, dt, world, &mut prop_movers, &hulls, &|j| j > i);
@@ -828,6 +865,7 @@ impl Sim {
             if let Some(b) = &bump {
                 self.bumped(b);
                 self.traffic.props.pushed(&b.props);
+                self.parked_pushed(b);
             }
             self.wreck_pushed_back(i);
             frames.push(frame);
@@ -1015,6 +1053,7 @@ impl Clone for Sim {
             dust: self.dust.clone(),
             tracks: self.tracks.clone(),
             parked: self.parked.clone(),
+            parked_cars: self.parked_cars.clone(),
         }
     }
 }
