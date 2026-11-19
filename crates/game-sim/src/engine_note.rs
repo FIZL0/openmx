@@ -685,7 +685,7 @@ impl crate::Sim {
     /// **The engine notes' frame** (S328b, the module header): every player's note in the walk's order
     /// (the last player first), on the game's generator — the race's, or the AI lane's when there is no
     /// race (S387). A Sim with no notes, or no generator, draws nothing here. `rode` is the controls each bike
-    /// rode, for its clutch lever.
+    /// rode, for its clutch lever; an AI rider's clutch is its brain's latest instead (S482a).
     pub(crate) fn notes_frame(&mut self, dt: F, rode: &[Controls]) {
         if self.notes.is_none() {
             return;
@@ -700,7 +700,9 @@ impl crate::Sim {
                 let h = Hands {
                     grounded: r.air.on_ground,
                     gas: r.held.gas.0,
-                    clutch: rode[i].clutch.0,
+                    // An AI rider's is its brain's, as it thought after the bike's frame (S482a: the
+                    // original's note reads the rider's `+0x890`, which the brain writes).
+                    clutch: self.levers_of(i).map_or(rode[i].clutch, |c| c.clutch).0,
                     speed: r.chassis.speed.0,
                     at: [at.x(), at.y(), at.z()],
                     vel: [r.chassis.vel.x(), r.chassis.vel.y(), r.chassis.vel.z()],
