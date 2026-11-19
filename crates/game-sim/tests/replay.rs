@@ -14100,6 +14100,8 @@ struct S485Tick {
     bike_vel: Vf,
     /// The rider wrecked on this tick.
     wrecked: bool,
+    /// The rider's wreck bike's origin while they are down (S486), else zero.
+    wreck: Vf,
 }
 
 /// The port's ride of research/s484/truck.sh: recording2's bike moved to [`S485_BIKE`] with its
@@ -14108,6 +14110,11 @@ struct S485Tick {
 /// ([`game_sim::car::Parked`], [`Sim::park_cars`]). `None` where the image or the disc is not in this
 /// worktree.
 fn s485_ride(ticks: usize, parked: bool) -> Option<Vec<S485Tick>> {
+    s485_ride_with(ticks, parked, |_, _, _| {})
+}
+
+/// [`s485_ride`] with `after` handed the Sim and the world after each tick (its count from 1).
+fn s485_ride_with(ticks: usize, parked: bool, mut after: impl FnMut(usize, &mut Sim, &mut dyn World)) -> Option<Vec<S485Tick>> {
     use game_sim::car::{Car, CarModel, Kind, Parked};
     let image = private_dir("states").join("recording2.p2m2_SaveState.eeMemory.bin");
     let Some(st) = SaveState::open_either(&image) else {
@@ -14178,12 +14185,14 @@ fn s485_ride(ticks: usize, parked: bool) -> Option<Vec<S485Tick>> {
             sim.park_cars(vec![truck]);
         }
         let mut out = Vec::new();
-        for _ in 0..ticks {
+        for t in 1..=ticks {
             let fr = sim.tick_in(Input { buttons: 0x0040, stick: (0, 0) }, world);
+            after(t, &mut sim, world);
             let truck = sim.parked_cars.first().map(|p| (p.awake(), p.machine.body.position, p.machine.body.velocity));
             let (awake, truck, truck_vel) = truck.unwrap_or((false, Vf::ZERO, Vf::ZERO));
             let r = &sim.rider;
-            out.push(S485Tick { awake, truck, truck_vel, bike: r.ride.origin, bike_vel: r.ride.chassis.vel, wrecked: fr.wreck.is_some() });
+            let wreck = r.crash.as_ref().map_or(Vf::ZERO, |c| c.bike.origin());
+            out.push(S485Tick { awake, truck, truck_vel, bike: r.ride.origin, bike_vel: r.ride.chassis.vel, wrecked: fr.wreck.is_some(), wreck });
         }
         Some(out)
     });
@@ -14221,8 +14230,12 @@ fn s485_capture() -> Option<Vec<[f32; 11]>> {
 /// From there the port's truck takes vz 2.74 (the original's 2.77, the bike 1% slower), decays
 /// 1.74, 1.16, 0.77, 0.51, 0.34, 0.23, 0.15, 0.10 (theirs 1.75, 1.16, 0.77, 0.51, 0.34, 0.22, 0.14,
 /// 0.09), sleeps on the 9th tick after, as theirs, and has slid 0.201 ft (theirs 0.203). Both riders
-/// wreck on the strike and are put back ~90 ticks later. Not matched: the original's truck wakes twice
-/// more for a frame at rest (rows 68 and 70) without moving; the port's stays asleep.
+/// wreck on the strike and are put back ~90 ticks later.
+///
+/// S486: the wrecked rider's wreck bike, sliding back along the nose, wakes it again for a frame
+/// without a step on the 10th tick after (the original's row 68), and it steps 0.0012 ft (theirs
+/// 0.0009) and sleeps on the 11th, as theirs; slid 0.2024 ft then (theirs 0.2029). Not matched: the
+/// original's bike wakes it once more on the 12th (row 70); the port's has slid clear by then.
 #[test]
 fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let Some(cap) = s485_capture() else { return };
@@ -14234,10 +14247,10 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let lag = ours as i64 + 2 - theirs as i64;
     println!("the truck wakes: port tick {}, the original's row {theirs} ({lag} late)", ours + 1);
     assert!((0..=3).contains(&lag), "the port's bike reaches the truck {lag} frames after the original's");
-    for k in 0..12 {
+    for k in 0..16 {
         let (p, r) = (&port[ours + k], &cap[theirs + k]);
         println!(
-            "strike+{k}: awake {} / {}, vz {:.4} / {:.4}, z {:.4} / {:.4} (from rest), bike z {:.3} / {:.3}",
+            "strike+{k}: awake {} / {}, vz {:.4} / {:.4}, z {:.4} / {:.4} (from rest), bike z {:.3} / {:.3}, wreck bike {:.3} {:.3} {:.3}",
             p.awake as u8,
             r[1],
             p.truck_vel.z(),
@@ -14246,6 +14259,9 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
             r[4] - cap[0][4],
             p.bike.z(),
             r[10],
+            p.wreck.x(),
+            p.wreck.y(),
+            p.wreck.z(),
         );
     }
     // The bike stops dead at the nose, and its rider wrecks there.
@@ -14263,6 +14279,12 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let ours_slept = port[ours..].iter().position(|p| !p.awake);
     let theirs_slept = cap[theirs..].iter().position(|r| r[1] == 0.0);
     assert_eq!(ours_slept, theirs_slept, "the truck sleeps that many frames after the strike");
+    // The wreck bike wakes it for a frame at rest, and it steps once more and sleeps (S486).
+    assert!(port[ours + 10].awake && cap[theirs + 10][1] != 0.0, "strike+10: the wreck bike's wake");
+    assert_eq!(port[ours + 10].truck, port[ours + 9].truck, "strike+10: woken without a step");
+    assert!(!port[ours + 11].awake, "strike+11: asleep again");
+    let step = port[ours + 11].truck.z() - port[ours + 10].truck.z();
+    assert!(step > 0.0 && step < 0.003, "strike+11: the truck stepped {step} ft, the original's 0.0009");
     assert!(port[ours + 20..].iter().all(|p| !p.awake), "the truck stays asleep");
     // Where it slid to: 0.2 ft north, the other axes still.
     let last = port.last().unwrap();
@@ -14287,4 +14309,45 @@ fn without_the_parked_truck_the_bike_rides_through_its_spot() {
     let z = port.last().unwrap().bike.z();
     assert!(z > S485_TRUCK[2] + 10.0, "the bike stopped at z {z} with nothing parked");
     assert!(port.iter().all(|p| !p.wrecked), "the bike wrecked with nothing parked");
+}
+
+/// **S486: a resync carries the parked cars.** S485's ride, its state sent while the struck truck is
+/// awake and again once it sleeps where it slid, decoded onto the same ride's state from before the
+/// strike: the same hash (the truck's machine, collision object and resting place are in its
+/// `parked_cars` blob), the AI riders' hull of the truck where the sender's stands, and the bytes
+/// again when sent back. A ride with no parked car refuses the state, and the truck's ride refuses
+/// one without them.
+#[test]
+fn a_resync_carries_the_parked_cars() {
+    use game_sim::snapshot;
+    let mut before: Option<Sim> = None;
+    let mut sent = Vec::new();
+    let ran = s485_ride_with(120, true, |t, sim, _| {
+        if t == 10 {
+            before = Some(sim.clone());
+        }
+        let awake = sim.parked_cars[0].awake();
+        if (t == 62 && awake) || t == 110 {
+            let bytes = snapshot::encode(sim);
+            let mut there = before.clone().expect("the state from before the strike");
+            assert!(!there.parked_cars[0].awake(), "tick {t}: the truck was asleep before the strike");
+            snapshot::decode(&mut there, &bytes).expect("the state decodes");
+            assert_eq!(there.hash(), sim.hash(), "tick {t}: the decoded state's hash");
+            assert_eq!(there.parked_cars[0].awake(), awake, "tick {t}: the truck awake");
+            assert_eq!(there.parked_cars[0].machine.body.position, sim.parked_cars[0].machine.body.position);
+            assert_eq!(there.parked[0].to_world, sim.parked[0].to_world, "tick {t}: the AI riders' hull of the truck");
+            assert_eq!(snapshot::encode(&there), bytes, "tick {t}: sent back");
+            let mut bare = there.clone();
+            bare.parked_cars.clear();
+            assert!(snapshot::decode(&mut bare, &bytes).is_err(), "a ride with no parked car took the state");
+            let mut without = sim.clone();
+            without.parked_cars.clear();
+            assert!(snapshot::decode(&mut there, &snapshot::encode(&without)).is_err(), "the truck's ride took a state without it");
+            sent.push(t);
+        }
+    });
+    if ran.is_none() {
+        return;
+    }
+    assert_eq!(sent, [62, 110], "sent while the truck is awake and after it slept");
 }

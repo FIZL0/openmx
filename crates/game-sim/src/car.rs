@@ -3144,6 +3144,15 @@ pub struct Parked {
     pub hull: std::sync::Arc<crate::track::Mesh>,
     pub machine: Machine,
     pub collision: Collision,
+    /// Where its body last fell asleep (S486): the node the AI riders' hull of it stands at
+    /// ([`Parked::ai_hull`]), which moves only when it sleeps again, and which a resync carries.
+    pub rest: crate::math::Mat4,
+}
+
+/// The node `body` stands at, as a matrix ([`crate::wreck_bike::node_of`]).
+fn node_matrix(body: &crate::biplane::Body) -> crate::math::Mat4 {
+    let n = crate::wreck_bike::node_of(body);
+    crate::math::Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
 }
 
 /// How many frames a parked car's load settle may take before it is left as it stands: the truck's
@@ -3174,7 +3183,8 @@ impl Parked {
         let mut machine = Machine::new(&car, model, spawn, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
         let mut collision = collision_of_model(&car, model, &machine.body, rays);
         machine.settle(&car, world, &mut collision, F(LOAD_DT), acos, curve, SETTLE_FRAMES);
-        Parked { car, hull, machine, collision }
+        let rest = node_matrix(&machine.body);
+        Parked { car, hull, machine, collision, rest }
     }
 
     /// Whether its body is awake.
@@ -3182,20 +3192,31 @@ impl Parked {
         self.machine.body.enabled
     }
 
-    /// **One frame of a woken parked car** (S485): [`Machine::step_struck`] with nobody in it, then
-    /// the object listener's sleep once it is at rest ([`Machine::at_rest`]). Asleep, nothing. True
-    /// on the frame it falls asleep again, when its hull's place for the AI riders moves.
+    /// **One frame of a woken parked car** (S485): [`Machine::step_struck`] with nobody in it. Asleep,
+    /// nothing. True when it stepped and is at rest ([`Machine::at_rest`]): the object listener puts
+    /// it to sleep after the riders' frames ([`Parked::sleep`]), so a wreck bike that strikes it in
+    /// the same frame does not keep it awake (S486).
     pub fn frame(&mut self, world: &mut dyn crate::world::World, dt: F, acos: &AcosTable, curve: &CurveTable) -> bool {
         if !self.awake() {
             return false;
         }
         let Parked { car, machine, collision, .. } = self;
         machine.step_struck(car, &mut Through(world), collision, dt, acos, curve, &mut |_| F::ZERO);
-        if machine.at_rest(car) {
-            machine.body.enabled = false;
-            return true;
-        }
-        false
+        machine.at_rest(car)
+    }
+
+    /// The object listener's sleep (S486), after the frame in which [`Parked::frame`] found it at
+    /// rest: its body disabled whatever struck it since, and its hull's place for the AI riders
+    /// moved to where it now rests.
+    ///
+    /// S484's capture: after the strike the truck sleeps (row 67), the wrecked rider's bike sliding
+    /// back along its nose wakes it without a step (68), it steps 0.001 ft and sleeps again (69),
+    /// is woken (70), steps and sleeps (71) and stays asleep once the bike has slid clear. A strike
+    /// on a car stepped that frame is undone by its sleep; one on a car asleep at the frame's start
+    /// leaves it awake for the next.
+    pub fn sleep(&mut self) {
+        self.machine.body.enabled = false;
+        self.rest = node_matrix(&self.machine.body);
     }
 
     /// Its hull as the riders' bikes meet it, awake or asleep ([`Machine::hull`]), for seat `seat`.
@@ -3203,9 +3224,10 @@ impl Parked {
         self.machine.hull(seat, &self.hull, &self.collision)
     }
 
-    /// Its hull as the AI riders' avoidance meets it ([`crate::ai::parked_hull`]).
+    /// Its hull as the AI riders' avoidance meets it ([`crate::ai::parked_hull`]), where it last fell
+    /// asleep ([`Parked::rest`]).
     pub fn ai_hull(&self) -> crate::world::Prop {
-        crate::ai::parked_hull((*self.hull).clone(), &self.machine.body)
+        crate::world::Prop::on((*self.hull).clone(), &self.rest)
     }
 
     /// The struck listener (S485): a bike's body rays struck its hull, and its body is enabled.
