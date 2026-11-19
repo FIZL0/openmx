@@ -52,8 +52,10 @@ pub(crate) const C33_RIDERS: [(u32, u32, u32); 4] = [
 pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
-/// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [296, 302, 1802, 280, 84];
+/// to it but the torn ones: the regression mark. S482: the free ride's jump watch took the generator
+/// from 84 to 130 and ai0 from 296 to 318; ai2 went from 280 to 278, on the draws after the
+/// generator parts at 131 (with the generator put back to the capture's each row, it agrees to 729).
+const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 278, 130];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -641,8 +643,9 @@ fn c33_notes(ee: &Ee) -> engine_note::Notes {
     engine_note::Notes { riders: riders.into_iter().map(|r| r.1).collect() }
 }
 
-/// The last tick [`C33_DUST`] covers.
-const C33_DUST_THROUGH: u64 = 63;
+/// The last tick [`C33_DUST`] is held to here: it covers 132, where ai0's foot dust (entry 4) draws
+/// in the original and not in the Sim (S482's follow-up).
+const C33_DUST_THROUGH: u64 = 131;
 
 /// S328c: the image's emitters as the Sim's, by Sim player: each rider's manager (`+0x1490`) entries
 /// in its list's order. An entry: its tyre record `+4` (records of `0x2c` from the feed's `+4`, the

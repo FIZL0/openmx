@@ -874,6 +874,23 @@ impl crate::Sim {
         ch.vel = velocity;
     }
 
+    /// **The free ride's jump watch** (S482, [`crate::ai::Pilot::watch_jumps`]), `dt` long, after
+    /// every bike's frame: each AI rider's card times its jumps on its bike's wheel word, for its
+    /// habits to read next tick. Not on a ride with a race ([`crate::Sim::race`]): its keeper is the
+    /// race's, whose cards the brains do not read their air time off yet.
+    pub(crate) fn watch_jumps(&mut self, dt: F) {
+        if self.race.is_some() {
+            return;
+        }
+        let grounded: Vec<bool> = (0..self.players()).map(|j| self.rider_of(j).ride.air.on_ground).collect();
+        let Some(lane) = self.ai.as_deref_mut() else { return };
+        for (p, pilot) in &mut lane.pilots {
+            if let Some(&on) = grounded.get(*p) {
+                pilot.watch_jumps(on, dt);
+            }
+        }
+    }
+
     /// The controls player `i`'s AI brain left for its bike ([`crate::ai::ride_controls`] of the
     /// levers its last think handed off), or `None` for a player no brain drives.
     pub fn levers_of(&self, i: usize) -> Option<crate::ride::Controls> {

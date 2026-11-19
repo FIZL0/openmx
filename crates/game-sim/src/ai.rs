@@ -6655,6 +6655,42 @@ impl Pilot {
         self.seat.path_net = net;
         self.seat.live = lap.is_some() && laps.rules.lap.flags & RACE_STARTED != 0;
     }
+
+    /// **The free ride's jump watch on the pilot's card** (S482), `dt` long: the free ride's score
+    /// keeper ([`keeper_mode::FREE_RIDE`]) runs the race's jump watch on every card with
+    /// [`crate::race::race_card_flags::WATCHES_JUMPS`] (the habits' [`Habits::racing`]) after the
+    /// riders' updates, on the bike's word that a wheel is down. The habits read what it leaves on
+    /// their next tick: the air time (card `+0xfc`, the landing lag's roll once it reaches the hang
+    /// time, and the seeker's settle word) and the ground clock (`+0x1b0`, the lag's clock). As
+    /// [`crate::race::RaceRules::jumps`]: in the air the ground clock is 0, the first tick off the
+    /// ground (the card's was-grounded bit) starts the air time over, and the air time runs; on the
+    /// ground the ground clock runs. The card's grounded and was-grounded bits are kept on
+    /// [`Pilot::card`]'s flags. The jump's count, length, height and bests, which no brain reads, are
+    /// not kept.
+    pub fn watch_jumps(&mut self, on_ground: bool, dt: F) {
+        use crate::race::race_card_flags as rf;
+        let Some(card) = self.card.as_mut() else { return };
+        let h = &mut self.racer.habits;
+        if on_ground {
+            card.flags |= rf::GROUNDED;
+        } else {
+            card.flags &= !rf::GROUNDED;
+        }
+        if !h.racing {
+            return;
+        }
+        if on_ground {
+            h.lag_clock = h.lag_clock + dt;
+            card.flags |= rf::WAS_GROUNDED;
+        } else {
+            h.lag_clock = F(0.0);
+            if card.flags & rf::WAS_GROUNDED != 0 {
+                h.air_time = F(0.0);
+            }
+            h.air_time = h.air_time + dt;
+            card.flags &= !rf::WAS_GROUNDED;
+        }
+    }
 }
 
 /// The score keeper's modes (its `+0x64`, which the keeper's tick picks its handler by; S92 found

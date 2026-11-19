@@ -2198,6 +2198,12 @@ ai_habits                   boot 0x00280070 (rider, f12 dt) interface vt+0x28 (t
 #                                           keeper +0x64 == 3 no cross-up; brain +0x2b0 low air, +0x354
 #                                           start state, +0x360 start preload. Five rand() draws at most.
 #                                           S312: ai::habits, oracled over 10,000 ticks
+#                                           S482: the landing lag's roll draws at 0x00280420 (ra
+#                                           0x00280428) once card +0xfc >= +0x110c. In a free ride
+#                                           +0xfc and +0x1b0 are score_card_jumps' (0x00267d90, store
+#                                           at 0x00268020), run by score_mode3 after the riders: the
+#                                           Sim's Pilot::watch_jumps. C33 rolls at 85 (ai2), 94 (ai1),
+#                                           95 (ai0), none won
 ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
 #                                           gains (SteeringGain +0x208, OversteerCorrectionGain
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,

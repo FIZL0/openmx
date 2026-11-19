@@ -877,6 +877,8 @@ impl Sim {
         self.notes_frame(dt, &rode);
         // The race manager walks after every bike (S291).
         self.race_frame(dt, world);
+        // A free ride's keeper times the AI riders' jumps, after every bike (S482).
+        self.watch_jumps(dt);
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);
         // Over a seam (MD29), each rider after every rider has moved.
@@ -950,6 +952,7 @@ impl Sim {
         for p in &mut self.others {
             p.rider.wrap_round(&*world);
         }
+        self.watch_jumps(dt);
         self.feed_cards();
     }
 
