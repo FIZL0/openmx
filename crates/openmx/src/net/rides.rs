@@ -176,8 +176,12 @@ fn fly_held(
             .unzip();
         let downed = game_sim::wreck_plane::search_downed_by(&mut riders, &planes, dt, &mut *world, &mut mets);
         drop((planes, mets));
-        let props = props.map(|p| (p.set_mut(), &flown[..]));
-        vehicle::fly_together(dt, &mut fleet, world, &tables.ride, props);
+        // In the set's pass (B34a): a prop a plane wakes searches at once.
+        let (props, movers) = match props.map(|p| p.set_in()) {
+            Some((set, movers)) => (Some((set, &flown[..])), movers),
+            None => (None, None),
+        };
+        vehicle::fly_together_in(dt, &mut fleet, world, &tables.ride, props, movers);
         if !downed.is_empty() {
             let (mut planes, mut mets): (Vec<&mut game_sim::flight::Flight>, Vec<&mut game_sim::flight::Met>) = fleet
                 .iter_mut()

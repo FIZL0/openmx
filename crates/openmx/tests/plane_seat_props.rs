@@ -74,10 +74,16 @@ fn body_of(ee: &Ee, b: u32) -> Body {
 }
 
 fn image(kit: &Kit) -> Option<Ee> {
-    let rel = "states/s241-hit0-11042.eeMemory.bin";
+    image_named(kit, "hit0-11042")
+}
+
+/// S241's state `name` (`context/states/s241-<name>.eeMemory.bin`).
+fn image_named(kit: &Kit, name: &str) -> Option<Ee> {
+    let rel = format!("states/s241-{name}.eeMemory.bin");
+    let rel = rel.as_str();
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context").join(rel);
     let path = if here.exists() { here } else { kit.ctx(rel) };
-    let mut ee = Ee::from_ram(&path).map_err(|why| skip(&format!("{why} — research/s241/slots.py ram hit0-11042 writes it"))).ok()?;
+    let mut ee = Ee::from_ram(&path).map_err(|why| skip(&format!("{why} — research/s241/slots.py ram {name} writes it"))).ok()?;
     ee.set(28, u64::from(addr("boot_gp").unwrap()));
     Some(ee)
 }
@@ -293,4 +299,134 @@ fn planes_flown_together_knock_the_shared_ball() {
         );
     }
     assert!(ball(&sims[0], at).enabled, "the ball the planes knocked is awake in seat 0's world");
+}
+
+/// Ball 0's list as the port left it, each entry's every field (`{:?}` tells -0 from 0), a mirror
+/// naming the plane's seat `plane` written as naming striker 0, the lone seat's.
+fn list(sim: &Sim, (c, o): (usize, usize), plane: usize) -> Vec<String> {
+    let col = sim.traffic.props.collections[c].objects[o].collision.as_ref().expect("ball 0's collision object");
+    col.record.contacts.iter().map(|e| format!("{:?}", game_sim::contact::Contact { other: e.other.map(|k| if k == plane { 0 } else { k + 100 }), ..*e })).collect()
+}
+
+/// B34a's runs: b34at-11065 (research/s241/strike.py `--at`), the tick before S241's plane wakes
+/// ball 0. One seat flying alone with its own props ([`vehicle::fly_lane_met`], whose ball 0 list in
+/// the strike tick game-sim's `prop_plane.rs` proves against b34at-11066, B34): ball 0's list and
+/// body for 6 ticks. `None` where the disc or the state is not there.
+struct Strike {
+    plane: Flight,
+    set: PropSet,
+    ground: Ground<'static>,
+    at: (usize, usize),
+    dt: F,
+    want: Vec<(Vec<String>, Body)>,
+}
+
+fn strike_tick() -> Option<Strike> {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return None };
+    let mut plane = the_plane(&kit)?;
+    let (mut set, mut ground) = free06()?;
+    let ee = image_named(&kit, "b34at-11065")?;
+    let at = seed(&ee, &mut set);
+    plane.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
+    let mut alone = Sim::new(0x5259);
+    alone.plane = Some(plane.clone());
+    alone.traffic.props = set.clone();
+    let mut want = Vec::new();
+    for _ in 0..6 {
+        vehicle::fly_lane_met(&mut alone, dt, vehicle::Wanted::default(), &mut ground, &[], None);
+        want.push((list(&alone, at, 0), ball(&alone, at)));
+    }
+    assert!(want[0].1.enabled, "alone, the plane wakes ball 0 in the strike tick");
+    assert!(want[0].0.len() >= 2, "alone, ball 0 searched in its strike tick: {:?}", want[0].0);
+    Some(Strike { plane, set, ground, at, dt, want })
+}
+
+fn assert_as_alone(tick: usize, seat: usize, sim: &Sim, at: (usize, usize), (want_list, want_ball): &(Vec<String>, Body)) {
+    // Among the seats the plane is seat 1's, the set's striker 1.
+    assert_eq!(&list(sim, at, 1), want_list, "tick {}: seat {seat}'s ball 0 list as alone", tick + 1);
+    let got = ball(sim, at);
+    assert_eq!(
+        (got.enabled, got.position.to_bits(), got.velocity.to_bits(), got.rates.to_bits()),
+        (want_ball.enabled, want_ball.position.to_bits(), want_ball.velocity.to_bits(), want_ball.rates.to_bits()),
+        "tick {}: seat {seat}'s ball 0 as alone\ngot {got:?}\nwant {want_ball:?}",
+        tick + 1
+    );
+}
+
+/// **B34a: a ball a plane seat wakes searches in its strike tick** ([`vehicle::fly_lane_shared`],
+/// [`game_sim::prop_seats::Shared::movers_mut`]). Seat 1 flies the plane among seats sharing one set,
+/// seat 0's bike far off, as [`a_plane_seat_knocks_the_shared_ball`]: ball 0's whole list in the
+/// strike tick (its ground entry behind the plane's mirror, which names seat 1) and its body after
+/// are the lone seat's, bit for bit, in both seats.
+#[test]
+fn a_ball_a_plane_seat_wakes_searches_in_its_strike_tick() {
+    let Some(Strike { plane, set, mut ground, at, dt, want }) = strike_tick() else { return };
+    let ground: &mut dyn World = &mut ground;
+    let mut seat = Sim::new(0x5259);
+    seat.plane = Some(plane);
+    seat.traffic.props = set.clone();
+    let mut bike = Sim::new(0x5259);
+    bike.traffic.props = set.clone();
+    let spot = set.collections[at.0].objects[at.1].node.origin;
+    bike.rider.place(Vf::new(spot.x(), spot.y(), spot.z() + 2000.0, 1.0), Vf::new(1.0, 0.0, 0.0, 0.0));
+    let mut sims = [bike, seat];
+    for (tick, want) in want.iter().enumerate() {
+        let mut props = game_sim::prop_seats::Shared::take(&mut sims.iter_mut().collect::<Vec<_>>()).expect("two seats, props");
+        let [bike, seat] = &mut sims;
+        vehicle::fly_lane_shared(seat, dt, vehicle::Wanted::default(), ground, &[], None, Some((&mut props, 1)));
+        bike.step_shared(dt, &Controls::default(), ground, None, &[], &mut props, 0);
+        props.finish(&mut sims.iter_mut().collect::<Vec<_>>(), dt, ground);
+        for (k, s) in sims.iter().enumerate() {
+            assert_as_alone(tick, k + 1, s, at, want);
+        }
+    }
+}
+
+/// **B34a: a ball planes flown together wake searches in their strike tick**
+/// ([`vehicle::fly_together_in`], [`game_sim::prop_seats::Shared::set_in`]). Seat 1 flies the plane
+/// at ball 0, seat 0 the same plane 2000 ft off, as [`planes_flown_together_knock_the_shared_ball`]:
+/// ball 0's whole list in the strike tick and its body after are the lone seat's, bit for bit, in
+/// both seats, its mirrors naming seat 1's plane where alone they name striker 0.
+#[test]
+fn a_ball_planes_flown_together_wake_searches_in_their_strike_tick() {
+    let Some(Strike { plane, set, mut ground, at, dt, want }) = strike_tick() else { return };
+    let ground: &mut dyn World = &mut ground;
+    let flying = |plane: &Flight| {
+        let mut s = Sim::new(0x5259);
+        s.plane = Some(plane.clone());
+        s.traffic.props = set.clone();
+        s
+    };
+    let mut far = plane.clone();
+    let by = Vf::new(0.0, 0.0, 2000.0, 0.0);
+    (far.body.position, far.body.last_position) = (far.body.position.add(by), far.body.last_position.add(by));
+    far.collider.cofg_world = far.collider.cofg_world.add(by);
+    let mut sims = [flying(&far), flying(&plane)];
+    for (tick, want) in want.iter().enumerate() {
+        let mut props = game_sim::prop_seats::Shared::take(&mut sims.iter_mut().collect::<Vec<_>>()).expect("two seats, props");
+        let mut held = Vec::new();
+        for seat in [1, 0] {
+            let (plane, ready) = vehicle::ready_lane(&mut sims[seat], dt, vehicle::Wanted::default(), ground, Some(&mut props)).expect("a flying seat");
+            held.push((seat, plane, ready));
+        }
+        {
+            let tables = sims[1].tables.clone();
+            let seats: Vec<usize> = held.iter().map(|(s, ..)| *s).collect();
+            let mut fleet: Vec<flight::Fly<'_>> = held
+                .iter_mut()
+                .map(|(_, p, r)| flight::Fly { flight: p.flight.as_mut().unwrap(), pad: r.pad, met: None, bikes: &[] })
+                .collect();
+            let (set, movers) = props.set_in();
+            assert!(movers.is_some(), "the seats' traffic ran the set's pass before the planes fly");
+            vehicle::fly_together_in(dt, &mut fleet, ground, &tables.ride, Some((set, &seats)), movers);
+        }
+        for (seat, plane, ready) in held {
+            vehicle::settle_lane(&mut sims[seat], plane, ready);
+        }
+        props.finish(&mut sims.iter_mut().collect::<Vec<_>>(), dt, ground);
+        for (k, s) in sims.iter().enumerate() {
+            assert_as_alone(tick, k + 1, s, at, want);
+        }
+    }
 }

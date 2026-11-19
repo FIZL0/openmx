@@ -110,8 +110,14 @@ impl Shared {
 
     /// The movers of the set's collide pass, once a seat has run it ([`Shared::held`]): a prop a
     /// seat's strike files searches in that pass, its set's movers added there (B33).
-    pub(crate) fn movers_mut(&mut self) -> Option<&mut PropMovers> {
+    pub fn movers_mut(&mut self) -> Option<&mut PropMovers> {
         self.movers.as_mut()
+    }
+
+    /// The set and its collide pass's movers together, for planes flown together to strike it in
+    /// that pass (B34a, [`crate::flight::frames_together_props_in`]).
+    pub fn set_in(&mut self) -> (&mut PropSet, Option<&mut PropMovers>) {
+        (&mut self.set, self.movers.as_mut())
     }
 
     /// The set lent to a seat that flies the plane (S259), in its traffic's props for the plane's
