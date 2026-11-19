@@ -182,7 +182,8 @@ pub struct Sim {
     pub parked: Arc<[world::Prop]>,
     /// The parked cars as the riders' bikes meet them (S485, [`car::Parked`]): each one's hull in
     /// the bikes' list, struck, woken and pushed, and stepped while awake. Empty — what every ride
-    /// had before — steps and hashes as it did. Not on the wire yet: a resync keeps this machine's.
+    /// had before — steps and hashes as it did. On the wire behind their own tag since S486, the
+    /// `.phy`, hull and ray probe kept this machine's ([`snapshot::encode`]).
     pub parked_cars: Vec<car::Parked>,
 }
 
@@ -335,13 +336,21 @@ impl Sim {
         self.parked_cars = cars;
     }
 
-    /// The woken parked cars' frame, ahead of the bikes' (S485, [`car::Parked::frame`]); when one falls
-    /// asleep again, [`Sim::parked`] (one hull a car) stands the AI riders' hulls where they now rest.
-    fn parked_cars_frame(&mut self, dt: F, world: &mut dyn World) {
+    /// The woken parked cars' frame, ahead of the bikes' (S485, [`car::Parked::frame`]): which of them
+    /// stepped and are at rest, for [`Sim::parked_cars_sleep`] after the bikes.
+    fn parked_cars_frame(&mut self, dt: F, world: &mut dyn World) -> Vec<bool> {
         let tables = &self.tables.ride;
+        self.parked_cars.iter_mut().map(|p| p.frame(world, dt, &tables.acos, &tables.curve)).collect()
+    }
+
+    /// The parked cars [`Sim::parked_cars_frame`] found at rest put to sleep, after the bikes struck
+    /// them (S486, [`car::Parked::sleep`]); when one does, [`Sim::parked`] (one hull a car) stands
+    /// the AI riders' hulls where they now rest.
+    fn parked_cars_sleep(&mut self, resting: &[bool]) {
         let mut slept = false;
-        for p in &mut self.parked_cars {
-            slept |= p.frame(world, dt, &tables.acos, &tables.curve);
+        for (p, _) in self.parked_cars.iter_mut().zip(resting).filter(|(_, r)| **r) {
+            p.sleep();
+            slept = true;
         }
         if slept && self.parked.len() == self.parked_cars.len() {
             self.parked = self.parked_cars.iter().map(car::Parked::ai_hull).collect();
@@ -410,6 +419,8 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
+            // The parked cars a bike woke, stepped ahead of the bikes, as [`Sim::step_all`] does (S486).
+            let resting = self.parked_cars_frame(dt, world);
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
             // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a
@@ -431,13 +442,21 @@ impl Sim {
             // And the plane's hull is in the bikes' world, as split's is (N22a): their contacts and
             // its mirrors gathered from where the last tick left them all, before anyone is stepped,
             // player 1's bike out (B9a).
-            let hulls: Vec<rider_contact::Hull<'_>> = self.plane.as_ref().and_then(|p| p.hull(0)).into_iter().collect();
+            let mut hulls: Vec<rider_contact::Hull<'_>> = self.plane.as_ref().and_then(|p| p.hull(0)).into_iter().collect();
+            // And the parked cars' hulls after the plane's (S486): one a bike strikes is woken.
+            let planes = hulls.len();
+            let n = self.players();
+            hulls.extend(self.parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + planes + k)));
             let seated: Vec<(&Rider, bool)> = std::iter::once((&self.rider, false)).chain(self.others.iter().map(|p| (&p.rider, true))).collect();
-            let (lists, mirrors) = match rider_contact::contacts_met(&seated, &hulls, dt, &*world) {
-                Some((lists, mirrors)) => (Some(lists), mirrors.into_iter().next().unwrap_or_default()),
-                None => (None, Vec::new()),
+            let (lists, mirrors, parked) = match rider_contact::contacts_met(&seated, &hulls, dt, &*world) {
+                Some((lists, mut mirrors)) => {
+                    let parked = mirrors.split_off(planes.min(mirrors.len()));
+                    (Some(lists), mirrors.into_iter().next().unwrap_or_default(), parked)
+                }
+                None => (None, Vec::new(), Vec::new()),
             };
             drop((seated, hulls));
+            self.parked_struck(&parked);
             let riders: Vec<(&Rider, &Phy)> =
                 std::iter::once((&self.rider, &*self.phy)).chain(self.others.iter().map(|p| (&p.rider, &*p.phy))).collect();
             let mut met = rider_contact::met_plane(&riders, 0, riders.len(), mirrors, flying, &*world);
@@ -486,6 +505,7 @@ impl Sim {
             // The original steps its bike world after the plane's post every tick (S99's clock), so
             // the other riders ride on while player 1 flies (B9a).
             self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
+            self.parked_cars_sleep(&resting);
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
@@ -798,7 +818,7 @@ impl Sim {
         }
         let mut rode = controls.to_vec();
         // The parked cars a bike woke, stepped ahead of the bikes (S485).
-        self.parked_cars_frame(dt, world);
+        let resting = self.parked_cars_frame(dt, world);
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy. The parked
         // cars' hulls are in the same list (S485): one a bike strikes is woken.
@@ -841,6 +861,8 @@ impl Sim {
                     r
                 })
                 .collect();
+            // A downed rider's wreck bike by a parked car, searched and stepped with it (S486).
+            self.wreck_meets_parked(i, dt, world);
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
             // An AI rider's levers are the bike's controls (S323); its brain thinks after the frame.
@@ -871,6 +893,8 @@ impl Sim {
             frames.push(frame);
         }
         frames.reverse();
+        // The parked cars that stepped to rest sleep, whatever struck them since (S486).
+        self.parked_cars_sleep(&resting);
         // The bodies' look-around clocks, after every bike (S328a).
         self.bodies_look(dt, &rode);
         // The engine notes, after the bodies (S328b).
@@ -908,6 +932,8 @@ impl Sim {
             self.feed_cards();
         }
         let pads = self.pad_controls();
+        // Whether the plane's hull is in the bikes' world, ahead of the parked cars' (S486).
+        let hulled = self.plane.as_ref().is_some_and(|p| p.hull(0).is_some());
         let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| if i == 0 { Vec::new() } else { self.car_contacts(i, world, dt) }).collect();
         for i in (1..self.players()).rev() {
             let at = self.rider_of(i).ride.transform().0[3];
@@ -917,6 +943,16 @@ impl Sim {
             let mut bump = Some(list).filter(|l| !l.is_empty()).map(|l| {
                 let mut b = self.bump_in(i, l, &*world);
                 b.planes = self.plane.as_ref().map(|p| p.flown(0, at, &*world)).into_iter().collect();
+                // The parked cars' bodies after the plane's, as their hulls follow its (S486); a
+                // plane with no hull is no entry's other, and the cars come first.
+                if !self.parked_cars.is_empty() {
+                    let cars = self.parked_flown(i, &*world);
+                    if hulled {
+                        b.planes.extend(cars);
+                    } else {
+                        b.planes.splice(0..0, cars);
+                    }
+                }
                 b
             });
             let rivals: Vec<ride::Rival> = (1..self.players())
@@ -929,6 +965,8 @@ impl Sim {
                     r
                 })
                 .collect();
+            // A downed rider's wreck bike by a parked car, unless the plane's lane ticked it (S486).
+            self.wreck_meets_parked(i, dt, world);
             self.lend_props(i);
             let c = self.levers_of(i).unwrap_or(pads[i]);
             let kept = self.lend_rng(i);
@@ -941,8 +979,13 @@ impl Sim {
             self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
-                if let (Some(plane), Some(flown)) = (self.plane.as_mut(), b.planes.first()) {
+                let cars = self.parked_cars.len();
+                let (plane_at, cars_at) = if hulled || cars == 0 { (0, 1) } else { (cars, 0) };
+                if let (Some(plane), Some(flown)) = (self.plane.as_mut(), b.planes.get(plane_at)) {
                     plane.pushed(flown);
+                }
+                for (p, f) in self.parked_cars.iter_mut().zip(b.planes.iter().skip(cars_at)) {
+                    p.pushed(f);
                 }
             }
             self.wreck_pushed_back(i);
@@ -1481,6 +1524,10 @@ pub mod wreck_bike;
 /// The wreck bike meets a flown plane (S274): the plane's hull in the wreck bike's search, its body
 /// on the wreck bike's resolve.
 pub mod wreck_plane;
+
+/// A downed rider's wreck bike meets the parked cars (S486): their hulls in its search, their bodies
+/// on its resolve.
+pub mod parked_wreck;
 
 /// Knockable props (S80): the `.toy`'s physics collections, the `.pco` each reads, the scene models
 /// they claim, and each prop's body at rest where its model stands.

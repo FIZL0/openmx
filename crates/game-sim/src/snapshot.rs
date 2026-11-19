@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -153,7 +153,53 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         AI_LANE.put(&mut out);
         ai_put(ai, &mut out);
     }
+    // The parked cars the bikes strike (S486), on a ride that parks any, behind their own tag.
+    if !parked_cars.is_empty() {
+        PARKED.put(&mut out);
+        parked_put(parked_cars, &mut out);
+    }
     out
+}
+
+/// What begins [`encode`]'s parked cars section.
+const PARKED: u64 = u64::from_le_bytes(*b"S486park");
+
+/// The Sim's parked cars in [`encode`]'s codec, which the state's hash walks as one blob (S486):
+/// how many, then each one's machine, collision object (less its ray probe) and resting place; its
+/// `.phy` and hull are the disc's, kept local.
+pub(crate) fn parked_bytes(cars: &[crate::car::Parked]) -> Vec<u8> {
+    let mut out = Vec::new();
+    parked_put(cars, &mut out);
+    out
+}
+
+fn parked_put(cars: &[crate::car::Parked], out: &mut Vec<u8>) {
+    cars.len().put(out);
+    for p in cars {
+        let crate::car::Parked { car: _, hull: _, machine, collision, rest } = p;
+        machine.put(out);
+        collision.put(out);
+        rest.put(out);
+    }
+}
+
+/// [`parked_put`]'s bytes onto `here`'s parked cars, as many as here or an error: the `.phy`, hull
+/// and ray probe stay this machine's.
+fn parked_take(r: &mut Reader<'_>, here: &[crate::car::Parked]) -> Result<Vec<crate::car::Parked>, String> {
+    let n: usize = Wire::take(r)?;
+    if n != here.len() {
+        return Err(format!("{n} parked cars in the state, {} here", here.len()));
+    }
+    here.iter()
+        .map(|h| {
+            let machine = Wire::take(r)?;
+            let mut collision: crate::car::Collision = Wire::take(r)?;
+            collision.rays = Arc::clone(&h.collision.rays);
+            collision.record.rays.clone_from(&h.collision.record.rays);
+            let rest = Wire::take(r)?;
+            Ok(crate::car::Parked { car: Arc::clone(&h.car), hull: Arc::clone(&h.hull), machine, collision, rest })
+        })
+        .collect()
 }
 
 /// What begins [`encode`]'s AI riders section.
@@ -241,7 +287,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE, PARKED].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -388,6 +434,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         let here = sim.ai.as_deref().ok_or("AI riders in the state, none here")?;
         ai = Some(Box::new(ai_take(&mut r, here)?));
     }
+    // The parked cars keep this machine's `.phy`, hull and probe, so a state with them needs them here.
+    let mut parked_cars = None;
+    if r.bytes.get(r.at..r.at + 8) == Some(&PARKED.to_le_bytes()[..]) {
+        r.at += 8;
+        parked_cars = Some(parked_take(&mut r, &sim.parked_cars)?);
+    } else if !sim.parked_cars.is_empty() {
+        return Err(format!("no parked cars in the state, {} here", sim.parked_cars.len()));
+    }
     // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
     // this seat drives the same car here; otherwise left empty for the shell to put back.
     if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
@@ -483,10 +537,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         dust: sim.dust.take(),
         // Nor the tyre tracks (S448).
         tracks: sim.tracks.take(),
-        // Nor the parked machines' hulls (S461), fixed for the ride.
-        parked: Arc::clone(&sim.parked),
-        // Nor the parked cars (S485): not on the wire yet, this machine's kept.
-        parked_cars: std::mem::take(&mut sim.parked_cars),
+        // The parked machines' hulls (S461) are this machine's, but where a parked car slept they
+        // stand where the state's slept (S486, [`crate::car::Parked::rest`]).
+        parked: match &parked_cars {
+            Some(cars) if sim.parked.len() == cars.len() => cars.iter().map(crate::car::Parked::ai_hull).collect(),
+            _ => Arc::clone(&sim.parked),
+        },
+        // The parked cars (S486), as the state has them.
+        parked_cars: parked_cars.unwrap_or_default(),
     };
     Ok(())
 }

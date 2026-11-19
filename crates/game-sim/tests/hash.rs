@@ -619,7 +619,7 @@ fn the_size_of_the_state_type_is_pinned() {
     // riders' avoidance sweeps; not walked and not on the wire.
     // 12416 since S485: the parked cars the bikes strike (`Sim::parked_cars`), empty unless a ride
     // parks them, hashed as one `parked_cars` blob only while present, so the leaves do not move;
-    // not on the wire yet.
+    // on the wire since S486, behind their own tag.
     #[cfg(target_pointer_width = "64")]
     assert_eq!(size_of::<Sim>(), 12416, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
