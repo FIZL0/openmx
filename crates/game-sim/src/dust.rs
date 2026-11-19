@@ -79,7 +79,8 @@
 //!   ([`Emitter::view_test`]): culled past `FarCullDistance` from the camera, or behind it and past
 //!   `DirectionalCullDistance`. An emitter switched on carries the last frame's answer, made at its
 //!   stale point, so the first frame of a wreck far from the last one emits nothing. The camera is
-//!   the shell's ([`Dust::view`]); with none it is the bike's point.
+//!   the shell's ([`Dust::view`]); with none it is the bike's point. The emitter pass's own entries
+//!   (exhaust, generic, spray) read the same answer after their just-on test (S477).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -419,20 +420,31 @@ impl Emitter {
     }
 
     /// The emitter's frame: its new point, the node's for one on a node, then the draws it makes
-    /// (0 or 2).
+    /// (0 or 2). An emitter culled at the last view test draws nothing: the bike's exhaust, generic
+    /// and spray `.emt`s all set `UseViewDependentCull` (800 / 200 in the C33 image, S477).
     fn frame(&mut self, bike: &Mat4, points: Points, dt: F) -> u8 {
-        self.prev = self.pos;
         let node = match self.place {
             Place::Chassis(at) => Some(transform_point(bike, at)),
             Place::Rear => points.rear,
             Place::Front => points.front,
             Place::Exhaust => points.exhaust,
         };
+        self.emit_on(node, dt)
+    }
+
+    /// The emitter pass's emit on a node's point, `node` (S477): [`Emitter::frame`] once its place
+    /// is resolved. With no node the point stays where it was.
+    pub fn emit_on(&mut self, node: Option<Vf>, dt: F) -> u8 {
+        self.prev = self.pos;
         // A rider seeded without the node: the point stays where it was.
         self.pos = node.unwrap_or(self.pos);
         if self.just_on {
             self.just_on = false;
             self.prev = self.pos;
+            return 0;
+        }
+        // Culled at the last view test (S477): nothing, with the points kept.
+        if self.culled {
             return 0;
         }
         if !self.on {

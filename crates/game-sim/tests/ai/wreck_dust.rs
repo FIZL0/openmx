@@ -707,3 +707,111 @@ fn s483_the_feeds_wreck_word_is_the_frame_befores_reason() {
         assert!(seen.iter().any(|s| s.0 != 0 && s.1 != 0), "{image} wrecks within {frames} frames");
     }
 }
+
+/// The emitter pass's entries' vtables: `Exhaust`, `Generic` and `Spray`.
+const PASS: [u32; 3] = [0x0045_e780, 0x0045_e6f0, 0x0045_e720];
+
+/// **S477: the emitter pass's emits skip a culled emitter.** The S422 run of `s325-nose76` (four
+/// riders, 45 frames from 2604), the original interpreted whole. Each emit (`a0` the emitter, `f12`
+/// the frame) on an exhaust, generic or spray entry's emitter is seeded into the port's emitter just
+/// before it runs (as `seed` reads one); the port's emit on the point the original's node put it at
+/// ([`Emitter::emit_on`]) must make the original's rands and leave its switch and points. The bike's
+/// `.emt`s all set `UseViewDependentCull`, and some emits must find their emitter switched on and
+/// culled.
+#[test]
+fn s477_the_emitter_pass_skips_a_culled_emitter() {
+    use super::draws::{neutral_pad, render, render_setup, through, whole_frame};
+    let kit = Kit::load().unwrap();
+    let mut ee = Ee::from_ram(&kit.ctx("capture/s138/s325-nose76-2604.ee.bin")).unwrap();
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let text = std::fs::read_to_string(kit.ctx("capture/s138/s325-nose76.csv")).unwrap();
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |n: &str| head.iter().position(|h| *h == n).unwrap();
+    let (fc, dtc) = (col("frame_counter"), col("dt"));
+    let rows: Vec<(u64, F)> = lines
+        .map(|l| l.split(',').collect::<Vec<_>>())
+        .map(|c| (c[fc].parse().unwrap(), F(c[dtc].parse::<f64>().unwrap() as f32)))
+        .filter(|r| r.0 >= 2604)
+        .collect();
+    let rand_state = addr("rand_state").unwrap();
+    let draws: Rc<RefCell<u32>> = Rc::default();
+    let d = Rc::clone(&draws);
+    ee.hooks.insert(
+        addr("rand").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let n = super::sim::s12e_u64(ee, rand_state).wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            ee.write(rand_state, 8, u128::from(n));
+            ee.set(2, (n >> 32) & 0x7fff_ffff);
+            *d.borrow_mut() += 1;
+        }),
+    );
+    let mut pass = HashSet::new();
+    let mut culls = HashSet::new();
+    for at in (0x0010_0000u32..0x0200_0000).step_by(4) {
+        if PASS.contains(&ee.u32_at(at)) {
+            let em = ee.u32_at(at + 4);
+            pass.insert(em);
+            if ee.u32_at(em + 0x244) != 0 {
+                culls.insert(em);
+            }
+        }
+    }
+    assert!(!pass.is_empty() && culls == pass, "every pass emitter has a view cull: {} of {}", culls.len(), pass.len());
+    let wrong: Rc<RefCell<Vec<String>>> = Rc::default();
+    // Emits seen; with the emitter on and culled; that drew.
+    let tally: Rc<RefCell<[u32; 3]>> = Rc::default();
+    let tick: Rc<RefCell<u64>> = Rc::default();
+    let (w, t, now, dr) = (Rc::clone(&wrong), Rc::clone(&tally), Rc::clone(&tick), Rc::clone(&draws));
+    ee.hooks.insert(
+        addr("emit").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let em = ee.r(4) as u32;
+            if !pass.contains(&em) {
+                through(ee);
+                return;
+            }
+            let dt = F(ee.f(12));
+            let switch = ee.u8_at(em + 0x240);
+            let mut port = Emitter {
+                on: switch & 4 != 0,
+                just_on: switch & 2 != 0,
+                min_speed: F(ee.f32_at(em + 0x3c4)),
+                place: Place::Chassis(Vf([0.0; 4])),
+                pos: vf(ee, em + 0x40),
+                prev: vf(ee, em + 0x60),
+                cull: Some(Cull { far: F(ee.f32_at(em + 0x24c)), directional: F(ee.f32_at(em + 0x250)) }),
+                culled: ee.u32_at(em + 0x248) != 0 && ee.u32_at(0x0041_f788) != 0,
+            };
+            let node = ee.u32_at(em + 0xa4) != 0;
+            let before = *dr.borrow();
+            through(ee);
+            let got = *dr.borrow() - before;
+            let on_culled = port.on && !port.just_on && port.culled;
+            let want = u32::from(port.emit_on(node.then(|| vf(ee, em + 0x40)), dt));
+            let switch = ee.u8_at(em + 0x240);
+            let after = (switch & 4 != 0, switch & 2 != 0, vf(ee, em + 0x40).to_bits(), vf(ee, em + 0x60).to_bits());
+            let ours = (port.on, port.just_on, port.pos.to_bits(), port.prev.to_bits());
+            if got != want || after != ours {
+                w.borrow_mut().push(format!("tick {} emitter {em:#x}: draws {got} vs the port's {want}, emitter {after:x?} vs {ours:x?}", *now.borrow()));
+            }
+            let mut t = t.borrow_mut();
+            t[0] += 1;
+            t[1] += u32::from(on_culled);
+            t[2] += u32::from(got > 0);
+        }),
+    );
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    render_setup(&mut ee);
+    for r in rows.windows(2).take(45) {
+        *tick.borrow_mut() = r[1].0;
+        neutral_pad(&mut ee);
+        whole_frame(&mut ee, r[0].1, &mut clock);
+        render(&mut ee);
+    }
+    let wrong = wrong.borrow();
+    assert!(wrong.is_empty(), "{} differences, the first:\n{}", wrong.len(), wrong.iter().take(12).cloned().collect::<Vec<_>>().join("\n"));
+    let t = *tally.borrow();
+    println!("pass emits {}, on and culled {}, drew {}", t[0], t[1], t[2]);
+    assert!(t[1] > 0 && t[2] > 0, "emits found their emitter on and culled, and others drew: {t:?}");
+}
