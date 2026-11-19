@@ -14203,3 +14203,30 @@ vehicle_fx_tracks_walk boot 0x003d5a00 the vehicle fx manager's render walk (vta
 #   Called from the suspension 0x004d8370 at 0x004d8648, 0x004d8748, 0x004d88ac. The tire step's body
 #   calls (vt +0x4c, +0x84, +0x80, +0x78 via tire +0x1ac) are all on the truck's own body: nothing goes
 #   into the stood-on object's body. Throttle's object 0x00c774b0 is a prop on a rigid body.
+
+# S475 — is there a prop reset on a poof or at the start line? (No: read from the code; the task blocked.)
+# Every put-back of a prop body goes through the body wrapper's vt+0xdc (0x0015a030 via the wrapper
+# vtable 0x0044e760). Its call sites in the whole ELF (objdump scan for `lw $25,0x38(obj)`;
+# `lw $25,0xdc($25)`): the init 0x001597b0, the post's edge check 0x0015b070, the wrapper listener
+# 0x0015b2a0's countdown, the collection settle 0x003b2440 (two), the collection deactivate 0x003b2700,
+# the sx bale raiser 0x002fe4b0 / 0x002fe5e0 (V134; 0x002fe4b0 is run by the supercross activity's
+# reset 0x002fb2e0, a race restart), and a constructor 0x00223560. Nothing in the rider's poof or
+# put-back path, nor the score manager's lap line.
+toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x00456980 at toy+0x20, base
+#                                           0x00455460 the same slot): walks toy+0x18 (count +0x14) and
+#                                           calls every collection's vt(+8)+0xa4 = deactivate 0x003b2700:
+#                                           each body vt+0x128 (disable) then vt+0xdc (put back), then the
+#                                           collection's vt+0xac (unflag). The one whole-track prop reset.
+# No direct call, jump or thunk reaches 0x00289e10 (xrefs: the two vtables only). Every vt(+0x20)+0x38
+# dispatch in the ELF is the score manager's "took the lead" call on a card's owner (+4) and chain
+# (+0x1c4, next +0x1c): 0x00261b80, 0x00262030, 0x00262470, 0x002662f0, 0x002688b0. The toy is never one
+# of those: in first_recording, recording2, c31-sx01-ai4 and c40-sx17-race-start the only word in RAM
+# holding the toy's address is the loaded world's +0x70 (world node class vtable 0x00452530; world =
+# *(0x0041f770)+0x3cc), and the one reader of world+0x70 is the bale raiser's setup 0x002fe050. (A
+# toy's +0x1c is its collection list's tail, so it could not sit in a chain anyway.)
+# What does put free09's props back is each body's own ResetTime, counted from when it falls asleep
+# (the wrapper listener 0x0015b2a0; ported in prop_world, tests/prop_set.rs
+# a_woken_prop_ticks_with_the_ride_and_rolls_back). first_recording's per-body ResetTime: BeachBall and
+# egg 60 s; SH_CrateC, SH_Barrel, recycling_can, trash_can, gas_can 30 s; tool_box and every Sign_* 5 s;
+# every collection's own ResetTime -1. So a sign knocked down before a poof is back ~5 s after it
+# settles, and crates by the next lap; that is likely what read as "reset on poof / past the start".
