@@ -48,6 +48,12 @@
 //! the loader does, and its air drag (the Kiowa's `CD0` and `LowSpeedDrag`, the cars' wings'
 //! `BasicDrag` and `InducedDrag`) x k, skipped at the default as every other knob is.
 //!
+//! P371 took them to MX vs. ATV's quad and its five cars ([`Mods::atv`], [`Mods::mxvatv_car`],
+//! [`Mods::mxvatv_car_part`]): their gravity is their part's gravity block (`GravityScale` and the
+//! force, both x k), and their air drag the quad's `[Aerodynamics]` `Drag` and the cars' wings'. A
+//! Kiowa or a stock car already out takes the new gravity at once ([`Mods::kiowa`]'s caller, the
+//! shell's garage); a quad or an MX vs. ATV car out, at its next take, as with its other knobs.
+//!
 //! P287 gave MX vs. ATV's quad, an addition, its own [`Category::Atv`] on its loaded `.phy`
 //! ([`Mods::atv`]: [`Knob::AtvSpeed`], [`Knob::AtvAccel`], [`Knob::AtvGrip`], [`Knob::AtvSuspension`]),
 //! the bike's four reasoned the same way on the quad's fields, each skipped at its default.
@@ -505,8 +511,8 @@ impl Knob {
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
             Knob::PlaneCeiling => "biplane [Engine] MaxAltitude (and the fade's start, which is 0) x k; Uncapped: no fade, and no 200 ft cap on the plane camera's eye",
             Knob::PlaneMaxG => "not a key: each step the elevator command held to the angle of attack whose lift is k times the weight, and the ailerons x corner speed / speed above the corner speed",
-            Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane, kiowa and car GravityScale x k",
-            Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0, kiowa CD0 and LowSpeedDrag, car every wing's BasicDrag and InducedDrag x k",
+            Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane, kiowa, car, quad and MX vs. ATV car GravityScale x k",
+            Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0, kiowa CD0 and LowSpeedDrag, car and MX vs. ATV car every wing's BasicDrag and InducedDrag, quad [Aerodynamics] Drag x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
             Knob::KiowaSpeed => "kiowa [Flight Controller] Max/MinSpeedCommand, SpeedCommandRate, Min/MaxPitchRateFeedForwardSpeed x k, SpeedGain / k; [Aerodynamics] CD0 / k^2",
             Knob::KiowaClimb => "kiowa [Flight Controller] ClimbRateGain, DescentRateGain x k; above 100%, [Main Rotor] MaxCollectivePitchAngle x k^(1/2)",
@@ -1077,6 +1083,25 @@ impl Mods {
                 *s = F::ONE;
             }
         }
+        // The world's air drag (P371): every wing's, which the car's aero reads off its keys as the
+        // stock cars' does (lift and downforce left alone). Its gravity is its part's
+        // ([`Mods::mxvatv_car_part`]).
+        if let Some(k) = self.factor(seat, Knob::AirDrag) {
+            for w in &mut car.aero.wings {
+                w.basic_drag = w.basic_drag * k;
+                w.induced_drag = w.induced_drag * k;
+            }
+        }
+    }
+
+    /// Player `seat`'s MX vs. ATV car's `[Mass Properties]` as its part reader left them
+    /// ([`crate::atv_car::Load::part`]), before it is taken: the world's gravity (P371). SLUS-21104's
+    /// car takes its gravity off the part's gravity block (the vehicle's force and the anti-slide
+    /// both read it), not off a [`phy::Part`] as the stock cars do.
+    pub fn mxvatv_car_part(&self, seat: usize, part: &mut crate::handling::mass::Part) {
+        if let Some(k) = self.factor(seat, Knob::Gravity) {
+            block_gravity(&mut part.gravity, k);
+        }
     }
 
     /// A car's top speed, acceleration, grip and suspension on `knobs` (in that order).
@@ -1208,6 +1233,15 @@ impl Mods {
                 *f = *f * k;
             }
         }
+        // The world's (P371). The quad takes its gravity off its part's gravity block (the vehicle's
+        // force and the slide both read it), not off a `phy::Part`; the wreck's own gravity is left,
+        // as the bike's is. Its air drag is the `[Aerodynamics]` `Drag` the air step reads.
+        if let Some(k) = self.factor(seat, Knob::Gravity) {
+            block_gravity(&mut load.part.gravity, k);
+        }
+        if let Some(k) = self.factor(seat, Knob::AirDrag) {
+            load.mv.drag = load.mv.drag * k;
+        }
     }
 
     /// Player `seat`'s quad once it is spawned (P287): its body's speed limit, k times with
@@ -1268,6 +1302,14 @@ fn car_power(e: &mut car::Engine, k: F) {
 fn part_gravity(part: &mut phy::Part, k: F) {
     part.gravity_scale = part.gravity_scale * k;
     part.gravity = Vf::new(0.0, (-part.gravity_scale * part.weight).0, 0.0, 1.0);
+}
+
+/// An MX vs. ATV part's gravity block `k` times (P371): its `GravityScale`, and its force, which the
+/// part reader makes `-GravityScale * Weight`. The block keeps no weight, so the force is the read
+/// one times `k`, not worked out again from the scale.
+fn block_gravity(g: &mut crate::handling::mass::Gravity, k: F) {
+    g.scale = g.scale * k;
+    g.force = Vf::new(0.0, (F(g.force.y()) * k).0, 0.0, 1.0);
 }
 
 /// The driven tire's grip along itself, `k` times: the force it passes before it spins, and the

@@ -255,3 +255,45 @@ fn the_worlds_gravity_and_air_drag_reach_the_cars_and_the_kiowa() {
     println!("Kiowa top speed: {stock} -> {draggy} ft/s at 300% air drag");
     assert!(draggy < stock, "Kiowa air drag {stock} -> {draggy}");
 }
+
+#[test]
+fn a_car_or_kiowa_already_out_takes_the_worlds_gravity_at_once() {
+    let Some(machines) = machines() else { return println!("skipped: no disc") };
+    // P371: the garage's modify hands a car being driven and a helicopter being flown the gravity a
+    // take on the new set would give them, and gives the stock one back on the original set.
+    let car = vehicle::CarRide::new(vehicle::Machine::Buggy, 0, None, &mut |n| machines.read_suffix(n).ok()).unwrap();
+    let phy = machines.read_suffix(game_sim::kiowa::KIOWA_PHY).expect("kiowa.phy");
+    let col = machines.read_suffix(game_sim::kiowa::KIOWA_RAYS).expect("kiowam.col");
+    let heli = vehicle::KiowaRide::new(&phy, 0, None).with_rays(&col);
+    let mut lot = vehicle::Lot::default();
+    (lot.cars, lot.kiowa) = (vec![car.clone()], vec![heli.clone()]);
+    let mut floor = Flat::default();
+    // What a take on `mods` gives each: the car's gravity, and the helicopter's with its scale.
+    let taken = |mods: &Mods, floor: &mut Flat| {
+        let (mut car, mut heli) = (car.clone(), heli.clone());
+        mods.car(0, &mut car.car);
+        mods.kiowa(0, &mut heli.phy);
+        car.take(&spot(), floor).unwrap();
+        heli.take(&spot(), floor).unwrap();
+        let r = &heli.flown.as_ref().unwrap().ride;
+        (car.driven.unwrap().gravity, r.gravity, r.gravity_scale)
+    };
+    let mut garage = vehicle::Garage { up: vehicle::Kind::Buggy, plane: None, taken: false, cars: vec![car.clone()], heli: Some(heli.clone()), atv: None, mxvatv_car: None };
+    garage.cars[0].take(&spot(), &mut floor).unwrap();
+    garage.heli.as_mut().unwrap().take(&spot(), &mut floor).unwrap();
+    let out = |g: &vehicle::Garage| {
+        let r = &g.heli.as_ref().unwrap().flown.as_ref().unwrap().ride;
+        (g.cars[0].driven.as_ref().unwrap().gravity, r.gravity, r.gravity_scale)
+    };
+    let bits = |(a, b, s): (Vf, Vf, F)| [a.to_bits(), b.to_bits()].concat().into_iter().chain([s.to_bits()]).collect::<Vec<u32>>();
+    let stock = taken(&Mods::original(), &mut floor);
+    assert_eq!(bits(out(&garage)), bits(stock));
+    for pct in [200, 50] {
+        garage.modify(&lot, &with(Knob::Gravity, pct), 0);
+        let want = taken(&with(Knob::Gravity, pct), &mut floor);
+        assert_eq!(bits(out(&garage)), bits(want), "{pct}%");
+        assert_ne!(bits(want), bits(stock), "{pct}%");
+    }
+    garage.modify(&lot, &Mods::original(), 0);
+    assert_eq!(bits(out(&garage)), bits(stock));
+}

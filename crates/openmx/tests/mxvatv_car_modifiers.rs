@@ -117,9 +117,10 @@ fn every_knob_at_its_default_leaves_the_mxvatv_car_bit_exact() {
         all.set(0, k, 100);
     }
     assert!(all.is_original());
-    // Every other machine's and the world's moved: none of them reaches the car.
+    // Every other machine's and the world's time moved: none of them reaches the car. (The world's
+    // gravity and air drag do, P371.)
     let mut others = Mods::original();
-    for k in Knob::ALL.into_iter().filter(|k| k.category() != Category::MxvatvCars) {
+    for k in Knob::ALL.into_iter().filter(|k| k.category() != Category::MxvatvCars && !matches!(k, Knob::Gravity | Knob::AirDrag)) {
         others.set(0, k, k.step(k.most(), false));
     }
     let stock = format!("{:?}", car.load.file.car);
@@ -254,4 +255,34 @@ fn a_freshly_taken_mxvatv_car_on_the_gas_drives_off_over_100() {
         println!("{pct}%: {} / {} ft/s at 1 / 2 s (100%: {one} / {two})", speed(&b[29]), speed(&b[59]));
         assert!(speed(&b[29]) >= one && speed(&b[59]) > two * 0.95, "held at {pct}%: {} {}", speed(&b[29]), speed(&b[59]));
     }
+}
+
+#[test]
+fn the_worlds_gravity_and_air_drag_reach_the_mxvatv_car() {
+    let Some(car) = buggy() else { return };
+    // P371: its part's gravity block, the scale and the force together, and every wing's drag.
+    let stock = car.load.part;
+    let mut part = stock;
+    with(Knob::Gravity, 200).mxvatv_car_part(0, &mut part);
+    assert_eq!(part.gravity.scale, stock.gravity.scale * F(2.0));
+    assert_eq!(part.gravity.force.to_bits(), Vf::new(0.0, stock.gravity.force.y() * 2.0, 0.0, 1.0).to_bits());
+    let mut untouched = stock;
+    with(Knob::AirDrag, 200).mxvatv_car_part(0, &mut untouched);
+    assert_eq!(untouched, stock);
+    let draggy = file(&car, &with(Knob::AirDrag, 200));
+    assert!(!car.load.file.car.aero.wings.is_empty(), "the buggy has wings");
+    for (w, s) in draggy.aero.wings.iter().zip(&car.load.file.car.aero.wings) {
+        assert_eq!((w.basic_drag, w.induced_drag), (s.basic_drag * F(2.0), s.induced_drag * F(2.0)));
+        assert_eq!((w.lift_slope, w.angle_of_attack), (s.lift_slope, s.angle_of_attack));
+    }
+    // Heavier, it sinks lower on its springs once settled; lighter, it stands taller.
+    let stand = |pct: u16| ride(&car, &with(Knob::Gravity, pct), 120, &|_| report(0, 0x7f))[119].0.y();
+    let (light, plain, heavy) = (stand(50), stand(100), stand(200));
+    println!("buggy rest height: {light} / {plain} / {heavy} at 50/100/200% gravity");
+    assert!(light > plain && plain > heavy, "gravity {light} {plain} {heavy}");
+    // Draggier, it tops out lower on the gas.
+    let top = |pct: u16| ride(&car, &with(Knob::AirDrag, pct), 600, &gas).iter().map(speed).fold(0.0, f32::max);
+    let (plain, draggy) = (top(100), top(400));
+    println!("buggy top speed: {plain} -> {draggy} ft/s at 400% air drag");
+    assert!(draggy < plain, "air drag {plain} -> {draggy}");
 }

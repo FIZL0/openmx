@@ -95,9 +95,10 @@ fn every_knob_at_its_default_leaves_the_quad_bit_exact() {
         all.set(0, k, 100);
     }
     assert!(all.is_original());
-    // Every other machine's and the world's moved: none of them reaches the quad.
+    // Every other machine's and the world's time moved: none of them reaches the quad. (The world's
+    // gravity and air drag do, P371.)
     let mut others = Mods::original();
-    for k in Knob::ALL.into_iter().filter(|k| k.category() != Category::Atv) {
+    for k in Knob::ALL.into_iter().filter(|k| k.category() != Category::Atv && !matches!(k, Knob::Gravity | Knob::AirDrag)) {
         others.set(0, k, k.step(k.most(), false));
     }
     let stock = format!("{:?}", load(&atv, &Mods::original()));
@@ -181,4 +182,25 @@ fn an_atv_knob_changes_the_quads_ride() {
     let (stock, stiff, soft) = (stand(100), stand(200), stand(50));
     println!("rest height: {soft} / {stock} / {stiff} at 50/100/200%");
     assert!(stiff > stock && stock > soft, "suspension {soft} {stock} {stiff}");
+}
+
+#[test]
+fn the_worlds_gravity_and_air_drag_reach_the_quad() {
+    let Some(atv) = quad() else { return };
+    // P371: its part's gravity block, the scale and the force together, and its air's drag.
+    let stock = load(&atv, &Mods::original());
+    let heavy = load(&atv, &with(Knob::Gravity, 200));
+    assert_eq!(heavy.part.gravity.scale, stock.part.gravity.scale * F(2.0));
+    assert_eq!(heavy.part.gravity.force.to_bits(), Vf::new(0.0, stock.part.gravity.force.y() * 2.0, 0.0, 1.0).to_bits());
+    assert_eq!(load(&atv, &with(Knob::AirDrag, 300)).mv.drag, stock.mv.drag * F(3.0));
+    // Heavier, it sinks lower on its springs once settled; lighter, it stands taller.
+    let stand = |pct: u16| ride(&atv, &with(Knob::Gravity, pct), 120, &|_| Controls::default())[119].position.y();
+    let (light, plain, heavy) = (stand(50), stand(100), stand(200));
+    println!("quad rest height: {light} / {plain} / {heavy} at 50/100/200% gravity");
+    assert!(light > plain && plain > heavy, "gravity {light} {plain} {heavy}");
+    // Draggier, it tops out lower on the gas.
+    let top = |pct: u16| ride(&atv, &with(Knob::AirDrag, pct), 600, &gas).iter().map(speed).fold(0.0, f32::max);
+    let (plain, draggy) = (top(100), top(400));
+    println!("quad top speed: {plain} -> {draggy} ft/s at 400% air drag");
+    assert!(draggy < plain, "air drag {plain} -> {draggy}");
 }
