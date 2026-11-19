@@ -3365,10 +3365,7 @@ impl KiowaRide {
             gravity_scale: part.gravity_scale,
             throw_scale: F::ZERO,
             // MX vs. ATV's player's helicopter is taken with the unwreck's gravity (MD63f).
-            gravity: match self.mxvatv {
-                Some(_) => game_sim::kiowa::mxvatv_taken_gravity(part.gravity_scale, part.mass),
-                None => part.gravity,
-            },
+            gravity: taken_gravity(self.mxvatv.is_some(), part),
             area: world.area(),
             // Its sound is V114's: no clips, no draw.
             touchdown_sound: false,
@@ -3609,6 +3606,15 @@ fn blade_tables() -> &'static game_sim::ragdoll::Tables {
     TABLES.get_or_init(game_sim::ragdoll::Tables::build)
 }
 
+/// The gravity a helicopter is taken with off its `[Mass Properties]`: MX vs. ATV's player's with
+/// the unwreck's (MD63f), MX Unleashed's with the part's force.
+fn taken_gravity(mxvatv: bool, part: &game_sim::phy::Part) -> Vf {
+    match mxvatv {
+        true => game_sim::kiowa::mxvatv_taken_gravity(part.gravity_scale, part.mass),
+        false => part.gravity,
+    }
+}
+
 /// A machine the switch spawns on the player and takes away again: a car or the helicopter.
 fn detour(kind: Kind) -> bool {
     kind.car().is_some() || kind == Kind::Kiowa || kind == Kind::Atv || kind == Kind::MxvatvCar
@@ -3621,12 +3627,18 @@ impl Garage {
     /// helicopter being flown takes the new controller, rotor and aerodynamics at once (the step reads
     /// nothing else of the file); a car being driven takes its tires' grip and springs at once, which
     /// it reads off the file every step, and its engine and gearing, which its drivetrain copied when
-    /// it was taken, at its next take. With every knob at its default the files are the stock ones.
+    /// it was taken, at its next take. Both take the world's gravity at once (P371). With every knob
+    /// at its default the files are the stock ones.
     pub fn modify(&mut self, lot: &Lot, mods: &game_sim::modifiers::Mods, seat: usize) {
         for car in &mut self.cars {
             if let Some(stock) = lot.cars.iter().find(|c| c.machine == car.machine && c.livery == car.livery) {
                 car.car = stock.car.clone();
                 mods.car(seat, &mut car.car);
+                // The world's gravity (P371), which the car copies when it is taken and nothing
+                // else writes after: the one being driven takes it at once.
+                if let Some(driven) = car.driven.as_mut() {
+                    driven.gravity = car.car.mass_properties.gravity;
+                }
             }
         }
         if let Some(heli) = self.heli.as_mut()
@@ -3638,6 +3650,13 @@ impl Garage {
                 flown.kiowa.controller = heli.phy.controller;
                 flown.kiowa.rotor = heli.phy.rotor;
                 flown.kiowa.aero = heli.phy.aero;
+                // And its gravity (P371) as the take gives it ([`KiowaRide::built`]); a wrecked one
+                // keeps the wreck's, and its unwreck works the scale's out again.
+                let part = &heli.phy.mass_properties;
+                flown.ride.gravity_scale = part.gravity_scale;
+                if !flown.wreckage.wrecked {
+                    flown.ride.gravity = taken_gravity(flown.mxvatv.is_some(), part);
+                }
             }
         }
         // The quad's (P287) are read as it is made: a quad already out keeps its numbers until the
@@ -4105,7 +4124,8 @@ impl MxvatvCarRide {
         let yaw = forward.x().atan2(forward.z());
         let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
         let at = Vf::new(at.x(), at.y() + self.lift(), at.z(), 1.0);
-        let modded = game_sim::modifiers::Category::MxvatvCars.knobs().into_iter().any(|k| self.mods.get(self.seat, k) != game_sim::modifiers::ORIGINAL);
+        let world = [game_sim::modifiers::Knob::Gravity, game_sim::modifiers::Knob::AirDrag];
+        let modded = game_sim::modifiers::Category::MxvatvCars.knobs().into_iter().chain(world).any(|k| self.mods.get(self.seat, k) != game_sim::modifiers::ORIGINAL);
         let rigged = |load: &game_sim::atv_car::Load| {
             let mut ride = load.ride(at, quat, F::ZERO);
             if let Some(riding) = &self.riding {
@@ -4118,6 +4138,7 @@ impl MxvatvCarRide {
         }
         let mut load = (*self.load).clone();
         self.mods.mxvatv_car(self.seat, &mut load.file.car);
+        self.mods.mxvatv_car_part(self.seat, &mut load.part);
         rigged(&load)
     }
 
