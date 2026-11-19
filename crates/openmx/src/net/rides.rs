@@ -268,9 +268,10 @@ impl Game for Rides<'_> {
             None => (None, Vec::new()),
         };
         // The last seat first, as the original walks its riders (S88, `Sim::step_all`), after the
-        // flying seats (N22a).
+        // flying seats (N22a), which fly in seat order: seat 0's plane searches and resolves first in
+        // their joint frame (N28).
         let n = self.sims.len();
-        let order: Vec<usize> = (0..n).rev().filter(|&i| aloft[i]).chain((0..n).rev().filter(|&i| !aloft[i])).collect();
+        let order: Vec<usize> = (0..n).filter(|&i| aloft[i]).chain((0..n).rev().filter(|&i| !aloft[i])).collect();
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
         // ahead of the bike's own entries, as the original searches its planes first.
         let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];

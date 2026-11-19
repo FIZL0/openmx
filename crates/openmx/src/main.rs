@@ -2354,7 +2354,9 @@ impl<P: sim_world::World> Game for World<P> {
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
         // ahead of the bike's own entries, as the original searches its planes first.
         let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
-        let order: Vec<usize> = (0..n).rev().filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
+        // The flying seats first in seat order, so seat 0's plane searches and resolves first in
+        // their joint frame (N28, as c16_fly.rs's MEETS holds), then the bikes last seat first.
+        let order: Vec<usize> = (0..n).filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
         // The seats' one prop set for the pass (S197c): every seat's bike strikes it, it steps once
         // after them all, and seat 0's, which is drawn, is every seat's.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>());
