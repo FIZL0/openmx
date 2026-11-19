@@ -4959,6 +4959,17 @@ async fn loading_frame(
     Ok(if back { Wait::Cancel } else { Wait::On })
 }
 
+/// Which of world tile `tile`'s dressed props are knockable bodies (V132), by their place among
+/// `props`: found by name and place, as the ride finds a struck one's.
+fn world_loose(world_props: &[Option<(usize, String, game_render::mat::V3, game_sim::contact::Node)>], tile: usize, props: &[view::Placement]) -> Vec<usize> {
+    world_props
+        .iter()
+        .flatten()
+        .filter(|(t, ..)| *t == tile)
+        .filter_map(|(_, name, pos, _)| props.iter().position(|p| p.model.eq_ignore_ascii_case(name) && p.pos.sub(*pos).len() < 0.01))
+        .collect()
+}
+
 async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // In the browser a WebGPU validation error from here on ends the ride, not the front end (P257).
     #[cfg(target_arch = "wasm32")]
@@ -7684,8 +7695,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let r = renderer_of(&mut offscreen, window).expect("checked");
         r.forget_assets();
         r.set_scene(&look);
+        // The knockable props cast as movers from the load, not once struck (V132).
+        let loose: Vec<usize> = prop_looks.iter().flatten().map(|(k, _, _)| *k).collect();
+        r.loose_props(game_render::gpu::Renderer::SCENE_PROPS, &loose);
         for d in &dressed {
             r.add_props(d.index as u32, &d.props, d.grove.clone());
+            r.loose_props(d.index as u32, &world_loose(&world_props, d.index, &d.props));
         }
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
@@ -10721,6 +10736,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     unshown.remove(0);
                     if let Some(d) = dressed.iter().find(|d| d.index == index) {
                         r.add_props(index as u32, &d.props, d.grove.clone());
+                        r.loose_props(index as u32, &world_loose(&world_props, index, &d.props));
                     }
                 }
             }

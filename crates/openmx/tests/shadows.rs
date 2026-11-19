@@ -183,3 +183,46 @@ fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
         assert!(darker > 300, "{mode}: the jump's shadow is gone, only {darker} pixels darker than off's");
     }
 }
+
+/// The shell on `track`, headless at 640x448 with no overlay, on the steady clock: what it said.
+fn ride_on(track: &str, args: &[&str]) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&root)
+        .args(["--headless", "--track", track, "--size", "640x448", "--overlay", "none", "--controls", "original", "--steady-clock"])
+        .args(args)
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    said
+}
+
+/// V132 (user 2026-11-18, "the props dont have shadows until they're touched"): free09's farmyard
+/// garage holds knockable crates, barrels and cans, none touched yet. Shot from over its mouth, On
+/// (the movers' shadows) darkens the floor beside them against Off, as a struck one's did alone.
+#[test]
+fn untouched_knockable_props_cast_their_shadows_under_on() {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let pose = "4640,170,3790,0,-45,60";
+    let shot = |name: &str, shadows: &str| {
+        let path = scratch(&format!("v132-{name}.png"));
+        let _ = std::fs::remove_file(&path);
+        let said = ride_on("free09", &["--shadows", shadows, "--shot-pose", pose, "--frames", "2", "--shot", path.to_str().unwrap()]);
+        assert!(said.contains("props moved: 0 of "), "a prop was touched, or the ride has none:\n{said}");
+        let (w, h, rgb) = read_png(&path);
+        assert_eq!((w, h), (640, 448));
+        rgb
+    };
+    let off = shot("off", "off");
+    let on = shot("on", "on");
+    let darker = (0..640 * 448).filter(|&i| grey(&off, i) - grey(&on, i) > 20.0).count();
+    let brighter = (0..640 * 448).filter(|&i| grey(&on, i) - grey(&off, i) > 20.0).count();
+    // The crates' and the barrel's shadows by the right-hand wall, cut by the frame: 1,923 pixels
+    // when written, none before V132.
+    assert!(darker > 1000, "only {darker} pixels are darker under On than Off: the resting props cast nothing");
+    assert!(brighter < 300, "{brighter} pixels are brighter under On than Off");
+}

@@ -1250,8 +1250,9 @@ struct Prop {
     at: M4,
     /// Whose it is: [`SCENE`] for the scene's, or what [`Renderer::add_props`] was told (MD15).
     owner: u32,
-    /// Moved since it was placed (S131's knocked props): a mover's shadow now, not the baked
-    /// world map's ([`crate::shadow::Shadows::All`]).
+    /// Moved since it was placed (S131's knocked props), or able to be (V132's knockable ones,
+    /// [`Renderer::loose_props`]): a mover's shadow, not the baked world map's
+    /// ([`crate::shadow::Shadows::All`]).
     moved: bool,
 }
 
@@ -2860,6 +2861,26 @@ impl Renderer {
         }
     }
 
+    /// Let `owner`'s props `ks` (their indices in what [`Renderer::set_scene`] or
+    /// [`Renderer::add_props`] was given) cast as movers from now on (V132): a knockable prop casts
+    /// its shadow from the load, standing, as it does once struck, and is left out of the baked world
+    /// map that it may leave.
+    pub fn loose_props(&mut self, owner: u32, ks: &[usize]) {
+        let mut changed = false;
+        for (k, p) in self.props.iter_mut().filter(|p| p.owner == owner).enumerate() {
+            if !p.moved && ks.contains(&k) {
+                p.moved = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.sun.world.generation += 1;
+        }
+    }
+
+    /// The owner [`Renderer::set_scene`]'s props go under, for [`Renderer::loose_props`].
+    pub const SCENE_PROPS: u32 = SCENE;
+
     /// Draw `owner`'s prop `k` (its index in the props [`Renderer::add_props`] was given) at `at` from
     /// now on: a world tile's knocked prop where its body is (MD153).
     pub fn move_owned_prop(&mut self, owner: u32, k: usize, at: M4) {
@@ -4462,7 +4483,7 @@ impl Renderer {
             // them, or the whole map), and each at the level of detail the disc's own test picks.
             let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
             // What casts into the view's maps (user 2026-10-30): the movers under On, and the props
-            // and plants too under All. A knocked prop is a mover.
+            // and plants too under All. A knockable prop is a mover, struck or not (V132).
             use crate::shadow::Caster;
             let casting = [Caster::Prop, Caster::Mover, Caster::Plant].map(|c| self.sun.takes(p, c));
             let bias = self.lod_bias.max(1.0);

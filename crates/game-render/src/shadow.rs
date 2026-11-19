@@ -356,7 +356,8 @@ pub fn slices(cascades: &[f32], reach: f32) -> Vec<(f32, f32)> {
 }
 
 /// What casts into our maps and the original's: a mover (a bike, a rider, a machine, the biplane, a
-/// train), a prop (a building, a fence, Dallas's antenna), or a plant.
+/// train, a knockable prop from the load, struck or not: V132), a prop (a building, a fence, Dallas's
+/// antenna), or a plant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Caster {
     Mover,
