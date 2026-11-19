@@ -614,6 +614,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         texture_packs_off: vec!["old".into()],
         // 2P with their markers off (P129).
         markers: [true, false, true, true, true, true, true, true],
+        // 1P preloading Untamed's bikes on the right stick (P367).
+        preload_axes: [menu::PreloadAxis::RightY, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off],
         // P191: the updater never asks.
         updates: menu::Updates::Never,
     };
@@ -5131,7 +5133,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration, Key::Heading, Key::DeadZone], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::PreloadAxis, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration, Key::Heading, Key::DeadZone], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -7248,6 +7250,72 @@ fn texture_filtering_rebuilds_the_road_targets_sampler() {
         // The ground's group, then its near target's group 2 (which reads the far one too).
         assert_eq!(gpu.bound_anisotropy(), vec![want, want], "{f:?}: the road targets' bind group made again");
     }
+}
+
+/// P367: each seat has a Preload Axis row on the Controls tab, Off by default (as Untamed ships),
+/// picked a seat at a time and saved in settings.txt.
+#[test]
+fn each_seat_picks_its_preload_axis_on_the_controls_tab() {
+    use menu::{Key, PreloadAxis};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.preload_axes, [PreloadAxis::Off; menu::SEATS_MAX], "off by default");
+    m.seated = 2;
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::PreloadAxis).unwrap();
+    assert_eq!(row(&m).choices, ["Off", "Left Stick Down", "Left Stick Right", "Right Stick Down", "Right Stick Left"]);
+    assert_eq!(row(&m).value, "Off");
+    // 2P's row: the left stick back for 2P alone.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    down_to(&mut m, &mut r, Key::PreloadAxis);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(row(&m).value, "Left Stick Down");
+    assert_eq!(m.settings.preload_axes[..2], [PreloadAxis::Off, PreloadAxis::LeftY]);
+    assert_eq!(m.settings.preload_axes[1].axis(), Some(game_sim::input::Axis::LeftY));
+    assert!(m.settings.text().contains("\npreload_axis = off left_y off\n"), "{}", m.settings.text());
+    assert_eq!(Settings::parse(&m.settings.text()).preload_axes, m.settings.preload_axes);
+}
+
+/// P367: each Preload Axis is named by the push Untamed's preload reads as plus — the stick
+/// that way all the way hands in the range's top, the other way nothing past its dead zone —
+/// and Off binds nothing.
+#[test]
+fn each_preload_axis_preloads_on_the_push_its_name_says() {
+    use game_sim::input::{AxisRange, Manager, PADS, Report};
+    use game_sim::ride::Controls;
+    use menu::PreloadAxis;
+    use ps2_float::F;
+    let read = |a: PreloadAxis, byte: u8| {
+        let mut report = Report::idle();
+        // The report's own axis order: right X, right Y, left X, left Y.
+        let at = match a {
+            PreloadAxis::Off => return None,
+            PreloadAxis::LeftX => 2,
+            PreloadAxis::LeftY => 3,
+            PreloadAxis::RightX => 0,
+            PreloadAxis::RightY => 1,
+        };
+        report.set_axis(at, byte);
+        let mut manager = Manager::connected();
+        manager.tick(F(1.0 / 60.0), &[report; PADS]);
+        Controls::from_pad(manager.pad(0)).with_preload(manager.pad(0), a.axis(), &AxisRange::PLAYER).preload
+    };
+    assert_eq!(read(PreloadAxis::Off, 255), None);
+    for a in PreloadAxis::ALL.into_iter().skip(1) {
+        let (push, back) = if a == PreloadAxis::RightX { (0, 255) } else { (255, 0) };
+        assert_eq!(read(a, push), Some(AxisRange::PLAYER.hi), "{} all the way", a.label());
+        assert!(read(a, back).is_some_and(|v| v <= F(0.0)), "{} the other way", a.label());
+        assert_eq!(PreloadAxis::from_word(a.word()), Some(a));
+    }
+    let seats = PreloadAxis::parse_seats("right_y off").unwrap();
+    assert_eq!((seats[0], seats[1], seats[seats.len() - 1]), (PreloadAxis::RightY, PreloadAxis::Off, PreloadAxis::Off));
+    assert_eq!(PreloadAxis::parse_seats("up"), None);
+    // And settings.txt keeps it, writing nothing while every seat is Off.
+    let mut settings = menu::Settings::default();
+    assert!(!settings.text().contains("preload_axis"));
+    settings.preload_axes[1] = PreloadAxis::RightY;
+    assert_eq!(menu::Settings::parse(&settings.text()).preload_axes, settings.preload_axes);
 }
 
 /// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the
