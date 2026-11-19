@@ -524,7 +524,9 @@ pub struct Step {
     pub lean: F,
     /// Throttle, brake and clutch, as the rider is holding them. The clutch is the rider's lever
     /// itself (`+0x644`) rather than the rate-limited copy at `+0x65c`: [`clutch`], the only thing
-    /// in this module that reads it, is what the original reads the lever for.
+    /// in this module that reads it, is what the original reads the lever for. The throttle is its
+    /// lever too (`+0x63c`, not `+0x658`), as the ramp, the donut and the upright controller read it
+    /// (S347).
     pub gas: F,
     pub brake: F,
     pub clutch: F,

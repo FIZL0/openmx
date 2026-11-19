@@ -2520,7 +2520,10 @@ impl Ride {
             stick_angle,
             deflection,
             lean: held.lean.0,
-            gas: held.gas,
+            // The throttle lever (`+0x63c`), before the rate limit: the launch ramp's rearm, the donut
+            // and the upright controller all read the lever (S347), so a throttle the limit is still
+            // opening rearms the ramp.
+            gas: c.gas,
             brake: held.brake,
             // The clutch here is the rider's *lever* and not the rate-limited copy the engine
             // reads: the launch ramp is the only thing that looks at this field, and the original's

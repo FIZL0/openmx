@@ -53,7 +53,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [132, 147, 1802, 206, 84];
+const C33_AGREES_THROUGH: [u64; 5] = [186, 200, 1802, 273, 84];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
