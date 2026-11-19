@@ -1694,6 +1694,151 @@ impl Garage {
     }
 }
 
+// ---- the race's AI riders (P374) ------------------------------------------------------------------
+
+/// The most letters of an AI rider's name its jersey carries: the original's nameplate cuts the
+/// rider's second word to twelve.
+pub const AI_NAME_MAX: usize = 12;
+
+/// One rider of `rider\riders.dat` as an AI rider's jersey and plates read them: the full name as the
+/// list writes it, `Number=`, the first `Uniform=` and the `Bike<cc>=` of the race's class.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiIdentity {
+    pub name: String,
+    pub number: String,
+    pub uniform: String,
+    pub bike: String,
+}
+
+/// One AI rider's draw: the gear set and the bike model they race on, as the files spell them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiOutfit {
+    pub uniform: String,
+    pub bike: String,
+}
+
+/// What a front-end race's AI riders are dressed from, as the original's vehicle loader draws them
+/// (P374): `rider\gear.dat`'s `[Uniforms]` items in file order, each with whether its own section says
+/// `ProRiderUniform` (the pro riders' sets, which are never drawn); `bike\bikes.dat`'s `bike=` list of
+/// the race's class in file order; and every rider of `rider\riders.dat`, in the list's order, which
+/// is the order the roster's identities count in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiGarage {
+    pub uniforms: Vec<(String, bool)>,
+    pub bikes: Vec<String>,
+    /// Whether no two AI riders ride the same bike model: the 125 and 250 classes only.
+    pub unique_bikes: bool,
+    pub riders: Vec<AiIdentity>,
+}
+
+impl AiGarage {
+    /// The three files' text, for a race in `engine`'s class.
+    pub fn parse(gear: &str, bikes: &str, riders: &str, engine: Engine) -> AiGarage {
+        let gear = game_render::ini::parse(gear);
+        let bikes = game_render::ini::parse(bikes);
+        let riders = game_render::ini::parse(riders);
+        let list = |file: &[game_render::ini::Section], section: &str, key: &str| -> Vec<String> {
+            file.iter()
+                .filter(|s| s.name.eq_ignore_ascii_case(section))
+                .flat_map(|s| s.keys.iter())
+                .filter(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| item(v))
+                .filter(|v| !v.is_empty())
+                .collect()
+        };
+        let pro = |name: &str| {
+            gear.iter()
+                .filter(|s| s.name.eq_ignore_ascii_case(name))
+                .any(|s| s.get("ProRiderUniform").is_some_and(game_render::ini::switch))
+        };
+        let uniforms = list(&gear, "Uniforms", "item").into_iter().map(|u| (u.clone(), pro(&u))).collect();
+        let cc = cc(engine);
+        let names = list(&riders, "Pro Riders", "rider").into_iter().chain(list(&riders, "Computer Riders", "rider"));
+        let riders = names
+            .map(|name| {
+                // A name listed twice (Jason Bucher) is the first section of that name both times.
+                let s = riders.iter().find(|s| s.name.eq_ignore_ascii_case(&name));
+                let get = |key: &str| s.and_then(|s| s.get(key)).map(item).unwrap_or_default();
+                let number = get("Number");
+                let number = number.parse::<i32>().map_or(number, |n| n.to_string());
+                AiIdentity { number, uniform: get("Uniform"), bike: get(&format!("Bike{cc}")), name }
+            })
+            .collect();
+        AiGarage {
+            uniforms,
+            bikes: list(&bikes, &format!("{cc}cc"), "bike"),
+            unique_bikes: matches!(engine, Engine::Cc125 | Engine::Cc250),
+            riders,
+        }
+    }
+
+    pub fn read(disc: &mut Disc, engine: Engine) -> Result<AiGarage, String> {
+        let app = disc.res("appstart.res")?;
+        let text = |name: &str| app.read_suffix(name).map(|b| game_render::ini::text(&b));
+        Ok(AiGarage::parse(&text("rider\\gear.dat")?, &text("bike\\bikes.dat")?, &text("rider\\riders.dat")?, engine))
+    }
+
+    /// **The original's draw of `ai` AI riders' gear and bikes**, on the load's generator right after
+    /// the roster's: for each AI rider in turn a uniform, drawn again while it is a pro rider's and
+    /// the whole draw again while an AI rider before has it; then for each a bike of the class, drawn
+    /// again while one before rides it where [`AiGarage::unique_bikes`]. `None`, and no draws, where
+    /// that never ends — a disc with too few to go round, on which the original hangs.
+    pub fn draw(&self, rng: &mut game_sim::rng::Rng, ai: usize) -> Option<Vec<AiOutfit>> {
+        let open = self.uniforms.iter().filter(|u| !u.1).count();
+        if ai > 0 && (open < ai || self.bikes.is_empty() || (self.unique_bikes && self.bikes.len() < ai)) {
+            return None;
+        }
+        // A draw of the generator's top value lands one past the list, which the original reads past
+        // its end: kept on the last here.
+        let mut pick = |n: usize| (rng.index(n as i32).max(0) as usize).min(n - 1);
+        let mut gear: Vec<usize> = Vec::with_capacity(ai);
+        for _ in 0..ai {
+            let u = loop {
+                let mut u = pick(self.uniforms.len());
+                while self.uniforms[u].1 {
+                    u = pick(self.uniforms.len());
+                }
+                if !gear.contains(&u) {
+                    break u;
+                }
+            };
+            gear.push(u);
+        }
+        let mut bikes: Vec<usize> = Vec::with_capacity(ai);
+        for _ in 0..ai {
+            let mut b = pick(self.bikes.len());
+            while self.unique_bikes && bikes.contains(&b) {
+                b = pick(self.bikes.len());
+            }
+            bikes.push(b);
+        }
+        Some(gear.iter().zip(&bikes).map(|(&u, &b)| AiOutfit { uniform: self.uniforms[u].0.clone(), bike: self.bikes[b].clone() }).collect())
+    }
+
+    /// The garage pick an AI rider of roster identity `identity` races in, in `outfit`: that gear set
+    /// and bike, and on the jersey and plates the second word of the rider's name, cut to
+    /// [`AI_NAME_MAX`], and their number. Their own uniform and bike, which the original takes the
+    /// jersey's and plates' fonts from, are [`AiGarage::own`].
+    pub fn pick(&self, identity: i32, outfit: &AiOutfit) -> Pick {
+        let who = usize::try_from(identity).ok().and_then(|i| self.riders.get(i));
+        let name = who.and_then(|w| w.name.split([' ', '\n']).filter(|w| !w.is_empty()).nth(1)).unwrap_or("");
+        let look = Look {
+            name: name.chars().take(AI_NAME_MAX).collect(),
+            number: who.map(|w| w.number.clone()).unwrap_or_default(),
+            ..Look::default()
+        };
+        Pick { rider: outfit.uniform.to_ascii_lowercase(), bike: outfit.bike.to_ascii_lowercase(), look, ..Pick::default() }
+    }
+
+    /// The gear set and bike, lowercased, that roster identity `identity` rides in their own career
+    /// rounds — what the original's nameplate takes the jersey's name and number fonts and the
+    /// plates' font from, whatever the rider was drawn to wear.
+    pub fn own(&self, identity: i32) -> Option<(String, String)> {
+        let who = self.riders.get(usize::try_from(identity).ok()?)?;
+        Some((who.uniform.to_ascii_lowercase(), who.bike.to_ascii_lowercase()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2007,5 +2152,83 @@ mod tests {
         h.row = row(Row::Colours);
         h.turn(&c, 1);
         assert_eq!(h.pick.look, Look { name: "Be".into(), number: "5".into(), ..Look::default() });
+    }
+
+    const AI_GEAR: &str = "[Uniforms]\nitem=\"THQ1\"\nitem=\"Fox1\"\n;item=\"Generic1\"\nitem=\"Parsons1\"\nitem=\"TLD2\"\n\n[THQ1]\n[Parsons1]\nProRiderUniform=T\n";
+    const AI_BIKES: &str = "[125cc]\nbike=\"CR125_THQ_01\"\n;bike=\"KX125\"\nbike=\"125SX\"\nbike=\"YZ125\"\n\n[500cc]\nbike=\"500_01\"\n";
+    const AI_RIDERS: &str = "[Pro Riders]\nrider=\"Doug Parsons\"\n\n[Computer Riders]\nrider=\"Nick Beaver\"\nrider=\"Pete Long-Surname-Rider\"\n\n\
+        [Doug Parsons]\nNumber=400\nUniform=Parsons1\nUniform=Parsons2\nBike125=cr125_faisst\n\n[Nick Beaver]\nNumber=0546\nUniform=fly1\nBike125=yz250f\nBike500=500_01\n";
+
+    /// P374: the lists read in file order, commented lines out, a uniform's pro flag off its own
+    /// section, and each rider's number, first uniform and class bike.
+    #[test]
+    fn the_ai_garage_reads_the_lists_in_file_order() {
+        let g = AiGarage::parse(AI_GEAR, AI_BIKES, AI_RIDERS, Engine::Cc125);
+        let uniforms: Vec<(&str, bool)> = g.uniforms.iter().map(|(n, p)| (n.as_str(), *p)).collect();
+        assert_eq!(uniforms, [("THQ1", false), ("Fox1", false), ("Parsons1", true), ("TLD2", false)]);
+        assert_eq!(g.bikes, ["CR125_THQ_01", "125SX", "YZ125"]);
+        assert!(g.unique_bikes);
+        assert_eq!(g.riders.len(), 3);
+        assert_eq!(g.riders[1], AiIdentity { name: "Nick Beaver".into(), number: "546".into(), uniform: "fly1".into(), bike: "yz250f".into() });
+        assert_eq!(g.own(0), Some(("parsons1".into(), "cr125_faisst".into())));
+        let big = AiGarage::parse(AI_GEAR, AI_BIKES, AI_RIDERS, Engine::Cc500);
+        assert!(!big.unique_bikes);
+        assert_eq!(big.bikes, ["500_01"]);
+        assert_eq!(big.own(1), Some(("fly1".into(), "500_01".into())));
+    }
+
+    /// P374: every draw of the generator in order — a uniform drawn until it is no pro's and no
+    /// earlier AI rider's, then a bike drawn until no earlier AI rider's in a 125 race — and the
+    /// generator left after the last.
+    #[test]
+    fn the_ai_draw_skips_pro_sets_and_repeats() {
+        let g = AiGarage::parse(AI_GEAR, AI_BIKES, AI_RIDERS, Engine::Cc125);
+        for seed in 0..40 {
+            let mut rng = game_sim::rng::Rng::from_seed(seed);
+            let mut want = rng;
+            let drawn = g.draw(&mut rng, 3).expect("three can be dressed");
+            let mut gear: Vec<i32> = Vec::new();
+            while gear.len() < 3 {
+                let u = want.index(4);
+                if u != 2 && !gear.contains(&u) {
+                    gear.push(u);
+                }
+            }
+            let mut bikes: Vec<i32> = Vec::new();
+            while bikes.len() < 3 {
+                let b = want.index(3);
+                if !bikes.contains(&b) {
+                    bikes.push(b);
+                }
+            }
+            let names = ["THQ1", "Fox1", "Parsons1", "TLD2"];
+            let want_drawn: Vec<AiOutfit> =
+                gear.iter().zip(&bikes).map(|(&u, &b)| AiOutfit { uniform: names[u as usize].into(), bike: g.bikes[b as usize].clone() }).collect();
+            assert_eq!(drawn, want_drawn, "seed {seed}");
+            assert_eq!(rng.rand(), want.rand(), "seed {seed}: the generator is left where the draws end");
+        }
+        // Too few to go round draws nothing, where the original never ends; none to dress draws nothing.
+        let mut rng = game_sim::rng::Rng::from_seed(1);
+        let before = rng;
+        assert_eq!(g.draw(&mut rng, 4), None);
+        assert_eq!(g.draw(&mut rng, 0), Some(Vec::new()));
+        assert_eq!(rng.rand(), before.clone().rand());
+        // A 500 race rides one bike model three times.
+        let big = AiGarage::parse(AI_GEAR, AI_BIKES, AI_RIDERS, Engine::Cc500);
+        let drawn = big.draw(&mut game_sim::rng::Rng::from_seed(3), 3).expect("repeats allowed");
+        assert!(drawn.iter().all(|o| o.bike == "500_01"));
+    }
+
+    /// P374: an AI rider's pick is the drawn gear and bike, lowercased as archives are named, with
+    /// the second word of their name cut to twelve and their number for the jersey and plates.
+    #[test]
+    fn an_ai_riders_pick_wears_the_draw_and_their_name() {
+        let g = AiGarage::parse(AI_GEAR, AI_BIKES, AI_RIDERS, Engine::Cc125);
+        let outfit = AiOutfit { uniform: "TLD2".into(), bike: "125SX".into() };
+        let p = g.pick(1, &outfit);
+        assert_eq!((p.rider.as_str(), p.bike.as_str()), ("tld2", "125sx"));
+        assert_eq!(p.look, Look { name: "Beaver".into(), number: "546".into(), ..Look::default() });
+        assert_eq!(g.pick(2, &outfit).look.name, "Long-Surname");
+        assert_eq!(g.pick(9, &outfit).look, Look::default(), "an identity past the file wears no name");
     }
 }
