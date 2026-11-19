@@ -8341,6 +8341,18 @@ atv_record_apply            atv 0x00207240 = collision_apply
 # +0x80 0xffffffff: 0x01a511b0 kind 0, 1, 1, 1 and 0x01aa5020 kind 1, 0, 0, 0 — each kind 1 entry is the
 # other's kind 0 entry at the same index with the same point (+0x40) and the normal (+0x30) turned round
 # (0x01a511b0's own: (0.999, 0.033, -0.034) at (2774.6, 125.15, 2604.42)). Touch stays on to 37531 (5, 5, 4).
+# S481 — what each pass strikes (journal research/journal/2026-11-18-s481-quads-among-quads; proof
+# tests/atv_quad/quads_touch.rs). Each record's part +0x200 is a ray probe (+0x78 kind 2: 0x01a511b0's
+# 0x0166e330, 0x01aa5020's 0x01a5c0d0), its tree the riding 250R_ATV_ChasisM.col's as stored (root +0x170
+# 0, nodes +0x17c, 25 of them, count +0x178 26, segments +0x180), frame +0x130 = its node (+0x174)'s
+# world +0x70. Its result record (part +0x7c): +0x8c count (1 and 3 at 37523, exactly the record's own
+# kind 0 entries in order), +0x90 rays (0x20 each), +0x94 normals, +0x98 points, +0x9c struck. Every hit
+# is on the other record's hull, *(record +0x208) (0x01aa3c00 and 0x01a4fd60): kind 0 (a mesh, the
+# ATV_R_ChasisF.col: 8 corners, 12 facets, tree root +0x23c 0, nodes +0x244, facets +0x248 at 0x14,
+# vertex array +0x230, its +8 0 = not packed), +0x90 the other record, +0x94 category 0x3012, record
+# +0x108 mask 0. The ray probe's narrow pair (the port's ray_probe::pair, S46/F46d) with both frames read at 37521
+# gives both records' 37523 lists word for word with 0x01a511b0's pass first (37523's frames do not: the
+# passes run before the world step moves them). 0x01aa5020 first files other lists.
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the
