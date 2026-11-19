@@ -1736,6 +1736,15 @@ ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (th
 #                                           the rustic windmill toy (0x20a), the parked biplane
 #                                           (0x52058 mesh, 0x10008 rays, 0x8 sphere), then the
 #                                           riders; none of the first three is AI_IGNORE
+#                                           S461: the "parked biplane" is free09's parked monster
+#                                           truck (hull monstertruckf.col, cat 0x52058 = the car's
+#                                           COLLIDABLE; rays monstertruckm.col 0x10008; sphere 0x8):
+#                                           machine.txt [Machine1]. Car object = hull+0x24 - 0x58
+#                                           (recording2 0x00e1e210): +0x160 body (asleep, +0 = 0),
+#                                           +0x174 rays, +0x178 hull, +0x17c sphere, +0x270 spawn
+#                                           (4594, 141.38817, 3838), +0x280 nose (0,0,-1). Hull
+#                                           +0x120 = node_of(body) bit for bit; the body has fallen
+#                                           ~7 ft from the spawn to rest on the ground
 ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
 ai_iface_walk_end           boot 0x00281b70 vt+0x34 thunk (j 0x00280b10): closes the walk's query
 #                                           (0x001bb890 on rider+0x13b0); v0 = 1 (S323)

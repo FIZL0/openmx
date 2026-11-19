@@ -175,6 +175,11 @@ pub struct Sim {
     /// generator, one a row handed to a strip. `None` draws nothing for them, as before. Not on the
     /// wire yet, like the dust.
     pub tracks: Option<Box<tire_track::Tracks>>,
+    /// The machines parked on the map, nobody in them (S461): each one's hull where its body rests
+    /// ([`ai::parked_hull`]), which the AI riders' avoidance walks and sweeps ([`ai::WorldScene`]).
+    /// free09's monster truck is one. Empty — what every ride had before — walks as it did. Fixed
+    /// for the ride, like [`Sim::home`]: not walked, hashed or sent.
+    pub parked: Arc<[world::Prop]>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -289,6 +294,7 @@ impl Sim {
             notes: None,
             dust: None,
             tracks: None,
+            parked: Arc::default(),
         }
     }
 
@@ -1001,6 +1007,7 @@ impl Clone for Sim {
             notes: self.notes.clone(),
             dust: self.dust.clone(),
             tracks: self.tracks.clone(),
+            parked: self.parked.clone(),
         }
     }
 }

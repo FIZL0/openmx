@@ -6178,8 +6178,10 @@ impl crate::world::World for &Lent<'_> {
 /// of the props and marks every tick) is in that world's moving list, not its tree, so it is walked
 /// after the tree's things, wherever it stands, in the props' order, and swept like any prop: free09's
 /// six path cars and its rustic windmill, as the original's moving structure hands them out ahead of
-/// the riders (S336). The original's parked biplane, between them and the bikes, is not in the Sim.
-/// Then the moving world (S326): every one of `ridden`, in
+/// the riders (S336). Then the machines parked on the map (S461, [`parked_hull`]): each of `parked`,
+/// wherever it is, a [`Thing::Solid`] by [`PARKED`] plus its place in `parked` — collidable and not
+/// `AI_IGNORE`, so the avoidance sweeps it as a prop, and a feeler can stop on it (free09's monster
+/// truck). Then the moving world (S326): every one of `ridden`, in
 /// the order given, wherever it is — the moving structure hands out all it holds, with no box —
 /// each a [`Thing::Solid`] by [`MOVING`] plus its place in `ridden`: collidable, and of the
 /// `AI_IGNORE` class ([`Ridden`]), so the avoidance passes over it. The sweep is the bundle against the one prop
@@ -6187,6 +6189,8 @@ impl crate::world::World for &Lent<'_> {
 /// the feelers as its probes, its sphere at `centre` with `radius`.
 pub struct WorldScene<'s, 'w> {
     pub world: &'s Lent<'w>,
+    /// The parked machines' hulls ([`parked_hull`], [`crate::Sim::parked`]), in the Sim's order.
+    pub parked: &'s [crate::world::Prop],
     /// The riders' bikes in the moving structure, in the Sim's player order ([`Ridden::of`]).
     pub ridden: &'s [Ridden],
     /// The bike's centre of gravity.
@@ -6202,6 +6206,23 @@ pub struct WorldScene<'s, 'w> {
 /// The first [`WorldScene`] id of the moving world: bike `k` of [`WorldScene::ridden`] is
 /// `MOVING + k`, past every id of the static tree's.
 pub const MOVING: u32 = 0x8000_0000;
+
+/// The first [`WorldScene`] id of the parked machines: hull `k` of [`WorldScene::parked`] is
+/// `PARKED + k`, past every id of the static tree's and short of [`MOVING`].
+pub const PARKED: u32 = 0x4000_0000;
+
+/// **A parked machine's hull as the original's moving structure holds it** (S461): its `f.col` mesh
+/// (a car's [`crate::car::Kind::hull`]) stood where the machine's body stands it — the body's pose
+/// as rows and an origin ([`crate::wreck_bike::node_of`]), as the car's own hull is placed for the
+/// riders' bikes ([`crate::car::Machine::hull`]) — as a prop, whose sphere is the object's (its
+/// mesh's root box's centre through the matrix, and the mesh's reach). On recording2's image the
+/// parked monster truck's body gives its hull object's matrix (`+0x120`), centre (`+0x40`) and
+/// reach (`+0x60`) bit for bit. A machine parked with nobody in it is in the walk as any
+/// collidable is: category the car's ([`crate::car::COLLIDABLE`], `0x52058`), not `AI_IGNORE`.
+pub fn parked_hull(hull: crate::track::Mesh, body: &crate::biplane::Body) -> crate::world::Prop {
+    let n = crate::wreck_bike::node_of(body);
+    crate::world::Prop::on(hull, &crate::math::Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin]))
+}
 
 /// One of the Sim's riders' bikes as its AI riders' scene walk hands it out (S326): its frame
 /// collidable (`bikef.col`, [`crate::bike_col::BikeCol::frame`], class 0: a mesh) where its chassis'
@@ -6272,6 +6293,7 @@ impl Scene for WorldScene<'_, '_> {
             }
         }
         q.end(&mut broad);
+        things.extend((0..self.parked.len() as u32).map(|k| Thing::Solid { id: PARKED + k, collidable: true, ai_ignore: false }));
         things.extend((0..self.ridden.len() as u32).map(|k| Thing::Solid { id: MOVING + k, collidable: true, ai_ignore: true }));
         self.walked.clone_from(&things);
         Some(things)
@@ -6289,6 +6311,8 @@ impl Scene for WorldScene<'_, '_> {
             let bike = self.ridden.get((id - MOVING) as usize)?;
             let (at, reach) = bike.sphere();
             crate::back_search::sweep_placed(&bundle, &bike.col.frame, &bike.at, at, reach, &mut record)
+        } else if id >= PARKED {
+            crate::back_search::sweep_object(&bundle, self.parked.get((id - PARKED) as usize)?, &mut record)
         } else {
             let mut world = self.world.0.borrow_mut();
             let (_, props, _) = world.wooded();
@@ -6410,6 +6434,18 @@ impl Pilot {
         seek_world: &mut seek::World, tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>,
         racing: Option<Racing<'_>>, track: Option<OnTrack<'_>>, rng: &mut Rng, dt: F,
     ) -> Thought {
+        self.think_amid(mount, world, &[], ridden, seek_world, tables, others, tricks, racing, track, rng, dt)
+    }
+
+    /// [`Pilot::think_among`] with the map's parked machines in its scene too (S461,
+    /// [`parked_hull`]): the walk hands each out after the map's moving props and before the bikes,
+    /// and the avoidance sweeps them.
+    #[allow(clippy::too_many_arguments)] // the tick's world, as Around has it
+    pub fn think_amid(
+        &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, parked: &[crate::world::Prop], ridden: &[Ridden],
+        seek_world: &mut seek::World, tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>,
+        racing: Option<Racing<'_>>, track: Option<OnTrack<'_>>, rng: &mut Rng, dt: F,
+    ) -> Thought {
         let cell = world.wooded().2.map_or(F(0.0), |t| t.cell());
         let lent = Lent::new(world);
         let mut ground = &lent;
@@ -6417,6 +6453,7 @@ impl Pilot {
         let rider = Rider { look_ahead: seat.look_ahead, bump_chance: seat.bump_chance, ..mount.rider };
         let mut scene = WorldScene {
             world: &lent,
+            parked,
             ridden,
             cofg: mount.cofg,
             centre: rider.frame[3],
