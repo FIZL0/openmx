@@ -6648,12 +6648,23 @@ impl Pilot {
     /// lane has one, and live from the card and the manager's [`RACE_STARTED`] bit, as the hand-off
     /// reads them (the rider's card word, and its manager's `+0x5c` bit 0). A player with no card on
     /// the laps has none, and is not live.
+    ///
+    /// The habits' card words come off the race card too (B38), as the race's jump watch
+    /// ([`crate::race::RaceRules::jumps`]) left them: the air time (`+0xfc`), the ground clock
+    /// (`+0x1b0`, the landing lag's clock) and the racing bit
+    /// ([`crate::race::race_card_flags::WATCHES_JUMPS`], which the card's owner drops while its rider
+    /// is down). On a free ride [`Pilot::watch_jumps`] keeps them instead.
     pub fn read_laps(&mut self, laps: &crate::race::Laps, net: bool) {
         let lap = laps.card(self.seat.player);
         self.card = lap.map(|l| Card { flags: l.flags, progress: l.progress, ..self.card.unwrap_or_default() });
         self.seat.race_phase = Some(laps.rules.lap.kind);
         self.seat.path_net = net;
         self.seat.live = lap.is_some() && laps.rules.lap.flags & RACE_STARTED != 0;
+        if let Some(e) = laps.cards.iter().find(|e| e.player == self.seat.player) {
+            let h = &mut self.racer.habits;
+            (h.air_time, h.lag_clock) = (e.card.jumps.air_time, e.card.jumps.grounded);
+            h.racing = e.card.lap.flags & crate::race::race_card_flags::WATCHES_JUMPS != 0;
+        }
     }
 
     /// **The free ride's jump watch on the pilot's card** (S482), `dt` long: the free ride's score

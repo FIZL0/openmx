@@ -877,7 +877,8 @@ impl crate::Sim {
     /// **The free ride's jump watch** (S482, [`crate::ai::Pilot::watch_jumps`]), `dt` long, after
     /// every bike's frame: each AI rider's card times its jumps on its bike's wheel word, for its
     /// habits to read next tick. Not on a ride with a race ([`crate::Sim::race`]): its keeper is the
-    /// race's, whose cards the brains do not read their air time off yet.
+    /// race's, and on a race with laps the brains read their air time and ground clock off its cards
+    /// ([`crate::ai::Pilot::read_laps`], B38).
     pub(crate) fn watch_jumps(&mut self, dt: F) {
         if self.race.is_some() {
             return;

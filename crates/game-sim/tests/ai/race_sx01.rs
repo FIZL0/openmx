@@ -268,6 +268,10 @@ struct Run {
     hand_offs: usize,
     /// Pilot reads of the laps checked.
     reads: usize,
+    /// Pilot reads whose habits are in the air (air time running, ground clock 0), and on the ground
+    /// after a jump (both set) (B38).
+    airborne: usize,
+    landed: usize,
     /// The last frame held.
     end: u32,
     /// Per word: (count, first few).
@@ -346,7 +350,8 @@ fn s377_the_sims_race_riders_hold_c31s_live_sx01_race() {
     // they feed); what the race is about must hold all the same.
     let free = run_free(&rows, &track, false, &mut lane);
     eprintln!("{free:#?}");
-    let drift = ["ahead", "aim", "jumps", "kept_spot", "last", "odometer", "on_path", "racing card", "spot", "to_line", "to_line_kept"];
+    let drift =
+        ["ahead", "aim", "jumps", "kept_spot", "last", "odometer", "on_path", "racing card", "read_laps jumps", "spot", "to_line", "to_line_kept"];
     let held: std::collections::BTreeMap<_, _> = free.bad.iter().filter(|(k, _)| !drift.contains(k)).collect();
     assert!(held.is_empty(), "the free run's race parts from C31's (count, first four): {held:#?}");
     assert!(free.held > 10_000 && free.reads == 3 * free.held, "{free:?}");
@@ -355,6 +360,8 @@ fn s377_the_sims_race_riders_hold_c31s_live_sx01_race() {
     let run = run_free(&rows, &track, true, &mut lane);
     eprintln!("{run:#?}");
     assert!(run.held > 9_500 && run.finished > 0 && run.place_changes > 0 && run.laps > 0, "{run:?}");
+    // B38: the bots' habits fly and land with their cards.
+    assert!(run.airborne > 0 && run.landed > 0, "{run:?}");
     assert!(run.bad.is_empty(), "words that part from C31's race (count, first four): {:#?}", run.bad);
 }
 
@@ -495,6 +502,17 @@ fn run_free(rows: &[Row], track: &Track, resync: bool, lane: &mut Lane) -> Run {
             if got != want {
                 run.differ("read_laps", format!("frame {f} rider {p}: got {got:x?} want {want:x?}"));
             }
+            // B38: the habits' air time, ground clock and racing bit, as the race's jump watch left
+            // the card.
+            let h = &pilot.racer.habits;
+            let jumps = card_of(&row.raw[*p], track).expect("a captured card").jumps;
+            let got = (h.air_time.0.to_bits(), h.lag_clock.0.to_bits(), h.racing);
+            let want = (jumps.air_time.0.to_bits(), jumps.grounded.0.to_bits(), theirs.flags & race_card_flags::WATCHES_JUMPS != 0);
+            if got != want {
+                run.differ("read_laps jumps", format!("frame {f} rider {p}: got {got:x?} want {want:x?}"));
+            }
+            run.airborne += usize::from(h.air_time != F::ZERO && h.lag_clock == F::ZERO);
+            run.landed += usize::from(h.air_time != F::ZERO && h.lag_clock != F::ZERO);
             run.reads += 1;
         }
     }
