@@ -10413,9 +10413,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The plane's particles (P58): a frame of them for each frame the plane was simulated, off
         // where it is now. Nothing here writes the simulation; the ones that collide ask the ride's own
         // terrain query for the ground under them (P61), which reads the terrain and nothing else.
-        if simulated && let (Some((fx, binds)), Some(plane)) = (&mut plane_fx, &world.seats[0].garage.plane) {
+        // V131: only while it is flown. A plane not up is not drawn, but it stands in its bay or on
+        // the start line, where its prop wash threw a dust cloud at every race start: its emitters
+        // are off and what is in the air runs out, as a bike's are while the plane is up.
+        if simulated && let (Some((fx, binds)), Some(_)) = (&mut plane_fx, &world.seats[0].garage.plane) {
+            let frame = world.seats[0].garage.plane_flown().map_or_else(particles::PlaneFrame::default, |plane| plane_fx_frame(plane, binds));
             let place = &mut world.place;
-            fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
+            fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
         }
         // The track's (V45): a frame for each frame simulated, as the bikes' are.
         if simulated && let Some(fx) = &mut track_fx {
