@@ -3117,44 +3117,70 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
 /// The world round an MX vs. ATV helicopter flown on SLUS-21104's record (MD115a,
 /// [`KiowaRide::step_on_record`]): the record's ground ([`game_sim::kiowa::OnMxvatv`]) for its
 /// response, touching flag, entries and strike; the wreck and put-back as [`KiowaAround`]'s, the
-/// put-back snapped to the record's terrain (MD214); the thrown blades in its world, their side of a
-/// contact on the hull MX Unleashed's collision object's (which they never meet here).
+/// put-back snapped to the record's terrain (MD214). Beside the record, MX Unleashed's collision
+/// object as [`KiowaAround`]'s, searched without the heightfield (B39,
+/// [`game_sim::kiowa::Collision::search_beside_record`]): the props, trees, bikes and thrown blades,
+/// which the record's pass does not strike in the port, resolved after the record's contacts, its
+/// touch counting with the record's and its struck object for the speed test's spare, its rotor
+/// search in the strike; its nearby list gathered in the post, as MD249 gives the plane.
 struct KiowaOnRecord<'a> {
-    ground: game_sim::kiowa::OnMxvatv<'a>,
+    record: &'a mut flight::MxvatvRecord,
+    centres: &'a [Vf],
+    beside: game_sim::kiowa::Grounded<'a>,
     wreckage: &'a mut game_sim::kiowa::Wreckage,
-    collision: &'a mut game_sim::kiowa::Collision,
     put_back: Option<F>,
     tree: Option<&'a game_sim::kiowa::RotorTree>,
     curve: &'a game_sim::camera::CurveTable,
     blade_movers: &'a [game_sim::contact::Mover],
 }
 
+impl KiowaOnRecord<'_> {
+    /// The record on the world's SLUS-21104 terrain, as [`KiowaRide::step_on_record`]'s pass had it:
+    /// asked again each time, the world being the search's too.
+    fn on(&mut self) -> game_sim::kiowa::OnMxvatv<'_> {
+        game_sim::kiowa::OnMxvatv { record: &mut *self.record, terrain: self.beside.world.mxvatv_terrain(), centres: self.centres, asked: Vec::new() }
+    }
+}
+
 impl game_sim::kiowa::Surroundings for KiowaOnRecord<'_> {
+    fn post(&mut self, body: &game_sim::biplane::Body) {
+        self.beside.post(body);
+        self.wreckage.blades.gather_round(self.beside.collision, body);
+    }
     fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
-        self.ground.resolve(body);
+        self.on().resolve(body);
+        let beside = &mut self.beside;
+        self.wreckage.blades.with_others(|others| beside.resolve_among(body, others));
     }
     fn among(&mut self) -> Option<game_sim::kiowa::Among<'_>> {
-        Some(self.wreckage.blades.among(blade_tables(), self.blade_movers, &mut *self.collision))
+        Some(self.wreckage.blades.among(blade_tables(), self.blade_movers, &mut *self.beside.collision))
     }
     fn among_listed(&self, list: game_sim::biplane::List) -> i32 {
         self.wreckage.blades.set.listed(list)
     }
     fn touching(&self) -> bool {
-        self.ground.touching()
+        self.record.record.touching || self.beside.touching()
     }
+    /// What MX Unleashed's search struck, on a frame it touched something (the record strikes no
+    /// object; MD249's rule for the plane).
     fn ignored(&self) -> bool {
-        self.ground.ignored()
+        self.beside.touching() && self.beside.ignored()
     }
     fn entries(&self) -> Vec<game_sim::kiowa::Touch> {
-        self.ground.entries()
+        let record = self.record.record.contacts.iter().map(|c| game_sim::kiowa::Touch { kind: c.kind, t: F(c.to.y()) });
+        record.chain(self.beside.entries()).collect()
     }
     fn strike(&mut self, matrix: &game_sim::math::Mat4) -> game_sim::kiowa::Strike {
-        self.ground.strike(matrix)
+        let in_ground = self.on().strike(matrix).in_ground;
+        let b = &mut self.beside;
+        let struck = b.collision.rotor_struck(b.rotor, matrix, &mut *b.world);
+        game_sim::kiowa::Strike { in_ground, struck }
     }
     fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, rng: &mut game_sim::rng::Rng) {
-        self.ground.crashed(asked, ride, rng);
+        self.on().crashed(asked, ride, rng);
         let throw = kiowa_throw(ride, self.tree, self.curve);
-        if let Some(f) = self.wreckage.act_on(asked, ride, &throw, false, rng, self.ground.terrain.as_ref()) {
+        let terrain = self.beside.world.mxvatv_terrain();
+        if let Some(f) = self.wreckage.act_on(asked, ride, &throw, false, rng, terrain.as_ref()) {
             self.put_back = Some(f);
         }
     }
@@ -3181,10 +3207,10 @@ pub struct Heli {
 
 impl Heli {
     /// Its collision record's touching flag, as the last tick left it: SLUS-21104's record's where it
-    /// flies on one.
+    /// flies on one, or MX Unleashed's beside it (B39: the props, trees and bikes).
     pub fn touching(&self) -> bool {
         match &self.record {
-            Some(r) => r.record.touching,
+            Some(r) => r.record.touching || self.collision.record.touching,
             None => self.collision.record.touching,
         }
     }
@@ -3474,26 +3500,30 @@ impl KiowaRide {
     /// it ([`game_sim::kiowa::OnMxvatv`]): the record's pass on the world's SLUS-21104 terrain before
     /// the frame, its resolve in the body wrapper, the rotor's spheres
     /// ([`game_sim::kiowa::WreckRotor::centres`]) asked of that terrain for the strike; the wreck and
-    /// put-back as [`KiowaAround`] does them, the put-back snapped to the terrain. Thrown blades fly
-    /// and step in its world, meeting the world but not its hull, and its rays do not meet them:
-    /// MX Unleashed's collision object is not searched.
+    /// put-back as [`KiowaAround`] does them, the put-back snapped to the terrain. MX Unleashed's
+    /// collision object is searched first beside it, without the heightfield (B39,
+    /// [`KiowaOnRecord`]): the props, trees, bikes and thrown blades, which then meet its hull as
+    /// on [`KiowaRide::step_through`]'s own frame.
     fn step_on_record(&mut self, input: game_sim::kiowa::Pad, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         let Some(h) = self.flown.as_mut() else { return };
+        let (movers, struck) = h.collision.search_beside_record(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered());
         let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
         let mut blade_movers = Vec::new();
         if blades_out {
             let (field, props, trees) = world.wooded();
-            h.wreckage.blades.search(dt, field.as_deref(), props, trees);
+            h.wreckage.blades.search_on(dt, field.as_deref(), props, trees, &mut h.collision, &h.ride.body);
+            h.wreckage.blades.file_struck(struck);
             blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
         }
         let (Some(m), Some(record), Some(terrain)) = (h.mxvatv.as_mut(), h.record.as_deref_mut(), world.mxvatv_terrain()) else { return };
         let centres = self.phy.wreck_rotor.centres();
-        let mut ground = game_sim::kiowa::OnMxvatv { record, terrain: Some(terrain), centres: &centres, asked: Vec::new() };
-        ground.pass(&mut h.ride, dt);
+        game_sim::kiowa::OnMxvatv { record: &mut *record, terrain: Some(terrain), centres: &centres, asked: Vec::new() }.pass(&mut h.ride, dt);
+        let beside = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
         let mut around = KiowaOnRecord {
-            ground,
+            record,
+            centres: &centres,
+            beside,
             wreckage: &mut h.wreckage,
-            collision: &mut h.collision,
             put_back: None,
             tree: self.tree.as_ref(),
             curve: &tables.curve,
@@ -3507,6 +3537,8 @@ impl KiowaRide {
         }
         if let Some(fraction) = put_back {
             h.kiowa.put_back_controls(fraction);
+            h.collision.refresh(&h.ride.body, world);
+            h.wreckage.blades.gather_round(&h.collision, &h.ride.body);
         }
     }
 
@@ -4448,6 +4480,24 @@ mod tests {
         let h = atv.flown.as_ref().unwrap();
         assert!(h.record.as_ref().unwrap().record.terrain, "the record's pass ran on the terrain");
         assert!(!h.touching() && h.ride.body.position.y() < before, "the record met nothing; it fell");
+    }
+
+    #[test]
+    fn mx_unleasheds_search_beside_slus_21104s_record_leaves_it_the_ground() {
+        // B39: on SLUS-21104's terrain the record meets the ground, so MX Unleashed's search beside it
+        // leaves the heightfield out (and meets the props, trees and bikes); its own frame meets it.
+        use game_sim::ray_probe::Segment;
+        use game_sim::world::Flat;
+        let down = |x: f32| Segment { from: Vf::new(x, 0.0, 0.0, 1.0), to: Vf::new(x, -3.0, 0.0, 1.0) };
+        let mut atv = KiowaRide::new_mxvatv(b"[Mass Properties]\nMass = 10\n", false, 0, None);
+        atv.rays = game_sim::kiowa::ray_tree(&[down(-1.0), down(1.0)]);
+        let mut floor = Flat::default();
+        let mut h = atv.built(Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &mut floor);
+        let dt = F(1.0 / 30.0);
+        h.collision.search_beside_record(&mut h.ride.body, &mut floor, dt, &[]);
+        assert!(!h.collision.record.touching, "beside the record the ground is not searched");
+        h.collision.search_knocking(&mut h.ride.body, &mut floor, dt, &[]);
+        assert!(h.collision.record.touching, "MX Unleashed's own search meets it");
     }
 
     /// P367: the seat's Preload Axis reaches the ride on Untamed's handling alone, read off pad 0

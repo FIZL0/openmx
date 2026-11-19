@@ -1908,6 +1908,33 @@ impl Collision {
         dt: F,
         knocks: &[(usize, Knock<'_>, F)],
     ) -> (Vec<crate::contact::Mover>, Vec<(usize, Vec<crate::contact::Contact>)>) {
+        self.search_knocking_on(body, world, dt, knocks, true)
+    }
+
+    /// **[`Collision::search_knocking`] beside SLUS-21104's record** (B39): the same search with the
+    /// heightfield left out, as MD249 leaves it out of the plane's
+    /// ([`crate::flight::Flight::record_mxvatv`]). On SLUS-21104's terrain the record's pass meets the
+    /// ground ([`OnMxvatv`]); this one then meets the rest, the props, trees and bikes, which the
+    /// record's pass does not strike in the port.
+    pub fn search_beside_record(
+        &mut self,
+        body: &mut Body,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        knocks: &[(usize, Knock<'_>, F)],
+    ) -> (Vec<crate::contact::Mover>, Vec<(usize, Vec<crate::contact::Contact>)>) {
+        self.search_knocking_on(body, world, dt, knocks, false)
+    }
+
+    /// [`Collision::search_knocking`], the heightfield searched only with `ground`.
+    fn search_knocking_on(
+        &mut self,
+        body: &mut Body,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        knocks: &[(usize, Knock<'_>, F)],
+        ground: bool,
+    ) -> (Vec<crate::contact::Mover>, Vec<(usize, Vec<crate::contact::Contact>)>) {
         use crate::contact_search::{self, Search};
         use crate::flight_search::{self, Scene};
         let rays = self.rays.clone();
@@ -1924,7 +1951,8 @@ impl Collision {
         }
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(posed.iter().map(|n| contact_search::Record { capacity: n.capacity, ..contact_search::Record::default() }));
-        contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
+        let field = field.as_deref().filter(|_| ground);
+        contact_search::collide(&mut records, 0, Some(body), field, &mut scene, dt);
         let movers = Search::movers(&scene);
         drop(scene);
         let mut records = records.into_iter();
