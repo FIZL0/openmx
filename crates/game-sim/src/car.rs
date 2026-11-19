@@ -3123,6 +3123,170 @@ impl Machine {
     }
 }
 
+// --- a parked car struck by the riders' bikes (S485) -----------------------------------------------
+
+/// **A parked car in the riders' world** (S485), as [`crate::Sim::parked_cars`] holds it: its `.phy` and
+/// hull (constants of the disc, shared by every clone), the car settled where it was parked
+/// ([`Machine::settle`]) and its collision object. Asleep, it is not stepped, but its hull is in the
+/// riders' list, as a driven car's is (F26): a bike's body rays strike it, the strike wakes its body
+/// (the struck listener's enable), and the bike's resolve pushes it. Awake, it is stepped with nobody
+/// in it, ahead of the bikes, until it is at rest again ([`Machine::at_rest`]) and sleeps.
+///
+/// S484's live capture (`context/capture/s484/ride1.csv`): a bike ridden into free09's truck at
+/// ~55 ft/s wakes it on the strike's frame with the push already in its velocity and its place not
+/// yet moved, so the car's node is stepped before the riders' in the original's frame; and a bike
+/// that leans on it after wakes it for a frame without a step, so the wake is the bike's, after the
+/// car's step. The enable also sets the car's driven word, which the car's first step clears again
+/// when nobody is in it, before its controls read it: a parked car's controls stay undriven here.
+#[derive(Clone, Debug)]
+pub struct Parked {
+    pub car: std::sync::Arc<Car>,
+    pub hull: std::sync::Arc<crate::track::Mesh>,
+    pub machine: Machine,
+    pub collision: Collision,
+}
+
+/// How many frames a parked car's load settle may take before it is left as it stands: the truck's
+/// is 57 ([`Machine::settle`]).
+pub const SETTLE_FRAMES: usize = 400;
+
+/// The frame time free09's load steps a parked car at (S484).
+pub const LOAD_DT: f32 = 0.03333;
+
+impl Parked {
+    /// A car parked at its map spot `at` (`machine.txt`'s), its nose along `facing`: spawned over the
+    /// ground ([`parked_spawn`]), built ([`Machine::new`]) and settled at the load's frame time
+    /// ([`LOAD_DT`]) until it sleeps, as the original's load leaves it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settled(
+        car: std::sync::Arc<Car>,
+        model: &CarModel,
+        rays: crate::flight_search::Rays,
+        hull: std::sync::Arc<crate::track::Mesh>,
+        world: &mut dyn crate::world::World,
+        at: Vf,
+        facing: Vf,
+        acos: &AcosTable,
+        curve: &CurveTable,
+    ) -> Parked {
+        let world = &mut Through(world);
+        let spawn = parked_spawn(world, model, at);
+        let mut machine = Machine::new(&car, model, spawn, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
+        let mut collision = collision_of_model(&car, model, &machine.body, rays);
+        machine.settle(&car, world, &mut collision, F(LOAD_DT), acos, curve, SETTLE_FRAMES);
+        Parked { car, hull, machine, collision }
+    }
+
+    /// Whether its body is awake.
+    pub fn awake(&self) -> bool {
+        self.machine.body.enabled
+    }
+
+    /// **One frame of a woken parked car** (S485): [`Machine::step_struck`] with nobody in it, then
+    /// the object listener's sleep once it is at rest ([`Machine::at_rest`]). Asleep, nothing. True
+    /// on the frame it falls asleep again, when its hull's place for the AI riders moves.
+    pub fn frame(&mut self, world: &mut dyn crate::world::World, dt: F, acos: &AcosTable, curve: &CurveTable) -> bool {
+        if !self.awake() {
+            return false;
+        }
+        let Parked { car, machine, collision, .. } = self;
+        machine.step_struck(car, &mut Through(world), collision, dt, acos, curve, &mut |_| F::ZERO);
+        if machine.at_rest(car) {
+            machine.body.enabled = false;
+            return true;
+        }
+        false
+    }
+
+    /// Its hull as the riders' bikes meet it, awake or asleep ([`Machine::hull`]), for seat `seat`.
+    pub fn hull(&self, seat: usize) -> crate::rider_contact::Hull<'_> {
+        self.machine.hull(seat, &self.hull, &self.collision)
+    }
+
+    /// Its hull as the AI riders' avoidance meets it ([`crate::ai::parked_hull`]).
+    pub fn ai_hull(&self) -> crate::world::Prop {
+        crate::ai::parked_hull((*self.hull).clone(), &self.machine.body)
+    }
+
+    /// The struck listener (S485): a bike's body rays struck its hull, and its body is enabled.
+    pub fn struck(&mut self) {
+        self.machine.body.enabled = true;
+    }
+
+    /// Its body as a bike's resolve pushes it ([`Machine::flown`]).
+    pub fn flown(&self, seat: usize, from: Vf, world: &dyn crate::world::World) -> crate::rider_contact::Flown {
+        self.machine.flown(seat, &self.collision, from, world)
+    }
+
+    /// The body a bike's resolve pushed, written back ([`Machine::pushed`]).
+    pub fn pushed(&mut self, by: &crate::rider_contact::Flown) {
+        self.machine.pushed(&mut self.collision, by);
+    }
+}
+
+/// A `dyn World` for the car's step, which takes its world by type: every query passed through.
+struct Through<'a>(&'a mut dyn crate::world::World);
+
+impl crate::world::World for Through<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.0.ground(at)
+    }
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.0.surface(at)
+    }
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        self.0.wheel_surface(at)
+    }
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        self.0.mxvatv_terrain()
+    }
+    fn solid(&mut self, bundle: &crate::collide::Bundle, record: &mut crate::collide::Record) -> bool {
+        self.0.solid(bundle, record)
+    }
+    fn groups(&mut self, bundle: &crate::collide::Bundle, record: &mut crate::collide::Record) -> bool {
+        self.0.groups(bundle, record)
+    }
+    fn crowded(&mut self, centre: Vf, radius: F) -> bool {
+        self.0.crowded(centre, radius)
+    }
+    fn area(&self) -> Option<crate::biplane::Area> {
+        self.0.area()
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.0.wrap()
+    }
+    fn off_world(&self, at: Vf, margin: F) -> bool {
+        self.0.off_world(at, margin)
+    }
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.0.keeps(at)
+    }
+    fn heightfield(&mut self) -> Option<Box<dyn crate::contact_search::Heightfield + '_>> {
+        self.0.heightfield()
+    }
+    #[allow(clippy::type_complexity)]
+    fn collision(&mut self) -> (Option<Box<dyn crate::contact_search::Heightfield + '_>>, Option<&crate::world::Props>) {
+        self.0.collision()
+    }
+    #[allow(clippy::type_complexity)]
+    fn wooded(&mut self) -> (Option<Box<dyn crate::contact_search::Heightfield + '_>>, Option<&crate::world::Props>, Option<&crate::eco::Trees>) {
+        self.0.wooded()
+    }
+    #[allow(clippy::type_complexity)]
+    fn wooded_near(
+        &mut self,
+        at: Vf,
+    ) -> (Option<Box<dyn crate::contact_search::Heightfield + '_>>, Option<&crate::world::Props>, Option<&crate::eco::Trees>) {
+        self.0.wooded_near(at)
+    }
+    fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
+        self.0.near_set(at)
+    }
+    fn moving(&mut self) -> Option<&mut crate::world::Props> {
+        self.0.moving()
+    }
+}
+
 // --- the collision object (S229) -------------------------------------------------------------------
 
 /// The cars' ray probe files in `machine.res`: the rigid-body part's `%sm.col` for the stock skin

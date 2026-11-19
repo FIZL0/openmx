@@ -813,6 +813,49 @@ impl crate::Sim {
         contacts_of(&riders, dt, &|from, at| crate::nearest_copy(world, from, at))
     }
 
+    /// **[`crate::Sim::bike_contacts_in`] with the parked cars' hulls in the riders' world** (S485,
+    /// [`gather_met`]): every bike's list, an entry on a car's hull naming it `players + k`, and
+    /// each car's mirrors, in [`crate::Sim::parked_cars`]' order. With no parked car, the bikes'
+    /// lists as [`crate::Sim::bike_contacts_in`] finds them, and no mirrors.
+    #[allow(clippy::type_complexity)]
+    pub fn bike_contacts_parked(&self, dt: F, world: &dyn World) -> (Option<Vec<Vec<Contact>>>, Vec<Vec<Contact>>) {
+        if self.parked_cars.is_empty() {
+            return (self.bike_contacts_in(dt, world), Vec::new());
+        }
+        let riders: Vec<(&Rider, bool)> = (0..self.players()).map(|i| (self.rider_of(i), true)).collect();
+        let n = riders.len();
+        let hulls: Vec<Hull<'_>> = self.parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)).collect();
+        match contacts_met(&riders, &hulls, dt, world) {
+            Some((lists, mirrors)) => (Some(lists), mirrors),
+            None => (None, Vec::new()),
+        }
+    }
+
+    /// The parked cars a bike's body rays struck this tick woken (S485): each one with a mirror on
+    /// its hull's record ([`crate::car::Parked::struck`]).
+    pub fn parked_struck(&mut self, mirrors: &[Vec<Contact>]) {
+        for (p, m) in self.parked_cars.iter_mut().zip(mirrors) {
+            if !m.is_empty() {
+                p.struck();
+            }
+        }
+    }
+
+    /// The parked cars' bodies in player `me`'s bump, the others after its players' vehicles (S485,
+    /// [`Bump::planes`]): each one the copy nearest `me`'s bike.
+    pub fn parked_flown(&self, me: usize, world: &dyn World) -> Vec<Flown> {
+        let from = self.rider_of(me).ride.transform().0[3];
+        let n = self.players();
+        self.parked_cars.iter().enumerate().map(|(k, p)| p.flown(n + k, from, world)).collect()
+    }
+
+    /// What a bike's resolve did to the parked cars' bodies, written back (S485).
+    pub fn parked_pushed(&mut self, bump: &Bump) {
+        for (p, f) in self.parked_cars.iter_mut().zip(&bump.planes) {
+            p.pushed(f);
+        }
+    }
+
     /// Player `me`'s contacts, with every player's object and chassis as they stand now.
     pub fn bump(&self, me: usize, contacts: Vec<Contact>) -> Bump {
         let riders: Vec<(&Rider, &Phy)> = (0..self.players()).map(|i| (self.rider_of(i), self.phy_of(i))).collect();

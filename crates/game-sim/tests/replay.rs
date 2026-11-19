@@ -14073,3 +14073,218 @@ fn the_windmill_throws_the_bones_with_the_originals_draws() {
     // R40: the throw pulls on ticks 3 to 9; turned by the right frame, it adds nothing to the y gap.
     assert!((throw_dy[1] - throw_dy[0]).abs() < 0.05, "the throw moved the bones' y velocity gap {throw_dy:?}");
 }
+
+// S485: bikes strike a parked car. research/s484/truck.sh moves recording2's bike to (4594, 135.3,
+// 3778), 60 ft south of free09's parked monster truck's nose, zeroes its velocities and holds the gas
+// from the image's frame, and logs the truck's body a row a game frame (row 0 the image's frame):
+//
+//   KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh PID 4594 3778 240 context/capture/s484/ride1.csv
+//
+// The bike strikes the truck's nose at ~55 ft/s and stops dead; the truck wakes on that frame (row 58)
+// with vz 2.77 ft/s, slides 0.2 ft, and sleeps again 9 frames later.
+
+/// Where the S484 script stands the bike, its height 0.3 ft over the flat it found (135).
+const S485_BIKE: [f32; 3] = [4594.0, 135.3, 3778.0];
+
+/// free09's parked monster truck: its `machine.txt` spot and its nose (the map's `-z`).
+const S485_TRUCK: [f32; 3] = [4594.0, 135.0, 3838.0];
+
+/// One tick of the S485 ride, the port's: the truck awake, its place and velocity, and the bike's
+/// place and velocity.
+#[derive(Clone, Copy, Debug)]
+struct S485Tick {
+    awake: bool,
+    truck: Vf,
+    truck_vel: Vf,
+    bike: Vf,
+    bike_vel: Vf,
+    /// The rider wrecked on this tick.
+    wrecked: bool,
+}
+
+/// The port's ride of research/s484/truck.sh: recording2's bike moved to [`S485_BIKE`] with its
+/// velocities zeroed, the gas (Cross) held for `ticks` ticks, on free09 with its toys and path cars,
+/// and with `parked` free09's truck settled at its spot and in the riders' world
+/// ([`game_sim::car::Parked`], [`Sim::park_cars`]). `None` where the image or the disc is not in this
+/// worktree.
+fn s485_ride(ticks: usize, parked: bool) -> Option<Vec<S485Tick>> {
+    use game_sim::car::{Car, CarModel, Kind, Parked};
+    let image = private_dir("states").join("recording2.p2m2_SaveState.eeMemory.bin");
+    let Some(st) = SaveState::open_either(&image) else {
+        println!("no {}: S485's truck is unchecked", image.display());
+        return None;
+    };
+    let machine = {
+        let mut disc = game_render::disc::Disc::open_configured().ok()?;
+        let res = disc.res("machine.res").ok()?;
+        let kind = Kind::MonsterTruck;
+        let car = Car::read_bytes(&res.read(kind.phy()).ok()?, kind);
+        let model = CarModel::read(&res.read("monstertruck\\anim\\monstertruck.psg").ok()?).ok()?;
+        let rays = game_sim::track::Rays::parse(&res.read(kind.rays()).ok()?).ok()?;
+        let hull = game_sim::track::Mesh::parse(&res.read(kind.hull()).ok()?).ok()?;
+        (car, model, rays, hull)
+    };
+    let ran = in_the_track_with_toys(&st, "Tracks\\free09.res", FREERIDE_PHY, FREERIDE_MODEL, |world, _named, bike, traffic, col, _| {
+        let Ridden { tables, phy, mounts } = bike?;
+        let (kit, part, wrecks) = the_ragdoll_kit()?;
+        let c = st.rider_at(0x7a4)?;
+        let node = st.word(c + 0x254)?;
+        let (origin, forward) = (st.vf(node + 0xb0)?, st.vf(node + 0xa0)?);
+        let mut rider = Rider::new(&phy, mounts, origin, forward, Set::default());
+        rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+        rider.carries_ragdoll(Arc::new(kit));
+        rider.carries_bike_col(Arc::new(col?));
+        let mut sim = Sim::with_rider(0, tables, phy, rider);
+        sim.traffic = traffic;
+        let ride = &mut sim.rider.ride;
+        ride.place(origin, forward);
+        st.seed_ride(ride).expect("the bike");
+        st.seed_engine_state(ride).expect("the engine's state");
+        st.seed_levers(ride).expect("the levers");
+        // The script's one delta, from the vehicle's place to the spot, on every place the ride keeps.
+        let vp = st.vf(st.vehicle()? + 0x1b0)?;
+        let by: [f32; 3] = std::array::from_fn(|i| (f64::from(S485_BIKE[i]) - f64::from(vp.0[i])) as f32);
+        let moved = |v: Vf| Vf::new((F(v.x()) + F(by[0])).0, (F(v.y()) + F(by[1])).0, (F(v.z()) + F(by[2])).0, v.w());
+        ride.chassis.cofg_world = moved(ride.chassis.cofg_world);
+        ride.origin = moved(ride.origin);
+        for wheel in [&mut ride.front, &mut ride.rear] {
+            let w = &mut wheel.w;
+            w.mount_world = moved(w.mount_world);
+            w.probe_end_world = moved(w.probe_end_world);
+            w.contact_point = moved(w.contact_point);
+            w.load_point = moved(w.load_point);
+        }
+        ride.back.at = moved(ride.back.at);
+        // And its velocities zeroed, as the script zeroes the chassis' and the vehicle's.
+        ride.chassis.vel = Vf::ZERO;
+        ride.chassis.ang_vel = Vf::ZERO;
+        seed_bike_search_kept(&st, &mut sim, world);
+        if parked {
+            let (car, model, rays, hull) = machine.clone();
+            let at = Vf::new(S485_TRUCK[0], S485_TRUCK[1], S485_TRUCK[2], 1.0);
+            let t = &sim.tables.ride;
+            let truck = Parked::settled(
+                Arc::new(car),
+                &model,
+                game_sim::flight_search::Rays::of(&rays),
+                Arc::new(hull),
+                world,
+                at,
+                Vf::new(0.0, 0.0, -1.0, 0.0),
+                &t.acos,
+                &t.curve,
+            );
+            assert!(!truck.awake(), "the truck settled and asleep");
+            sim.park_cars(vec![truck]);
+        }
+        let mut out = Vec::new();
+        for _ in 0..ticks {
+            let fr = sim.tick_in(Input { buttons: 0x0040, stick: (0, 0) }, world);
+            let truck = sim.parked_cars.first().map(|p| (p.awake(), p.machine.body.position, p.machine.body.velocity));
+            let (awake, truck, truck_vel) = truck.unwrap_or((false, Vf::ZERO, Vf::ZERO));
+            let r = &sim.rider;
+            out.push(S485Tick { awake, truck, truck_vel, bike: r.ride.origin, bike_vel: r.ride.chassis.vel, wrecked: fr.wreck.is_some() });
+        }
+        Some(out)
+    });
+    match ran {
+        None => println!("no disc in this worktree: S485's truck is unchecked"),
+        Some(None) => println!("the disc lacks the bike, its collision or the ragdoll: S485's truck is unchecked"),
+        Some(Some(_)) => {}
+    }
+    ran.flatten()
+}
+
+/// S484's capture: per row the frame, the truck awake, its place and velocity, and the bike's place.
+fn s485_capture() -> Option<Vec<[f32; 11]>> {
+    let path = private_dir("capture").join("s484").join("ride1.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — S485's comment above says how it is recorded", path.display());
+        return None;
+    };
+    Some(
+        text.lines()
+            .skip(1)
+            .map(|l| {
+                let v: Vec<f32> = l.split(',').map(|c| c.parse().unwrap()).collect();
+                [v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[12], v[13], v[14]]
+            })
+            .collect(),
+    )
+}
+
+/// **S485: a bike ridden into free09's parked truck wakes it, pushes it, and it sleeps again, as the
+/// original's does** (S484's capture, `research/s484/truck.sh`).
+///
+/// The port's bike pulls away from the script's standstill ~4% slower than the original's (2 ft
+/// behind at the nose, two frames late), so the two are lined up on the strike: the tick the truck wakes.
+/// From there the port's truck takes vz 2.74 (the original's 2.77, the bike 1% slower), decays
+/// 1.74, 1.16, 0.77, 0.51, 0.34, 0.23, 0.15, 0.10 (theirs 1.75, 1.16, 0.77, 0.51, 0.34, 0.22, 0.14,
+/// 0.09), sleeps on the 9th tick after, as theirs, and has slid 0.201 ft (theirs 0.203). Both riders
+/// wreck on the strike and are put back ~90 ticks later. Not matched: the original's truck wakes twice
+/// more for a frame at rest (rows 68 and 70) without moving; the port's stays asleep.
+#[test]
+fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
+    let Some(cap) = s485_capture() else { return };
+    let Some(port) = s485_ride(240, true) else { return };
+    // Row r is the original after r - 1 frames (rows 0 and 1 are both the script's spot); port[i] is
+    // after i + 1 ticks.
+    let theirs = cap.iter().position(|r| r[1] != 0.0).expect("the original's truck wakes");
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    let lag = ours as i64 + 2 - theirs as i64;
+    println!("the truck wakes: port tick {}, the original's row {theirs} ({lag} late)", ours + 1);
+    assert!((0..=3).contains(&lag), "the port's bike reaches the truck {lag} frames after the original's");
+    for k in 0..12 {
+        let (p, r) = (&port[ours + k], &cap[theirs + k]);
+        println!(
+            "strike+{k}: awake {} / {}, vz {:.4} / {:.4}, z {:.4} / {:.4} (from rest), bike z {:.3} / {:.3}",
+            p.awake as u8,
+            r[1],
+            p.truck_vel.z(),
+            r[7],
+            p.truck.z() - port[0].truck.z(),
+            r[4] - cap[0][4],
+            p.bike.z(),
+            r[10],
+        );
+    }
+    // The bike stops dead at the nose, and its rider wrecks there.
+    let before = port[ours - 1].bike_vel.z();
+    assert!(before > 50.0, "the bike strikes at {before} ft/s");
+    assert!(port[ours].bike_vel.z() < 5.0, "the bike rides on at {} ft/s", port[ours].bike_vel.z());
+    assert!(port[ours].wrecked, "the rider wrecks on the strike");
+    // The truck's push and its decay, frame for frame.
+    for k in 0..9 {
+        let (got, want) = (port[ours + k].truck_vel.z(), cap[theirs + k][7]);
+        assert!((got - want).abs() < 0.05, "strike+{k}: the truck's vz {got}, the original's {want}");
+        assert!(port[ours + k].awake, "strike+{k}: the truck asleep");
+    }
+    // It sleeps on the 9th frame, as the original's.
+    let ours_slept = port[ours..].iter().position(|p| !p.awake);
+    let theirs_slept = cap[theirs..].iter().position(|r| r[1] == 0.0);
+    assert_eq!(ours_slept, theirs_slept, "the truck sleeps that many frames after the strike");
+    assert!(port[ours + 20..].iter().all(|p| !p.awake), "the truck stays asleep");
+    // Where it slid to: 0.2 ft north, the other axes still.
+    let last = port.last().unwrap();
+    let rest = cap.last().unwrap();
+    let slid = last.truck.z() - port[0].truck.z();
+    let want = rest[4] - cap[0][4];
+    println!("slid {slid} ft, the original's {want}");
+    assert!((slid - want).abs() < 0.02, "the truck slid {slid} ft, the original's {want}");
+    assert!((last.truck.x() - port[0].truck.x()).abs() < 0.03 && (last.truck.y() - port[0].truck.y()).abs() < 0.01);
+    // The rider is put back short of the nose about when the original's is.
+    let back = |z: Vec<f32>| z.windows(2).position(|w| w[1] < w[0] - 5.0).map(|t| t + 1);
+    let ours_back = back(port.iter().map(|p| p.bike.z()).collect()).expect("the port's rider put back");
+    let theirs_back = back(cap.iter().map(|r| r[10]).collect()).expect("the original's rider put back");
+    println!("put back: port tick {}, the original's row {theirs_back}", ours_back + 1);
+    assert!((ours_back as i64 + 2 - theirs_back as i64 - lag).abs() <= 2, "put back at port tick {}", ours_back + 1);
+}
+
+/// S485's control: without the parked truck the same ride goes on through its spot.
+#[test]
+fn without_the_parked_truck_the_bike_rides_through_its_spot() {
+    let Some(port) = s485_ride(80, false) else { return };
+    let z = port.last().unwrap().bike.z();
+    assert!(z > S485_TRUCK[2] + 10.0, "the bike stopped at z {z} with nothing parked");
+    assert!(port.iter().all(|p| !p.wrecked), "the bike wrecked with nothing parked");
+}
