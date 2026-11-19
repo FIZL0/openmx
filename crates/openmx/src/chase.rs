@@ -230,6 +230,39 @@ pub fn slow_fast_layout(bytes: &[u8]) -> bool {
     ini.names().iter().any(|n| ini.section(n).float("SlowFollowDistance").is_some())
 }
 
+/// The quad's presets for MX vs. ATV Untamed's follow camera (MD251): `Cam\FC_ATVDefault.pb`'s
+/// (`pb`) where it is in the slow/fast layout ([`slow_fast_layout`]), read as SLUS-21701's reader
+/// reads them ([`game_sim::camera::UntamedPreset::read`], its `4x3/1p` screen only). None for any
+/// other file.
+pub fn untamed_presets(pb: Option<&[u8]>) -> Vec<game_sim::camera::UntamedPreset> {
+    let Some(ini) = pb.map(game_sim::phy::Ini::parse_bytes) else { return Vec::new() };
+    match game_sim::camera::UntamedPreset::is_slow_fast(&ini) {
+        true => game_sim::camera::UntamedPreset::read(&ini),
+        false => Vec::new(),
+    }
+}
+
+/// One frame of the quad's Untamed follow camera (MD251). The shell keeps the quad's MX Unleashed
+/// [`game_sim::camera::Race`] (`race`, on [`game_sim::camera::UntamedPreset::stand_in`]s of the same
+/// presets in the same order) for what the shell already does to a follow camera — the preset
+/// cycle, the look-back, the stick's yaw and pitch, a snap — and this hands those to `cam` and steps
+/// it as SLUS-21701 steps its camera ([`game_sim::camera::UntamedFollow::update`]). The free look's
+/// yaw goes back wrapped, as the original keeps it.
+pub fn untamed_follow(
+    cam: &mut game_sim::camera::UntamedFollow,
+    race: &mut game_sim::camera::Race,
+    dt: F,
+    rider: &Ridden,
+    scene: &mut impl game_sim::camera::Surface,
+) -> game_sim::camera::View {
+    cam.set_preset(race.cam.preset);
+    (cam.user_yaw, cam.user_pitch) = (race.cam.user_yaw, race.cam.user_pitch);
+    cam.snap |= std::mem::take(&mut race.cam.snap);
+    let view = cam.update(dt, rider, scene);
+    race.cam.user_yaw = cam.user_yaw;
+    view
+}
+
 /// Which of [`mod_presets`]' files one of MX vs. ATV's five cars reads (MD82d): its kind's.
 pub fn mxvatv_car_machine(m: game_sim::car::MxvatvMachine) -> ModMachine {
     use game_sim::car::MxvatvMachine as M;

@@ -2129,6 +2129,536 @@ impl ModFollow {
     }
 }
 
+// --- MX vs. ATV Untamed's follow camera (MD251) -----------------------------------------------------
+
+/// How far up the quad's up row Untamed's camera aims, before the preset's offset: the target
+/// block's `+0x24`, 3.0 in MD147's spawn image. Its `+0x28`, a step along the forward row, is 0
+/// there, and is left out.
+pub const UNTAMED_TARGET_HEIGHT: f32 = 3.0;
+/// Below this speed the camera's frame turns with the quad's forward row; at it or above, with the
+/// velocity.
+const UNTAMED_HEADING_FROM_VEL_SPEED: f32 = 20.0;
+/// The least share of the heading's climb a preset's `AngleXAffectedByHills` keeps (`0x38d1b717`).
+const UNTAMED_LEAST_HILLS: f32 = 0.0001;
+/// The pitch limit either way (`0x3fbde44d`), a hair under MX Unleashed's [`PITCH_LIMIT`].
+const UNTAMED_PITCH_LIMIT: f32 = 1.4835297;
+/// Past this follow distance the eye orbits the target and the look-at runs on the straight spring;
+/// at it or nearer (the look-back camera's −10 ft), the other way round.
+const UNTAMED_ORBIT_DISTANCE: f32 = 3.0;
+/// How far over the ground under it the eye keeps (`FUN_003a9e80`).
+pub const UNTAMED_EYE_FLOOR: f32 = 2.5;
+/// The field of view a preset that blends to none is given (`0x429a0000`).
+const UNTAMED_NO_FOV: f32 = 77.0;
+
+/// One end of an Untamed preset's blend: what it asks for at or below its slow speed, or at or above
+/// its fast one. A preset's [`UntamedPreset::blend`] is one of these too, between the two, with
+/// `speed` the speed it was blended at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pace {
+    /// The pitch, in radians (the file says degrees).
+    pub angle_x: F,
+    /// How far behind the target point the eye sits.
+    pub follow_distance: F,
+    /// How far ahead of the target point the look-at runs.
+    pub look_ahead_distance: F,
+    /// The field of view, in degrees.
+    pub fov: F,
+    /// The speed this end is reached at.
+    pub speed: F,
+}
+
+/// One preset of MX vs. ATV Untamed's follow camera, as SLUS-21701's reader (`FUN_001bbaa0`) lays
+/// it out: a Slow/Fast pair the camera blends between by speed, and four tightnesses for its two
+/// springs, on the ground and in the air.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UntamedPreset {
+    /// `Name`, the section's own name when the file has none.
+    pub name: String,
+    /// The yaw the eye sits at round the target, in radians; a half turn is behind the quad.
+    pub angle_y: F,
+    /// What the preset asks for slow.
+    pub slow: Pace,
+    /// What it asks for fast.
+    pub fast: Pace,
+    /// The eye spring's stiffness with a wheel down.
+    pub on_ground_follow_tightness: F,
+    /// The look-at spring's with a wheel down.
+    pub on_ground_look_ahead_tightness: F,
+    /// The eye spring's in the air.
+    pub in_air_follow_tightness: F,
+    /// The look-at spring's in the air.
+    pub in_air_look_ahead_tightness: F,
+    /// How much of the heading's climb tilts the camera's frame.
+    pub angle_x_affected_by_hills: F,
+    /// Whether the camera button cycles through this preset.
+    pub cycle_thru_this_preset: bool,
+    /// Whether the springs run; a preset with this clear snaps every frame.
+    pub filter_this_preset: bool,
+    /// The look-back camera.
+    pub is_look_back_cam: bool,
+    /// Read under `Swing`, which no file spells so (they say `CameraSwing`); nothing in the frame
+    /// reads it.
+    pub swing: F,
+    /// `LookSwing`; nothing in the frame reads it.
+    pub look_swing: F,
+    /// Where the camera aims off the target point, in the quad's own axes: `x` sideways, `y` up,
+    /// `z` forward.
+    pub offset_from_body_point: Vf,
+    /// The two ends blended at the last speed ([`UntamedPreset::blend_at`]).
+    pub blend: Pace,
+}
+
+impl UntamedPreset {
+    /// Read one of Untamed's follow-camera files (`Cam\FC_ATVDefault.pb`, and the cars'
+    /// `Cam\FC_*Default.pb`) as SLUS-21701's reader does: the sections `[4x3/1p/<n>]` from one up
+    /// for as long as they are there. The reader asks for no other screen shape or viewport.
+    ///
+    /// Each pair's default is the older single key of the same meaning (`AngleX` for both pitches,
+    /// `MinFollowingDistance` and `MaxFollowingDistance` for the two distances, `FOV`,
+    /// `LookAheadDistance` for the fast look-ahead), and those default to 15, 15, 25, 15 and 15. The
+    /// slow look-ahead and slow speed default to 0, the fast speed to 100, the tightnesses to 16,
+    /// 32, 10 and 20, `AngleY` to 180 and the two flags to on.
+    pub fn read(ini: &Ini) -> Vec<UntamedPreset> {
+        let names = ini.names();
+        let has = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        (1..)
+            .map(|n| format!("4x3/1p/{n}"))
+            .take_while(|s| has(s))
+            .map(|s| UntamedPreset::one(ini, &s))
+            .collect()
+    }
+
+    /// Whether a camera file is in this layout: its first preset has a `SlowFollowDistance`.
+    pub fn is_slow_fast(ini: &Ini) -> bool {
+        ini.section("4x3/1p/1").float("SlowFollowDistance").is_some()
+    }
+
+    fn one(ini: &Ini, name: &str) -> UntamedPreset {
+        let s = ini.section(name);
+        let deg = F(DEG_TO_RAD);
+        let angle_x = s.float_or("AngleX", F(15.0));
+        let min = s.float_or("MinFollowingDistance", F(15.0));
+        let max = s.float_or("MaxFollowingDistance", F(25.0));
+        let fov = s.float_or("FOV", F(15.0));
+        let look = s.float_or("LookAheadDistance", F(15.0));
+        let mut p = UntamedPreset {
+            name: s.text("Name").unwrap_or(name).to_string(),
+            angle_y: s.float_or("AngleY", F(180.0)) * deg,
+            slow: Pace {
+                angle_x: s.float_or("SlowAngleX", angle_x) * deg,
+                follow_distance: s.float_or("SlowFollowDistance", min),
+                look_ahead_distance: s.float_or("SlowLookAheadDistance", F::ZERO),
+                fov: s.float_or("SlowFov", fov),
+                speed: s.float_or("SlowSpeed", F::ZERO),
+            },
+            fast: Pace {
+                angle_x: s.float_or("FastAngleX", angle_x) * deg,
+                follow_distance: s.float_or("FastFollowDistance", max),
+                look_ahead_distance: s.float_or("FastLookAheadDistance", look),
+                fov: s.float_or("FastFov", fov),
+                speed: s.float_or("FastSpeed", F(100.0)),
+            },
+            on_ground_follow_tightness: s.float_or("OnGroundFollowTightness", F(16.0)),
+            on_ground_look_ahead_tightness: s.float_or("OnGroundLookAheadTightness", F(32.0)),
+            in_air_follow_tightness: s.float_or("InAirFollowTightness", F(10.0)),
+            in_air_look_ahead_tightness: s.float_or("InAirLookAheadTightness", F(20.0)),
+            angle_x_affected_by_hills: s.float_or("AngleXAffectedByHills", F::ZERO),
+            cycle_thru_this_preset: s.flag("CycleThruThisPreset", true),
+            filter_this_preset: s.flag("FilterThisPreset", true),
+            is_look_back_cam: s.flag("IsLookBackCam", false),
+            swing: s.float_or("Swing", F::ZERO),
+            look_swing: s.float_or("LookSwing", F::ZERO),
+            offset_from_body_point: s.vector("OffsetFromBodyPoint", Vf::VF0),
+            blend: Pace::default(),
+        };
+        p.blend_at(F::ZERO);
+        p
+    }
+
+    /// Blend the two ends at `speed` into [`UntamedPreset::blend`] (`FUN_001bb4c0`): all slow at or
+    /// below the slow speed, all fast at or above the fast one, a straight line between.
+    pub fn blend_at(&mut self, speed: F) {
+        let (slow, fast) = (self.slow, self.fast);
+        let (a, b) = if speed <= slow.speed {
+            (F::ONE, F::ZERO)
+        } else if speed >= fast.speed {
+            (F::ZERO, F::ONE)
+        } else {
+            let span = fast.speed - slow.speed;
+            ((fast.speed - speed) / span, (speed - slow.speed) / span)
+        };
+        let mix = |s: F, f: F| a * s + b * f;
+        self.blend = Pace {
+            angle_x: mix(slow.angle_x, fast.angle_x),
+            follow_distance: mix(slow.follow_distance, fast.follow_distance),
+            look_ahead_distance: mix(slow.look_ahead_distance, fast.look_ahead_distance),
+            fov: mix(slow.fov, fast.fov),
+            speed,
+        };
+    }
+
+    /// The preset as one of MX Unleashed's, for code that cycles presets and finds the look-back
+    /// one by those ([`Follow`]): its name, flags, angles, offset and slow numbers, with the slow and
+    /// fast distances and fields of view as the limits.
+    pub fn stand_in(&self) -> Preset {
+        let (slow, fast) = (self.slow, self.fast);
+        Preset {
+            name: self.name.clone(),
+            offset_from_body_point: self.offset_from_body_point,
+            angle_y: self.angle_y,
+            angle_x: slow.angle_x,
+            following_distance: slow.follow_distance,
+            fov: slow.fov,
+            cycle_thru_this_preset: self.cycle_thru_this_preset,
+            filter_this_preset: self.filter_this_preset,
+            look_ahead_distance: slow.look_ahead_distance,
+            is_look_back_cam: self.is_look_back_cam,
+            camera_swing: self.swing,
+            look_swing: self.look_swing,
+            min_following_distance: slow.follow_distance.min(fast.follow_distance),
+            max_following_distance: slow.follow_distance.max(fast.follow_distance),
+            min_fov: slow.fov.min(fast.fov),
+            max_fov: slow.fov.max(fast.fov),
+            ..Preset::default()
+        }
+    }
+}
+
+/// One of the Untamed camera's two springs, as the filter lays one out: the goal it is pulled to,
+/// where it is, how fast it is moving, and the target point it was last stepped round.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spring {
+    pub goal: Vf,
+    pub pos: Vf,
+    pub vel: Vf,
+    pub prev: Vf,
+}
+
+impl Spring {
+    /// On the goal at once, still (`FUN_003a9e50`).
+    fn snap(&mut self, origin: Vf) {
+        self.pos = self.goal;
+        self.vel = Vf::ZERO;
+        self.prev = origin;
+    }
+
+    /// The straight spring (`FUN_003aa690`): a damped spring on the position, in `ceil(k / 3)`
+    /// steps, whose goal is carried from where the target point was to where it is over the steps,
+    /// and whose damping pulls the velocity towards the target point's own.
+    fn straight(&mut self, k: F, dt: F, origin: Vf) {
+        let k2 = (k * k) / 4.0;
+        let n = ceil(k / 3.0);
+        let d = origin.merge(Dest::XYZ, origin.sub(self.prev));
+        let per = scale(d, F(vu::div(1.0, n.0)));
+        let mut goal = self.goal.merge(Dest::XYZ, self.goal.sub(d));
+        let carried = scale(d, F(vu::div(1.0, dt.0)));
+        let h = dt / n;
+        for _ in 0..n.to_i32() {
+            let pull = scale(scale(scale(goal.sub(self.pos), k2), F(0.5)), h);
+            self.vel = add3(self.vel, pull);
+            self.vel = add3(self.vel, scale(scale(self.vel.sub(carried), -k), h));
+            self.pos = add3(self.pos, scale(self.vel, h));
+            goal = add3(goal, per);
+        }
+        self.prev = origin;
+    }
+
+    /// The orbit spring (`FUN_003aa000`): the same spring on distance, yaw and pitch round the
+    /// target point, so the eye swings round the quad rather than cutting across. The position is
+    /// stepped by the mean of the old and new rates, and the yaw goes the short way round.
+    fn orbit(&mut self, k: F, dt: F, origin: Vf, origin_vel: Vf) {
+        let k2 = (k * k) / 4.0;
+        let n = ceil(k / 3.0);
+        let h = dt / n;
+        let rel = self.pos.sub(self.prev);
+        let mut s = spherical(rel);
+        let g = spherical(self.goal.sub(origin));
+        let mut rate = spherical_rate(rel, self.vel.sub(origin_vel));
+        let half = h / 2.0;
+        for _ in 0..n.to_i32() {
+            let mut diff = [g[0] - s[0], g[1] - s[1], g[2] - s[2]];
+            let turn = diff[1] - rate[1] / 4.0;
+            if turn > PI {
+                diff[1] = diff[1] - TWO_PI;
+            } else if turn < -PI {
+                diff[1] = diff[1] + TWO_PI;
+            }
+            let new: [F; 3] = core::array::from_fn(|i| rate[i] + (diff[i] * k2 + rate[i] * -k) * h);
+            for i in 0..3 {
+                s[i] = s[i] + (rate[i] + new[i]) * half;
+            }
+            rate = new;
+        }
+        self.pos = cartesian(s).add(origin);
+        self.vel = cartesian_rate(s, rate).add(origin_vel);
+        self.prev = origin;
+    }
+}
+
+/// `ceilf` over the FPU: the whole number at or above `x`.
+fn ceil(x: F) -> F {
+    let t = F(fpu::from_i32(x.to_i32()));
+    if t < x { t + 1.0 } else { t }
+}
+
+/// Distance, yaw and pitch of `v` (`FUN_00131c60`): yaw `atan2(z, x)`, pitch `asin(y / r)`, both
+/// zero for no length.
+fn spherical(v: Vf) -> [F; 3] {
+    let (x, y, z) = (F(v.x()), F(v.y()), F(v.z()));
+    let r = (z * z + y * y + x * x).sqrt();
+    if r > 0.0 {
+        [r, F(libm::atan2f(z.0, x.0)), F(libm::asinf((y / r).0))]
+    } else {
+        [r, F::ZERO, F::ZERO]
+    }
+}
+
+/// A velocity `v` at `rel` as rates of distance, yaw and pitch (`FUN_00131e40`).
+fn spherical_rate(rel: Vf, v: Vf) -> [F; 3] {
+    let (x, y, z) = (F(rel.x()), F(rel.y()), F(rel.z()));
+    let (vx, vy, vz) = (F(v.x()), F(v.y()), F(v.z()));
+    let len = (z * z + y * y + x * x).sqrt();
+    let speed = || (vz * vz + vy * vy + vx * vx).sqrt();
+    if len <= 0.01 {
+        return [speed(), F::ZERO, F::ZERO];
+    }
+    let n = normalize(rel);
+    let radial = vz * F(n.z()) + vy * F(n.y()) + vx * F(n.x());
+    let p = v.sub(scale(n, radial));
+    let (px, py, pz) = (F(p.x()), F(p.y()), F(p.z()));
+    let flat = x * x + z * z;
+    let turning = x * pz - z * px;
+    let yaw = if turning == 0.0 { F::ZERO } else { turning / flat };
+    let along = x * px + z * pz;
+    let level = if along != 0.0 { (along * along) / flat } else { F::ZERO };
+    let sum = py * py + level + 0.0;
+    let pitch = if sum == 0.0 {
+        if py == 0.0 && (px != 0.0 || pz != 0.0) && x == 0.0 && z == 0.0 {
+            let f = speed() / len;
+            if y > 0.0 { -f } else { f }
+        } else {
+            F::ZERO
+        }
+    } else {
+        let f = sum.sqrt() / len;
+        if py < 0.0 { -f } else { f }
+    };
+    [radial, yaw, pitch]
+}
+
+/// Distance, yaw and pitch back to a point (`FUN_00131bd0`), `w` one.
+fn cartesian(s: [F; 3]) -> Vf {
+    let (cp, cy) = (F(libm::cosf(s[2].0)), F(libm::cosf(s[1].0)));
+    let x = cp * s[0] * cy;
+    let y = s[0] * F(libm::sinf(s[2].0));
+    let z = cp * s[0] * F(libm::sinf(s[1].0));
+    Vf::new(x.0, y.0, z.0, 1.0)
+}
+
+/// Rates of distance, yaw and pitch at `s` back to a velocity (`FUN_00131cf0`), `w` zero.
+fn cartesian_rate(s: [F; 3], rate: [F; 3]) -> Vf {
+    let (cy, cp) = (F(libm::cosf(s[1].0)), F(libm::cosf(s[2].0)));
+    let (sy, sp) = (F(libm::sinf(s[1].0)), F(libm::sinf(s[2].0)));
+    let pitching = rate[2] * s[0];
+    let turning = cp * rate[1] * s[0];
+    let lift = -(sp * pitching);
+    let a = Vf::new((cp * rate[0] * cy).0, (rate[0] * sp).0, (cp * rate[0] * sy).0, 0.0);
+    let b = Vf::new((-(turning * sy)).0, 0.0, (turning * cy).0, 0.0);
+    let c = Vf::new((lift * cy).0, (cp * pitching).0, (lift * sy).0, 0.0);
+    let v = a.add(b).add(c);
+    Vf::new(v.x(), v.y(), v.z(), 0.0)
+}
+
+/// The look-at frame Untamed builds (`FUN_00131aa0`): rows side, up, forward and the point, with
+/// the up row squared to the forward one and both normalised through VU0.
+fn untamed_frame(point: Vf, forward: Vf, up: Vf) -> [Vf; 4] {
+    let flat = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 0.0);
+    let side = cross(up, forward);
+    let up = flat(normalize(cross(forward, side)));
+    let forward = flat(normalize(forward));
+    let side = flat(cross(up, forward));
+    [side, up, forward, Vf::new(point.x(), point.y(), point.z(), 1.0)]
+}
+
+/// A point in a frame's own axes, in the world: the point row plus each axis row times its lane.
+fn untamed_place(m: &[Vf; 4], local: Vf) -> Vf {
+    use ps2_float::Field;
+    let acc = Vf::madd(m[3], m[0], local.bc(Field::X));
+    let acc = Vf::madd(acc, m[1], local.bc(Field::Y));
+    m[3].merge(Dest::XYZ, Vf::madd(acc, m[2], local.bc(Field::Z)))
+}
+
+/// `point` lifted to [`UNTAMED_EYE_FLOOR`] over the ground under it.
+fn untamed_floor(point: &mut Vf, scene: &mut impl Surface) {
+    if !scene.has_ground() {
+        return;
+    }
+    let least = F(scene.on_surface(*point).y()) + UNTAMED_EYE_FLOOR;
+    if F(point.y()) < least {
+        point[1] = least.0;
+    }
+}
+
+/// Where one frame of the Untamed camera wants the eye and the look-at, before the springs, and how
+/// the springs are to run (`FUN_004b52b0`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UntamedGoal {
+    /// The point the camera is built round: the quad's point, [`UNTAMED_TARGET_HEIGHT`] up its up
+    /// row, plus the preset's offset. Both springs are stepped round it.
+    pub target: Vf,
+    pub eye: Vf,
+    pub look: Vf,
+    pub fov: F,
+    /// The eye spring's stiffness.
+    pub follow_tightness: F,
+    /// The look-at spring's.
+    pub look_tightness: F,
+    /// Whether the eye runs on the orbit spring and the look-at on the straight one; the other way
+    /// round when not.
+    pub eye_orbits: bool,
+    /// Whether the springs run at all.
+    pub filter: bool,
+}
+
+/// MX vs. ATV Untamed's follow camera (MD251), as SLUS-21701 runs it for the quad.
+///
+/// Each frame it blends the preset's Slow and Fast numbers by the quad's speed, builds a frame at the
+/// target point that faces the quad's forward row (its velocity at 20 ft/s or faster), with that
+/// heading's climb scaled by the preset's `AngleXAffectedByHills` and world up as up, and puts the
+/// eye `follow distance` back along the preset's yaw and pitch in that frame and the look-at `look
+/// ahead` along its forward row. On the ground the pitch is scaled by how upright the quad is. Two
+/// springs then chase those goals: past 3 ft of follow distance the eye on the orbit spring round
+/// the target point and the look-at on the straight one, with the preset's ground or air
+/// tightnesses.
+///
+/// What is not here: the filter's two world sweeps (`FUN_003ab3a0`, `FUN_003ab800`), which push
+/// the eye out of walls and props; only the eye's floor over the ground is kept. The two boost bits
+/// that stiffen the springs (filter bytes `+0x28`/`+0x29`) are clear in every image read and are left
+/// out, and so is the pad's field-of-view zoom (`+0xa4`, zero).
+#[derive(Clone, Debug, Default)]
+pub struct UntamedFollow {
+    pub presets: Vec<UntamedPreset>,
+    /// Which preset is on.
+    pub current: usize,
+    /// The free look's yaw and pitch (camera `+0x9c`, `+0xa0`).
+    pub user_yaw: F,
+    pub user_pitch: F,
+    /// The camera's own filter switch (`+0x5c`), set in every image read.
+    pub filter: bool,
+    /// Snap the springs to their goals on the next frame.
+    pub snap: bool,
+    /// The look-at's spring.
+    pub look: Spring,
+    /// The eye's.
+    pub eye: Spring,
+}
+
+impl UntamedFollow {
+    /// A camera over `presets`, on the first, that snaps on its first frame.
+    pub fn new(presets: Vec<UntamedPreset>) -> Self {
+        UntamedFollow { presets, filter: true, snap: true, ..Default::default() }
+    }
+
+    /// Put preset `index` on; the springs snap to it on the next frame.
+    pub fn set_preset(&mut self, index: usize) {
+        if index != self.current {
+            self.current = index;
+            self.snap = true;
+        }
+    }
+
+    /// This frame's goals (`FUN_004b52b0`), blending the preset at the quad's speed and wrapping the
+    /// free look's yaw as the original does.
+    pub fn goal(&mut self, rider: &Ridden) -> UntamedGoal {
+        let t = &rider.target;
+        let speed = Acc::mula(F(t.vel.x()), F(t.vel.x()))
+            .madda(F(t.vel.y()), F(t.vel.y()))
+            .madd(F(t.vel.z()), F(t.vel.z()))
+            .sqrt();
+        let index = self.current.min(self.presets.len().saturating_sub(1));
+        let Some(p) = self.presets.get_mut(index) else {
+            return UntamedGoal::default();
+        };
+        p.blend_at(speed);
+        let p = &self.presets[index];
+
+        let off = p.offset_from_body_point;
+        let mut offset = add3(scale(t.forward, F(off.z())), scale(t.up, F(off.y())));
+        if off.x() != 0.0 {
+            offset = add3(offset, scale(cross(t.up, t.forward), F(off.x())));
+        }
+        let target = add3(add3(t.body_point, scale(t.up, F(UNTAMED_TARGET_HEIGHT))), offset);
+
+        let attitude = untamed_frame(target, t.forward, t.up);
+        let mut heading = if speed < UNTAMED_HEADING_FROM_VEL_SPEED {
+            t.forward
+        } else {
+            normalize(Vf::new(t.vel.x(), t.vel.y(), t.vel.z(), 0.0))
+        };
+        heading[1] = (F(heading.y()) * p.angle_x_affected_by_hills.max(F(UNTAMED_LEAST_HILLS))).0;
+        let frame = untamed_frame(target, heading, UP);
+
+        let upright = if rider.airborne { F::ONE } else { F(attitude[1].y()) };
+        let pitch = (p.blend.angle_x + self.user_pitch).max(F(-UNTAMED_PITCH_LIMIT)).min(F(UNTAMED_PITCH_LIMIT))
+            * upright;
+        let wrap = |a: F| wrap_half_turn(F(libm::fmodf(a.0, TWO_PI)));
+        let user_yaw = wrap(self.user_yaw);
+        let yaw = wrap(p.angle_y - user_yaw);
+        let d = p.blend.follow_distance;
+        let (sp, cp) = (F(libm::sinf(pitch.0)), F(libm::cosf(pitch.0)));
+        let (sy, cy) = (F(libm::sinf(yaw.0)), F(libm::cosf(yaw.0)));
+        let eye = untamed_place(&frame, Vf::new((d * (cp * sy)).0, (d * sp).0, (d * (cp * cy)).0, 1.0));
+        let ahead = (p.blend.look_ahead_distance * (F::ONE - (self.user_pitch / PI).abs()))
+            * (F::ONE - (user_yaw / PI).abs());
+        let look = untamed_place(&frame, Vf::new(0.0, 0.0, ahead.0, 1.0));
+
+        let fov = if p.blend.fov == 0.0 { F(UNTAMED_NO_FOV) } else { p.blend.fov };
+        let (follow_tightness, look_tightness) = if rider.airborne {
+            (p.in_air_follow_tightness, p.in_air_look_ahead_tightness)
+        } else {
+            (p.on_ground_follow_tightness, p.on_ground_look_ahead_tightness)
+        };
+        let goal = UntamedGoal {
+            target: Vf::new(target.x(), target.y(), target.z(), 0.0),
+            eye,
+            look,
+            fov,
+            follow_tightness,
+            look_tightness,
+            eye_orbits: d > UNTAMED_ORBIT_DISTANCE,
+            filter: p.filter_this_preset && self.filter,
+        };
+        self.user_yaw = user_yaw;
+        goal
+    }
+
+    /// One frame (`FUN_004b52b0` then the filter, `FUN_003aae40`): the goals, the eye's goal kept
+    /// over the ground, the springs (or a snap), and the eye kept over the ground again.
+    pub fn update(&mut self, dt: F, rider: &Ridden, scene: &mut impl Surface) -> View {
+        let goal = self.goal(rider);
+        self.look.goal = goal.look;
+        self.eye.goal = goal.eye;
+        untamed_floor(&mut self.eye.goal, scene);
+        let origin = goal.target;
+        if !goal.filter || self.snap {
+            self.look.snap(origin);
+            self.eye.snap(origin);
+            self.snap = false;
+        } else {
+            let carried = Vf::new(rider.target.vel.x(), rider.target.vel.y(), rider.target.vel.z(), 0.0);
+            if goal.eye_orbits {
+                self.eye.orbit(goal.follow_tightness, dt, origin, carried);
+                self.look.straight(goal.look_tightness, dt, origin);
+            } else {
+                self.eye.straight(goal.follow_tightness, dt, origin);
+                self.look.orbit(goal.look_tightness, dt, origin, carried);
+            }
+        }
+        untamed_floor(&mut self.eye.pos, scene);
+        View { position: self.eye.pos, look_at: self.look.pos, fov: goal.fov }
+    }
+}
+
 // --- the thrill camera (P157) ----------------------------------------------------------------------
 
 /// How fast the rider has to be going, the length of the target block's velocity in feet a second,

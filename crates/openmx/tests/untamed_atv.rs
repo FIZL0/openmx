@@ -159,12 +159,12 @@ fn the_untamed_quad_says_its_cameras_engine_and_particles_are_the_packs() {
     }
     let switched = tape("own.tape", 130, &["30 atv"]);
     let Some(said) = ride(130, &switched, &["--atv", "atv_Race250P@untamed_atv"]) else { return };
-    // Its camera: FC_ATVDefault.pb.bpb is in Untamed's slow/fast layout, which the follow camera does
-    // not read, so FC_ATV.ini(.bpb)'s presets, in SLUS-21104's layout, starting on the first.
-    assert!(said.contains("atv: untamed_atv's Cam\\FC_ATVDefault.pb is in MX vs. ATV Untamed's slow/fast layout, "), "\n{said}");
+    // Its camera (MD251): FC_ATVDefault.pb.bpb's slow/fast presets on Untamed's own follow camera,
+    // its 4x3/1p screen's nine, starting on the first, Normal Camera.
     let camera = line(&said, "atv: untamed_atv's camera, ");
-    assert!(camera.starts_with("atv: untamed_atv's camera, 12 presets in Cam\\FC_ATV.ini: RaceCam1, RaceCam2, "), "{camera}");
-    assert_eq!(line(&said, "atv: its camera starts on"), "atv: its camera starts on RaceCam1, 12 presets in Cam\\FC_ATV.ini");
+    let want = "atv: untamed_atv's camera, 9 presets in Cam\\FC_ATVDefault.pb, MX vs. ATV Untamed's slow/fast follow camera: NormalCamera, CloseCamera, ";
+    assert!(camera.starts_with(want), "{camera}");
+    assert_eq!(line(&said, "atv: its camera starts on"), "atv: its camera starts on NormalCamera, 9 presets in Cam\\FC_ATVDefault.pb");
 
     let engine = line(&said, "atv: untamed_atv's engine, ");
     assert!(!said.contains("atv: untamed_atv's engine: "), "a sound not read:\n{said}");
