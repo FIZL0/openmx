@@ -51,6 +51,16 @@ impl Sprites {
         pass.draw(0..6, 0..self.count);
         true
     }
+
+    /// One sprite with the pipeline, whatever this frame holds (P377): drawn once at the load, so a
+    /// ride's first particle is not the pipeline's first draw.
+    pub(super) fn warm(&self, pass: &mut wgpu::RenderPass<'_>, view_bind: &wgpu::BindGroup, offset: &[u32]) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, view_bind, offset);
+        pass.set_bind_group(1, &self.bind, &[]);
+        pass.set_vertex_buffer(0, self.buffer.slice(..std::mem::size_of::<Sprite>() as u64));
+        pass.draw(0..6, 0..1);
+    }
 }
 
 impl Renderer {

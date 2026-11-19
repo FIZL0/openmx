@@ -54,6 +54,19 @@ impl Glows {
         }
         draws
     }
+
+    /// One degenerate triangle with each pipeline (P377): drawn once at the load, so a ride's first
+    /// glow is not a pipeline's first draw.
+    pub(super) fn warm(&self, pass: &mut wgpu::RenderPass<'_>, view_bind: &wgpu::BindGroup, offset: &[u32]) {
+        let Some(bind) = self.binds.last() else { return };
+        for pipeline in [&self.blended, &self.added] {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, view_bind, offset);
+            pass.set_bind_group(1, bind, &[]);
+            pass.set_vertex_buffer(0, self.buffer.slice(..));
+            pass.draw(0..3, 0..1);
+        }
+    }
 }
 
 impl Renderer {

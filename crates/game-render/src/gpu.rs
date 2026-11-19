@@ -275,6 +275,23 @@ struct PipelineKey {
     ghost: bool,
 }
 
+impl PipelineKey {
+    /// Its bit among the pipelines drawn with (P377): 12 kinds.
+    fn bit(self) -> u32 {
+        self.blend as u32 * 4 + u32::from(self.depth_write) * 2 + u32::from(self.ghost)
+    }
+
+    /// As a log line names it: `alpha, no depth, ghost`.
+    fn name(self) -> String {
+        let blend = match self.blend {
+            Blend::Opaque => "opaque",
+            Blend::Alpha => "alpha",
+            Blend::Add => "additive",
+        };
+        format!("{blend}{}{}", if self.depth_write { "" } else { ", no depth" }, if self.ghost { ", ghost" } else { "" })
+    }
+}
+
 /// What makes two materials one material on the GPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct MaterialKey {
@@ -1043,6 +1060,9 @@ pub struct Drawn {
     pub upload_time: std::time::Duration,
     /// What handing the frame's commands to the GPU took on the CPU (P342).
     pub submit_time: std::time::Duration,
+    /// The pipelines this frame drew with for the first time (P377), named: a first draw costs a
+    /// phone's driver more than the ones after, so a ride's should all be in its warm frame.
+    pub first_drawn: Vec<String>,
 }
 
 impl Drawn {
@@ -1176,6 +1196,8 @@ pub struct Renderer {
     /// [`Renderer::render_over`] is drawing (P213): the views' actors alone, over what the target
     /// already shows.
     over: bool,
+    /// The pipelines drawn with so far, one bit each ([`Renderer::note_drawn`], P377).
+    drawn_kinds: std::sync::atomic::AtomicU64,
     /// How far away the props and actors are taken to be when their level of detail is picked, as a
     /// multiple of how far they are (P223, opentennis's B364 mesh detail): 1 is the disc's own
     /// choice, 2 the coarser models at half the distance. The ground's levels and the smallest props'
@@ -2779,6 +2801,7 @@ impl Renderer {
             glows: None,
             sun,
             over: false,
+            drawn_kinds: std::sync::atomic::AtomicU64::new(0),
             lod_bias: 1.0,
             staged: watcher.is_some() && info.backend == wgpu::Backend::BrowserWebGpu,
             upload_budget: None,
@@ -4375,6 +4398,7 @@ impl Renderer {
             uploads,
             upload_time,
             submit_time: std::time::Duration::ZERO,
+            first_drawn: Vec::new(),
         };
         self.scratch.clear();
         let mut origins = Vec::with_capacity(passes.len());
@@ -4685,6 +4709,44 @@ impl Renderer {
         drawn
     }
 
+    /// Draw one triangle into a pixel of `target` with every model pipeline, the particles' and the
+    /// glows' (P377), for a warm frame after [`Renderer::render`]: a ride's put-back ghost, first
+    /// glow or first particle is then not that pipeline's first draw. Its picture is not kept.
+    pub fn warm_pipelines(&mut self, target: &Target) {
+        let triangle = 3 * std::mem::size_of::<MeshVertex>() as u64;
+        let depth = self.depth_for(target.size);
+        let (Some(model), Some(material)) = (self.models.iter().find(|m| m.vertices.size() >= triangle), self.materials.first()) else {
+            return;
+        };
+        let mut keys: Vec<PipelineKey> = self.pipelines.keys().copied().collect();
+        keys.sort_by_key(|k| k.bit());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "warm", None);
+            pass.set_scissor_rect(0, 0, 1, 1);
+            pass.set_blend_constant(wgpu::Color::WHITE);
+            let offset = [0];
+            for key in keys {
+                pass.set_pipeline(&self.pipelines[&key]);
+                pass.set_bind_group(0, &self.view_bind, &offset);
+                pass.set_bind_group(1, &material.bind, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..triangle));
+                pass.set_vertex_buffer(1, self.instances.slice(..std::mem::size_of::<InstanceRaw>() as u64));
+                pass.draw(0..3, 0..1);
+                self.drawn_kinds.fetch_or(1 << key.bit(), std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(particles) = &self.particles {
+                particles.warm(&mut pass, &self.view_bind, &offset);
+                self.drawn_kinds.fetch_or(1 << 12, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(glows) = &self.glows {
+                glows.warm(&mut pass, &self.view_bind, &offset);
+                self.drawn_kinds.fetch_or(1 << 13, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+    }
+
     /// Whether [`Renderer::gpu_times`] has anything to say on this adapter (V122).
     pub fn timed(&self) -> bool {
         self.timer.is_some()
@@ -4819,6 +4881,15 @@ impl Renderer {
         gv.count
     }
 
+    /// Count pipeline `bit` drawn with, naming it in `drawn` the first time (P377): 0 to 11 the
+    /// models' ([`PipelineKey::bit`]), then the particles' and the glows'.
+    fn note_drawn(&self, bit: u32, name: impl FnOnce() -> String, drawn: &mut Drawn) {
+        let seen = self.drawn_kinds.fetch_or(1 << bit, std::sync::atomic::Ordering::Relaxed);
+        if seen & 1 << bit == 0 {
+            drawn.first_drawn.push(name());
+        }
+    }
+
     /// Every view into `pass`, each at `rect` of its frame rectangle, inside a target of `bounds`.
     #[allow(clippy::too_many_arguments)]
     fn draw_views(
@@ -4922,6 +4993,7 @@ impl Renderer {
                             pass.set_pipeline(&self.pipelines[&material.pipeline]);
                             pass.set_bind_group(0, &self.view_bind, &offset);
                             current = Some(material.pipeline);
+                            self.note_drawn(material.pipeline.bit(), || material.pipeline.name(), drawn);
                         }
                         if bound != Some(r.material) {
                             pass.set_bind_group(1, &material.bind, &[]);
@@ -4931,6 +5003,7 @@ impl Renderer {
                         drawn.draws += 1;
                         drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                         if let Some((rest, key)) = &material.rest {
+                            self.note_drawn(key.bit(), || key.name(), drawn);
                             pass.set_pipeline(&self.pipelines[key]);
                             pass.set_bind_group(0, &self.view_bind, &offset);
                             pass.set_bind_group(1, rest, &[]);
@@ -4958,6 +5031,7 @@ impl Renderer {
                         pass.set_pipeline(&self.pipelines[&key]);
                         pass.set_bind_group(0, &self.view_bind, &offset);
                         current = Some(key);
+                        self.note_drawn(key.bit(), || key.name(), drawn);
                     }
                     if bound != Some(r.material) {
                         pass.set_bind_group(1, &material.bind, &[]);
@@ -4968,6 +5042,7 @@ impl Renderer {
                     drawn.triangles[v] += (r.count / 3 * batch.count) as usize;
                     if let Some((rest, key)) = &material.rest {
                         let key = PipelineKey { ghost: true, ..*key };
+                        self.note_drawn(key.bit(), || key.name(), drawn);
                         pass.set_pipeline(&self.pipelines[&key]);
                         pass.set_bind_group(0, &self.view_bind, &offset);
                         pass.set_bind_group(1, rest, &[]);
@@ -4986,10 +5061,15 @@ impl Renderer {
                 && particles.draw(pass, &self.view_bind, &offset)
             {
                 drawn.draws += 1;
+                self.note_drawn(12, || "particles".to_string(), drawn);
             }
             // The start zones' and markers' glows, over the particles (V51).
             if let Some(glows) = &self.glows {
-                drawn.draws += glows.draw(pass, &self.view_bind, &offset, v);
+                let draws = glows.draw(pass, &self.view_bind, &offset, v);
+                if draws > 0 {
+                    self.note_drawn(13, || "glows".to_string(), drawn);
+                }
+                drawn.draws += draws;
             }
         }
     }
