@@ -12139,6 +12139,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let t = r.offscreen(fw, fh);
                     let view = t.create_view(&Default::default());
                     r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                    // And every pipeline the first picture did not draw with: the ghosts, the
+                    // particles and the glows a ride's put-back or first dust draws (P377).
+                    r.warm_pipelines(&offscreen_target(&view, fw, fh));
                     r.finish();
                     let took = warm_at.elapsed();
                     // The steady clock never ran on for it.
@@ -12257,6 +12260,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 stages.shift(stages::Stage::Present, stages::Stage::Upload, d.upload_time);
                 stages.shift(stages::Stage::Present, stages::Stage::Submit, d.submit_time);
                 stages.shift(stages::Stage::Present, stages::Stage::Wait, waited);
+                // P377: a pipeline's first draw after the warm frame, which a phone's driver pays
+                // for in that frame's submit. At most a line for each of the few pipelines.
+                if !d.first_drawn.is_empty() {
+                    println!("gpu: first drawn at tick {}, submit {:.2} ms: {}", pacer.ticks(), d.submit_time.as_secs_f64() * 1000.0, d.first_drawn.join("; "));
+                }
+                // P377: a submit over 5 ms (the phone's put-back frames took 15 and 33), with what the
+                // frame handed over, so the next log names what it was.
+                if d.submit_time > Duration::from_millis(5) {
+                    let tris: usize = d.triangles.iter().sum();
+                    let memory = memory_now().map(|m| format!(", memory {m}")).unwrap_or_default();
+                    println!(
+                        "gpu: slow submit at tick {}: {:.2} ms, {} draws, {tris} triangles, {} ground parts written, {} models uploaded{memory}",
+                        pacer.ticks(),
+                        d.submit_time.as_secs_f64() * 1000.0,
+                        d.draws,
+                        d.ground_written,
+                        d.uploads
+                    );
+                }
                 lazy_uploads += d.uploads;
                 ground_visits = (ground_visits.0 + d.ground_visits, ground_visits.1.max(d.ground_visits), ground_visits.2 + 1);
                 for (v, tris) in d.triangles.iter().enumerate() {
