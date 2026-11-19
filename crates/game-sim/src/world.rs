@@ -315,9 +315,19 @@ pub struct Ground<'a> {
     /// The map's extent as the game's own edge test computes it, from the scene's numbers rather than
     /// the samples: [`World::area`].
     pub area: crate::biplane::Area,
+    /// The terrain is MX vs. ATV's (MD249, [`Ground::mxvatv`]): an imported SLUS-21104 map's, which
+    /// [`World::mxvatv_terrain`] then answers with SLUS-21104's terrain object over it.
+    pub mxvatv: bool,
 }
 
 impl<'a> Ground<'a> {
+    /// This ground as MX vs. ATV's (MD249): a SLUS-21104 map's terrain, whose collision record's
+    /// heightfield rays ([`World::mxvatv_terrain`]) a pack plane's or helicopter's record asks.
+    pub fn mxvatv(mut self, mxvatv: bool) -> Ground<'a> {
+        self.mxvatv = mxvatv;
+        self
+    }
+
     /// The ground of one track: its terrain file, and the scene's own statement of how many root cells
     /// it has. A field is `width × 256` samples ([`SAMPLES_PER_WIDTH`]), whatever the tree's depth.
     ///
@@ -350,6 +360,7 @@ impl<'a> Ground<'a> {
                 layout.breadth_scale,
             ),
             terrain,
+            mxvatv: false,
         }
     }
 
@@ -472,6 +483,12 @@ impl World for Ground<'_> {
 
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
         Some(Box::new(self.field()))
+    }
+
+    /// SLUS-21104's terrain object over the file ([`crate::atv_ground::Terrain::of`]) where the
+    /// ground is MX vs. ATV's ([`Ground::mxvatv`], MD249); none on every other map.
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        self.mxvatv.then(|| crate::atv_ground::Terrain::of(self.terrain))
     }
 
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
@@ -763,6 +780,10 @@ impl World for Place<'_> {
 
     fn area(&self) -> Option<crate::biplane::Area> {
         self.ground.area()
+    }
+
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        self.ground.mxvatv_terrain()
     }
 
     fn keeps(&mut self, at: Vf) -> bool {

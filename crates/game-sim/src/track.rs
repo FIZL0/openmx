@@ -1634,6 +1634,23 @@ mod tests {
         (out, pages, tree_at)
     }
 
+    /// MD249: a track's ground answers SLUS-21104's terrain object only where it is MX vs. ATV's, and
+    /// the place and the ride's land hand it on; the object is the one SLUS-21104 builds over the file.
+    #[test]
+    fn only_an_mxvatv_tracks_ground_answers_slus_21104s_terrain() {
+        use crate::world::{Ground, Place, World};
+        let (bytes, _, _) = terrain_with_pages();
+        let t = Terrain::parse(&bytes).expect("parses");
+        let layout = TerrainLayout { width: 1, breadth: 1, width_scale: F(4.5), breadth_scale: F(4.5), ..TerrainLayout::default() };
+        assert!(Ground::new(&t, &layout).mxvatv_terrain().is_none());
+        let ground = Ground::new(&t, &layout).mxvatv(true);
+        let got = ground.mxvatv_terrain().expect("an MX vs. ATV ground answers");
+        let want = crate::atv_ground::Terrain::of(&t);
+        assert_eq!((got.max, got.per_sample, got.height_scale), (want.max, want.per_sample, want.height_scale));
+        let land = crate::tiles::Land::Track(Place { ground, props: Default::default() });
+        assert!(land.mxvatv_terrain().is_some());
+    }
+
     /// MD1: a terrain with a texture table and pages between its last block and its tree, as every MX
     /// vs. ATV one has, reads — the pages come out where the table says, and the cells read through the
     /// tree the same as they would without the pages.

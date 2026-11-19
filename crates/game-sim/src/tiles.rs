@@ -1407,6 +1407,14 @@ impl World for Land<'_> {
             Land::Woods(w) => w.off_world(at, margin),
         }
     }
+    /// A track's, where it is MX vs. ATV's (MD249); a world of tiles has no one terrain object.
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        match self {
+            Land::Track(p) => p.mxvatv_terrain(),
+            Land::Tiles(_) => None,
+            Land::Woods(w) => w.mxvatv_terrain(),
+        }
+    }
     fn wrap(&self) -> [bool; 2] {
         match self {
             Land::Track(p) => p.wrap(),
