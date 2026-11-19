@@ -365,6 +365,26 @@ fn another_apps_music_silences_only_ours() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P376 — the music plays by default: a mixer that has heard no other app's audio, or hears
+/// "none" every buffer (Android, desktop and web never hear anything else), holds nothing and is
+/// silent for nothing; a player's own pause is left be.
+#[test]
+fn music_plays_by_default_without_other_audio() {
+    let mut mixer = Mixer::new(Music::new(Vec::new(), 7));
+    assert!(!mixer.other_audio, "nothing heard at launch");
+    assert!(!mixer.music_silenced());
+    assert!(!mixer.music.held());
+    for _ in 0..4 {
+        mixer.hear_other_audio(false);
+        assert!(!mixer.music.held(), "no hold without another app's audio");
+        assert!(!mixer.music_silenced());
+        assert!(!mixer.take_over_asked());
+    }
+    mixer.music.hold(true);
+    mixer.hear_other_audio(false);
+    assert!(mixer.music.held(), "the player's own pause stays");
+}
+
 /// P339 — the hint heard as the iPhone's output hears it: another app's music holds ours, so the
 /// player shows it paused rather than playing in silence; letting it go on takes the music back
 /// (asked of the session once) and it plays under the hint; the hint's end lets go a hold it made.
