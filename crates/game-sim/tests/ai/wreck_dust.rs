@@ -304,3 +304,406 @@ fn s476_feed_spheres_in_slot_order() {
     assert!(off > 0 && wrecks > 0, "no foot off ({off}) or no feed wrecking ({wrecks}) in 45 frames");
     assert_eq!(off_touching, 0, "an off foot handed over a touch");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S483 — the Sim's own wreck's collision dust, beside the original's
+// ---------------------------------------------------------------------------------------------------
+
+/// The ragdoll's kit as the shell builds it (tests/replay.rs's `the_ragdoll_kit`): the rider's body
+/// and model off the disc, the rider file's parts and pins, the wreck bike's sphere and mesh; with
+/// them the wreck bike's part and the rider's wreck set.
+fn s483_ragdoll_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, game_sim::phy::Wrecks)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let names: Vec<String> = disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let rider_name = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let res = disc.res(&rider_name).expect("the rider archive opens");
+    let rider_file = res.read_suffix("mrider.phy").expect("the rider's archive carries mrider.phy");
+    let mut body = game_render::rider::Body::load(
+        vec![disc.res(&rider_name).expect("the rider archive opens")],
+        "thq1",
+        game_render::rider::Sex::Male,
+        "",
+        &[],
+        game_sim::motion::Params::default(),
+    )
+    .expect("the rider's body loads");
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model")).expect("the model parses");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let wreck_bike = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok())).expect("an archive carries wreckbike.phy");
+    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
+    let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
+    kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
+    kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(std::sync::Arc::new);
+    Some((kit, game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&rider_file)))
+}
+
+/// A rigid body as an image holds it (tests/replay.rs's `s252a_body`).
+fn s483_body(ee: &Ee, b: u32) -> game_sim::biplane::Body {
+    let q = |a: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(b + a + k)));
+    game_sim::biplane::Body {
+        enabled: ee.u32_at(b) != 0,
+        inv_mass: F(ee.f32_at(b + 0x10)),
+        damping: q(0x20),
+        last_position: q(0x50),
+        position: q(0x60),
+        velocity: q(0x70),
+        last_force: q(0x80),
+        force: q(0x90),
+        accel: q(0xa0),
+        shock_peak: q(0xb0),
+        shock: q(0xc0),
+        step: q(0xf0),
+        inv_inertia: q(0x120),
+        ang_damping: q(0x130),
+        last_quat: q(0x150),
+        quat: q(0x170),
+        cofg: q(0x180),
+        moment: q(0x190),
+        last_moment: q(0x1a0),
+        rates: q(0x1b0),
+        ang_accel: q(0x1c0),
+        twist_peak: q(0x1d0),
+        twist: q(0x1e0),
+    }
+}
+
+/// **The human's body actor in `ee` as the port's riding body**, and the holds of its last riding
+/// request carried into the frame of `m`, the bike's transform now: tests/replay.rs's `b19_riding`
+/// (B19), word for word, on an [`Ee`] rather than a save state.
+fn s483_riding(ee: &Ee, kit: &game_sim::ragdoll_ride::Kit, m: &game_sim::math::Mat4) -> (game_sim::ragdoll_riding::Riding, game_sim::ragdoll_riding::Holds) {
+    use game_sim::math::{self, Mat4};
+    use game_sim::rider_anim::Mode;
+    let f = |at: u32| F(ee.f32_at(at));
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
+    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(at + k)));
+    let body_of = |a: u32, i: usize| ee.u32_at(ee.u32_at(a + 0x2f4) + 0xb0 * i as u32 + 0xa4);
+    let bike = m.0[3];
+    let near = |a: u32| {
+        let p = quad(body_of(a, 0) + 0x60);
+        (0..3).map(|l| (p[l] - bike[l]).powi(2)).sum::<f32>()
+    };
+    let a = actors(ee).into_iter().min_by(|&x, &y| near(x).total_cmp(&near(y))).expect("a rider body actor");
+    assert!(near(a) < 100.0, "the nearest body actor's main bone is {} ft from the bike", near(a).sqrt());
+    let mut riding = game_sim::ragdoll_riding::Riding::new(kit);
+    let actor = &mut riding.actor;
+    let n = actor.ragdoll.bones.len();
+    let bone_of = |b: u32| (0..n).find(|&i| body_of(a, i) == b).expect("a bone's body");
+    let r = &mut actor.ragdoll;
+    for (i, bone) in r.bones.iter_mut().enumerate() {
+        let b = body_of(a, i);
+        bone.body = s483_body(ee, b);
+        bone.mass = f(b + 0x0c);
+        bone.inertia = quad(b + 0x110);
+        bone.reference = quad(b + 0x160);
+    }
+    let joint_pin = |i: usize| ee.u32_at(ee.u32_at(a + 0x4c0) + 0x50 * i as u32 + 8);
+    for (i, j) in r.joints.iter_mut().enumerate() {
+        let pin = joint_pin(i);
+        j.wrecked = ee.u32_at(pin + 0x70) != 0;
+        j.max_angle = f(pin + 0xc4);
+        j.spring = quad(pin + 0xd0);
+        j.damping = quad(pin + 0xe0);
+        j.critical = quad(pin + 0xf0);
+    }
+    let holds = [0x5d0, 0x5d4, 0x5d8, 0x5dc];
+    let pins: Vec<u32> = holds.iter().map(|&h| ee.u32_at(a + h)).chain((0..r.joints.len()).map(joint_pin)).collect();
+    assert_eq!(pins.len(), r.pins.len(), "the holds' and joints' pins");
+    for (p, &at) in r.pins.iter_mut().zip(&pins) {
+        let second = ee.u32_at(at + 0x6c);
+        *p = game_sim::ragdoll::Pin {
+            first: bone_of(ee.u32_at(at + 0x68)),
+            second: (second != 0).then(|| bone_of(second)),
+            anchors: [quad(at + 0x20), quad(at + 0x30)],
+            target: quad(at + 0x40),
+            target_velocity: quad(at + 0x50),
+            lower: quad(at + 0x80),
+            upper: quad(at + 0x90),
+            hit: quad(at + 0xa0),
+            sticky: quad(at + 0xb0),
+            gains: quad(at + 0x100),
+        };
+    }
+    for (i, c) in r.collisions.iter_mut().enumerate() {
+        let k = ee.u32_at(ee.u32_at(a + 0x624) + 4 * i as u32);
+        assert_eq!(c.bone, bone_of(ee.u32_at(k + 0x7c)), "collision {i}'s bone");
+        c.enabled = ee.u32_at(k + 0x04) != 0;
+        c.touching = ee.u32_at(k + 0x14) != 0;
+    }
+    r.holds = holds.map(|h| ee.u32_at(ee.u32_at(a + h) + 0x04) != 0);
+    r.throwing = ee.u32_at(ee.u32_at(a + 0x62c)) != 0;
+    r.entered = ee.u32_at(a + 0x49c) != 0;
+    r.stiff = ee.u32_at(a + 0x2b4) != 0;
+    r.riding = ee.u32_at(a + 0x2a4) != 0;
+    r.off_bike = ee.u32_at(a + 0x6b0) != 0;
+    r.flung = ee.u32_at(a + 0x6b8) != 0;
+    r.settled = ee.u32_at(a + 0x6b4) != 0;
+    r.roll = f(a + 0x490);
+    r.pull = quad(a + 0x6e0);
+    let mode = |at: u32| match ee.i32_at(at) {
+        0 => Mode::Held,
+        1 => Mode::Riding,
+        2 => Mode::Wrecked,
+        3 => Mode::Posed,
+        4 => Mode::Gate,
+        m => panic!("mode {m}"),
+    };
+    actor.mode = mode(a + 0x47c);
+    actor.prev = mode(a + 0x480);
+    actor.idle = ee.u32_at(a + 0xa2c) != 0;
+    actor.look_pose = ee.i32_at(a + 0x9f0);
+    actor.clip = ee.i32_at(a + 0x8f4);
+    actor.touching = ee.u32_at(a + 0x48c) != 0;
+    actor.fade = game_sim::ragdoll_body::Fade { length: f(a + 0x644), left: f(a + 0x648) };
+    actor.foot_fade = [f(a + 0x638), f(a + 0x63c)];
+    actor.pose_damping = quad(a + 0x660);
+    actor.hold_targets = std::array::from_fn(|k| quad(a + 0x4d0 + 0x10 * k as u32));
+    actor.hold_velocity = quad(a + 0x530);
+    actor.bike_frame = mat(a + 0x580);
+    actor.placed = ee.u32_at(a + 0x2ac) != 0;
+    actor.active = ee.u32_at(a + 0x2b0) != 0;
+    actor.repose = ee.u32_at(a + 0x2a8) != 0;
+    actor.torques = ee.u32_at(a + 0x2b8) != 0;
+    actor.gravity_scale = f(a + 0x2d0);
+    actor.impact = quad(a + 0x6f0);
+    let req = ee.u32_at(a + 0x488);
+    let inv = math::inverse(m).expect("the bike's transform");
+    let local = |at: u32| math::transform_point(&inv, quad(at));
+    let holds = game_sim::ragdoll_riding::Holds {
+        root: math::mul(&mat(req + 0x50), &inv),
+        hands: [local(req + 0xb0), local(req + 0xc0)],
+        feet: [local(req + 0xd0), local(req + 0xe0)],
+    };
+    (riding, holds)
+}
+
+/// The ticks the Sim's wreck is held for: S325's 40 (tests/replay.rs's `S325_DROPS`).
+const S483_TICKS: usize = 40;
+
+/// The last tick every collision entry's draws agree with the original's, on S325's nose dive:
+/// the bone collisions' first draws (2618), before the ragdoll drifts (R24) and they part (2619).
+const S483_BONES_AGREE: u64 = 2618;
+
+/// **S483: the Sim's own wreck draws the collision dust as the original's does, by the tick.** S325's
+/// nose dive (`capture/s138/s325-nose76-2604`) twice:
+///
+/// - **The original**, as S422 runs it: its whole frames in the interpreter, the human's collision
+///   models and bone collision entries (its manager, rider `+0x1490`) each counted per tick by the
+///   rands its update makes, and the frame's camera kept.
+/// - **The Sim**: the human's bike built and seeded off the image as C33's riders are (race4.rs),
+///   on race125p with the bike's body rays, the wreck's part and set and the ragdoll's kit off the
+///   disc, its riding body the image's ([`s483_riding`], replay.rs's B19 seed); free09 off the disc
+///   as the world (S323). Its dust is the human's collision entries seeded off the image (S422's
+///   seed, the body's bone collisions as the image left them), and each tick the shell's camera is
+///   the original's for the tick.
+///
+/// Held every tick: the wreck's reason (both 1 from 2614) and the snapshot's wreck flag the manager
+/// reads (from 2615, [`RiderDust::wrecked`]), and the collision models' draws, entry by entry —
+/// they read the wreck bike, which keeps with the original's. The bone collisions read the ragdoll,
+/// which drifts from the original's (R24): every entry agrees through [`S483_BONES_AGREE`], the
+/// bone collisions' first draws among them, and after it only the counts are printed.
+///
+/// Measured: collision models 54 draws on both sides, every tick equal; bone collisions 156 against
+/// the Sim's 114, equal through 2618 and on 2621, 2630 and 2640 after it.
+#[test]
+fn s483_the_sims_wreck_draws_collision_dust_as_the_original() {
+    use super::draws::{neutral_pad, render, render_setup, through, whole_frame};
+    use super::lane::s323_free09;
+    use super::race4::{Bikes, c33_bike};
+    use game_sim::Sim;
+    use game_sim::dust::{Dust, RiderDust};
+    use game_sim::eco::Wooded;
+    use game_sim::rider::Tables;
+    use game_sim::track::{self, Terrain};
+    use game_sim::world::{Ground, Place as WorldPlace};
+    use std::sync::Arc;
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let state = kit.ctx("capture/s138/s325-nose76-2604.ee.bin");
+    if !state.exists() {
+        return skip(&format!("no {}: S325's capture", state.display()));
+    }
+    let mut ee = Ee::from_ram(&state).unwrap();
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let text = std::fs::read_to_string(kit.ctx("capture/s138/s325-nose76.csv")).unwrap();
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |n: &str| head.iter().position(|h| *h == n).unwrap();
+    let (fc, dtc) = (col("frame_counter"), col("dt"));
+    let rows: Vec<(u64, F)> = lines
+        .map(|l| l.split(',').collect::<Vec<_>>())
+        .map(|c| (c[fc].parse().unwrap(), F(c[dtc].parse::<f64>().unwrap() as f32)))
+        .filter(|r| r.0 >= 2604)
+        .collect();
+    // The human's rider, down the game manager's list as tests/replay.rs's save states find it.
+    let mut human = ee.u32_at(addr("game_manager").unwrap());
+    for hop in [0x34, 0x34, 0x8, 0x8, 0x0] {
+        human = ee.u32_at(human + hop);
+    }
+    assert_eq!(ee.u32_at(human), 2, "the chain lands on a rider");
+    let m = ee.u32_at(human + 0x1490);
+    let entries: Vec<u32> = (0..ee.u32_at(m + 0x34)).map(|i| ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i)).filter(|&e| matches!(ee.u32_at(e + 0x10), CM | PCC)).collect();
+    let kinds: Vec<usize> = entries.iter().map(|&e| usize::from(ee.u32_at(e + 0x10) == PCC)).collect();
+    assert!(kinds.contains(&0) && kinds.contains(&1), "the human's manager holds both kinds: {entries:x?}");
+    // The Sim's seed, taken before the original moves the image on.
+    let seeded: Vec<(Entry, Feed, Touches)> = entries.iter().map(|&e| seed(&ee, e)).collect();
+
+    // The original: each tick's draws per human entry, and the tick's camera.
+    let rand_state = addr("rand_state").unwrap();
+    let draws: Rc<RefCell<u32>> = Rc::default();
+    let d = Rc::clone(&draws);
+    ee.hooks.insert(
+        addr("rand").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let n = super::sim::s12e_u64(ee, rand_state).wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            ee.write(rand_state, 8, u128::from(n));
+            ee.set(2, (n >> 32) & 0x7fff_ffff);
+            *d.borrow_mut() += 1;
+        }),
+    );
+    let now: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(vec![0; entries.len()]));
+    for name in ["vehicle_fx_collision", "vehicle_fx_pcc_update"] {
+        let (d, now, entries) = (Rc::clone(&draws), Rc::clone(&now), entries.clone());
+        ee.hooks.insert(
+            addr(name).unwrap(),
+            Box::new(move |ee: &mut Ee| {
+                let e = ee.r(4) as u32;
+                let before = *d.borrow();
+                through(ee);
+                if let Some(k) = entries.iter().position(|&x| x == e) {
+                    now.borrow_mut()[k] += *d.borrow() - before;
+                }
+            }),
+        );
+    }
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    render_setup(&mut ee);
+    let mut theirs: Vec<Vec<u32>> = Vec::new();
+    let mut views = Vec::new();
+    let mut wrecking = Vec::new();
+    let mut reasons = Vec::new();
+    let fed = ee.u32_at(m + 0x30);
+    for r in rows.windows(2).take(S483_TICKS) {
+        now.borrow_mut().fill(0);
+        neutral_pad(&mut ee);
+        whole_frame(&mut ee, r[0].1, &mut clock);
+        render(&mut ee);
+        let cam = ee.u32_at(ee.u32_at(addr("display_object").unwrap()));
+        views.push(View { at: vf(&ee, cam + 0x140), forward: vf(&ee, cam + 0x150) });
+        theirs.push(now.borrow().clone());
+        wrecking.push(ee.u32_at(ee.u32_at(fed + 0x24)) != 0);
+        reasons.push(ee.u32_at(human + 0x748));
+    }
+
+    // The Sim: the human's bike off the image, its wreck and ragdoll off the disc, on free09.
+    let ee = Ee::from_ram(&state).unwrap();
+    let Some((terrain_bytes, scene, props, trees)) = s323_free09(&kit, &ee) else { return };
+    let terrain = Terrain::parse(&terrain_bytes).expect("free09's terrain");
+    let mut world = Wooded { world: WorldPlace { ground: Ground::new(&terrain, &scene.terrain), props }, trees };
+    let tables = Arc::new(Tables::build());
+    let Some(mut bikes) = Bikes::open() else { return };
+    let Some((doll_kit, part, wrecks)) = s483_ragdoll_kit() else { return };
+    let name = track::physics_file(track::Engine::Cc125, false, track::Tuning::P);
+    let phy = bikes.phy(&name, &tables);
+    let mut bike = c33_bike(&ee, human, &phy, &name, &bikes.col);
+    bike.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+    bike.carries_ragdoll(Arc::new(doll_kit));
+    let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy, bike);
+    let doll_kit = sim.rider.ragdoll_kit.clone().expect("the kit");
+    let (riding, holds) = s483_riding(&ee, &doll_kit, &sim.rider.ride.transform());
+    // The vehicle animation's clip as the actor last read it (B22), as replay.rs's B19 ride holds it.
+    sim.rider.body.veh.state = riding.actor.clip;
+    sim.rider.riding = Some(Box::new(riding));
+    sim.rider.holds = Some(Arc::new(holds));
+    let balls = seeded.iter().find(|s| matches!(s.0.kind, game_sim::dust::Kind::Spheres { .. })).map(|s| s.2.balls.clone()).unwrap_or_default();
+    sim.dust = Some(Box::new(Dust {
+        riders: vec![RiderDust { entries: seeded.iter().map(|s| s.0).collect(), feed: seeded[0].1, balls, wrecked: ee.u32_at(human + 0x748) != 0, ..RiderDust::default() }],
+        view: None,
+    }));
+    let mut ours: Vec<Vec<u32>> = Vec::new();
+    let mut down = Vec::new();
+    for (t, r) in rows.windows(2).take(S483_TICKS).enumerate() {
+        sim.dust.as_mut().unwrap().view = Some(views[t]);
+        sim.frame(r[0].1, &Sim::reports(game_sim::Input::default()), &mut world);
+        ours.push(sim.dust.as_ref().unwrap().riders[0].entries.iter().map(|e| u32::from(e.draws)).collect());
+        down.push((sim.dust.as_ref().unwrap().riders[0].feed.wrecking, sim.rider.ragdoll.is_some(), sim.rider.state.wreck.map_or(0, |w| u32::from(w.0))));
+    }
+
+    // Per tick and kind: the original's draws and the Sim's.
+    let by_kind = |row: &[u32], k: usize| row.iter().zip(&kinds).filter(|(_, x)| **x == k).map(|(d, _)| d).sum::<u32>();
+    let (mut agree, mut part_ways) = (Vec::new(), Vec::new());
+    let mut totals = [[0u32; 2]; 2];
+    for t in 0..theirs.len() {
+        let tick = rows[t + 1].0;
+        let pair = [0, 1].map(|k| (by_kind(&theirs[t], k), by_kind(&ours[t], k)));
+        for k in 0..2 {
+            totals[k][0] += pair[k].0;
+            totals[k][1] += pair[k].1;
+        }
+        println!(
+            "s483 tick {tick}: reason {} / {}, snapshot wrecking {} / {}, ragdoll {}: collision models {} vs {}, bone collisions {} vs {}; per entry {:?} vs {:?}",
+            reasons[t], down[t].2, wrecking[t], down[t].0, down[t].1, pair[0].0, pair[0].1, pair[1].0, pair[1].1, theirs[t], ours[t]
+        );
+        if theirs[t] == ours[t] { agree.push(tick) } else { part_ways.push(tick) }
+        assert_eq!((reasons[t], wrecking[t]), (down[t].2, down[t].0), "tick {tick}: the wreck's reason and the snapshot's wreck flag");
+        let models = |row: &[u32]| row.iter().zip(&kinds).filter(|(_, k)| **k == 0).map(|(d, _)| *d).collect::<Vec<_>>();
+        assert_eq!(models(&ours[t]), models(&theirs[t]), "tick {tick}: the collision models' draws");
+    }
+    println!("s483: draws (original, Sim): collision models {:?}, bone collisions {:?}", totals[0], totals[1]);
+    println!("s483: ticks agreeing on every entry {agree:?}; parting {part_ways:?}");
+    // Every entry agrees until the ragdoll has drifted (R24): through S483_BONES_AGREE, which
+    // takes in the bone collisions' first draws.
+    let through = rows.iter().skip(1).position(|r| r.0 == S483_BONES_AGREE).unwrap();
+    assert!(theirs[..=through] == ours[..=through], "the ticks through {S483_BONES_AGREE} part ways");
+    assert!(by_kind(&theirs[through], 1) > 0, "the bone collisions draw by {S483_BONES_AGREE}");
+    assert!(totals[1][1] > 0, "the Sim's bone collisions drew: {totals:?}");
+}
+
+/// **S483: the wreck word the dust's manager reads is the reason as the frame before's verdict left
+/// it.** The manager's feed (`+0x24`) points at the rider's `+0x868`, the state pack's copy of the
+/// wreck reason `+0x748`. The pack runs before the frame's wreck verdict, so across a verdict the
+/// copy holds the frame before's reason; and the manager reads the copy the frame before packed. S325's
+/// nose dive (reason 1 on the ground) and its flat drop (reason 5), each run as the original's whole
+/// frames from its image, and its dive past the airborne limit, already down (reason 8) in its
+/// image: after every frame `+0x868` is the reason after the frame before, and each drop is down
+/// within its frames.
+#[test]
+fn s483_the_feeds_wreck_word_is_the_frame_befores_reason() {
+    use super::draws::{neutral_pad, render, render_setup, whole_frame};
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    for (image, frames) in [("s325-nose76-2604", 20), ("s325-dive-2515", 10), ("s325-flat-2643", 30)] {
+        let at = kit.ctx(&format!("capture/s138/{image}.ee.bin"));
+        if !at.exists() {
+            println!("no {}: S325's capture", at.display());
+            continue;
+        }
+        let mut ee = Ee::from_ram(&at).unwrap();
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        let mut human = ee.u32_at(addr("game_manager").unwrap());
+        for hop in [0x34, 0x34, 0x8, 0x8, 0x0] {
+            human = ee.u32_at(human + hop);
+        }
+        let fed = ee.u32_at(ee.u32_at(human + 0x1490) + 0x30);
+        assert_eq!(ee.u32_at(fed + 0x24), human + 0x868, "{image}: the feed's wreck word");
+        let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+        render_setup(&mut ee);
+        let mut was = ee.u32_at(human + 0x748);
+        let mut seen = Vec::new();
+        for t in 0..frames {
+            neutral_pad(&mut ee);
+            whole_frame(&mut ee, F(1.0 / 30.0), &mut clock);
+            render(&mut ee);
+            let (reason, copy) = (ee.u32_at(human + 0x748), ee.u32_at(human + 0x868));
+            seen.push((reason, copy));
+            assert_eq!(copy, was, "{image} frame {t}: the copy against the reason before the frame");
+            was = reason;
+        }
+        println!("s483 {image}: (reason, copy) {seen:?}");
+        assert!(seen.iter().any(|s| s.0 != 0 && s.1 != 0), "{image} wrecks within {frames} frames");
+    }
+}
