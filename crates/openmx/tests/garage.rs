@@ -269,3 +269,38 @@ fn paint_steps_keep_the_bike_and_bike_steps_land_where_asked() {
         assert_eq!(g.pick.set.engine, classes[(at + classes.len() * 2 - k) % classes.len()], "a Class step lands on the class before");
     }
 }
+
+/// P374: the lists a race's AI riders are dressed from, read off the disc, are the original's own
+/// tables in the c31 image (sx01, four racers): `rider\gear.dat`'s 80 `[Uniforms]` with the pro
+/// riders' 46 flagged, each class's `bike=` list in its order, and the 99 riders the roster's
+/// identities count, the 23rd Doug Parsons.
+#[test]
+fn the_ai_garage_is_the_originals_tables() {
+    let Some(mut disc) = disc() else { return };
+    const OPEN: &str = "THQ1 THQ2 Rainbow1 Rainbow2 TLD1 TLD2 Alpinestars1 Alpinestars2 Shift1 Shift2 Thor1 Thor2 Answer1 Answer2 Oneal1 Oneal2 \
+        Warpt1 Warpt2 Fly1 Fly2 Alloy1 Alloy2 Acerbis1 Acerbis2 AXO1 AXO2 Azonic1 Azonic2 Skin1 Skin2 Fox1 Fox2 Sinisalo1 Sinisalo2";
+    const PRO: &str = "Parsons1 Parsons2 Faisst1 Faisst2 Renner1 Renner2 Jessman1 Jessman2 Langston1 Langston2 Boniface1 Boniface2 Ward1 Ward2 \
+        Roncade1 Roncade2 Tortelli1 Tortelli2 Ferry1 Ferry2 Adams1 Adams2 Wey1 Wey2 Lusk1 Lusk2 Reed1 Reed2 Smith1 Smith2 Larocco1 Larocco2 \
+        Lewis1 Lewis2 Styles1 Styles2 Sellards1 Sellards2 Hansen1 Hansen2 Walker1 Walker2 Preston1 Preston2 Sorby1 Sorby2";
+    const BIKES: [&str; 4] = [
+        "Fast50_01 Fast50_02 Fast50_03 Fast50_04",
+        "CR125_THQ_01 CR125_MotoXXX CR125_FactoryConnection CR125_Faisst KX125_RS_01 125SX 125SX_ONE 125SX_THQ_01 RM125 RM125_Nstyle YZ125 \
+         YZ125_MotoXXX YZ125_ProCircuit YZ125_Troy YZ125_Renner CRF250_FactoryConnection CRF250_Faisst CRF250_MotoXXX YZ250F YZ250F_MotoXXX \
+         YZ250F_ProCircuit YZ250F_Troy YZ250F_Renner",
+        "CR250_THQ_01 250SX_THQ_01 KX250_RS_01 RM250_RS_02 CR250_MotoXXX CR250_FactoryConnection CR250_Faisst CRF450_MotoXXX \
+         CRF450_FactoryConnection CRF450_Faisst RM250 RM250_Nstyle 250SX_ONE 250SX YZ250 YZ250_ProCircuit YZ250_Renner YZ250_Troy YZ450F \
+         YZ450F_ProCircuit YZ450F_Renner YZ450F_Troy",
+        "500_01 500_02 500_03",
+    ];
+    for (engine, bikes) in roster::ENGINES.into_iter().zip(BIKES) {
+        let g = roster::AiGarage::read(&mut disc, engine).expect("the disc's appstart.res");
+        let want: Vec<(String, bool)> =
+            OPEN.split_whitespace().map(|u| (u.to_string(), false)).chain(PRO.split_whitespace().map(|u| (u.to_string(), true))).collect();
+        assert_eq!(g.uniforms, want);
+        assert_eq!(g.bikes, bikes.split_whitespace().collect::<Vec<_>>(), "{engine:?}");
+        assert_eq!(g.unique_bikes, matches!(engine, game_sim::track::Engine::Cc125 | game_sim::track::Engine::Cc250));
+        assert_eq!(g.riders.len(), 99);
+        assert_eq!(g.riders[22].name, "Doug Parsons");
+        assert_eq!(g.riders[23].number, "546", "Nick Beaver, the first computer rider");
+    }
+}

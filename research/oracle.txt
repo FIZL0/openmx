@@ -13976,6 +13976,33 @@ vehicle_model_order         boot 0x00208bd0 (a, b: int*) strcasecmp of the two s
 vehicle_model_names         boot 0x004e0880 the loader's per-player bike model file names, 0x104 apart
 libc_qsort                  boot 0x0040f338 (base, n, size, cmp) the BSD qsort: insertion sort under 7
 #                                           or after a pass with no swap, med3 (ninther past 40)
+# P374 — how a race's AI riders get their gear and bike (journal
+#   research/journal/2026-11-19-p374-race-ai-outfits). Comment rows only; ported as roster::AiGarage.
+#   vehicle_build_load runs right after spawn_racers in the world load (0x00205c40 calls 0x00207b20 then
+#   0x00208c50) and, before it fills the model slots, draws on the same rand() (0x0040fd40, each a
+#   (int)((float)count * rand * 2^-31), = Rng::index) for the NumberOfRacers - humans (event +0x114 byte)
+#   AI riders, unconditionally:
+#   - gear, 0x0020918c..0x002092dc: u = index(count of db+8, the gear list = rider\gear.dat [Uniforms]
+#     items in file order, 80), drawn again while uniform +0x24 is set (ProRiderUniform=T: items 34..79,
+#     Parsons1..Sorby2), the whole step again while an earlier AI rider has u (sp+0x280 array).
+#   - bike, 0x00209310..0x002093b8: after every gear draw, b = index(count of the class's bike list,
+#     db+0xc list [class] +0x14 = bike\bikes.dat [50cc]/[125cc]/[250cc]/[500cc] bike= lines, ; lines out:
+#     4, 23, 22, 3), drawn again while an earlier AI rider has b only for class 1 and 2 (sp+0x250).
+#   class = event +0x10c (0..3). db = *(0x0041f770)+0x3d8; a list holder's count is **holder, item i
+#   (*(*holder+8))[i]. Uniform item: +0 name, +4 index, +0x10 its [JerseyPants] entry, +0x24 pro flag.
+#   Class bike: +0 name, +4 index, +0x10 class, +0x1c plate font. Rider item (riders.dat, 23 [Pro
+#   Riders] then 76 [Computer Riders]): +0 name, +0x1c Number, +0x24 own Uniform name, +0x28.. Bike50/
+#   125/250/500 names.
+#   Use: with app +0x408 == 0 (front-end boot) and event +0x116 == 0 (not a career round), an AI rider's
+#   rider .sub is uniforms[u] + ".sub" and its bike model classlist[b] + ".sub" (the rider slot then gets
+#   "_AI", the low-detail body); a career round takes the rider item's own +0x24 uniform and +0x28 +
+#   class*4 bike. With app +0x408 != 0 (a direct boot by level type: c31 and c40 are 2) the names come
+#   from fixed tables, 0x004e0780 (0x20 apart) and 0x004e06c0 (0x18 apart): c31 and c40 both show TLD1
+#   on RM250, TLD2 on 250SX, Alpinestars1 on 250SX beside the human's Thor2 on 250SX_THQ_01.
+#   nameplate_paint kind 2 (an AI rider): the name is ai_rider_name's second word of the rider's name
+#   cut to 12, the number "%d" of rider +0x1c; the jersey's name and number fonts come from the rider
+#   item's OWN uniform (+0x24 -> its [JerseyPants] +0x18/+0x1c) and the plate font from its OWN class
+#   bike (+0x1c), not from the drawn gear and bike.
 # MD92 — Untamed's (SLUS-21701) MX ride with a wreck, replayed by the original's own frame
 # (tests/untamed_bike_ride.rs; captures wreck-1/wreck-3 off copy 9's state 8, 665 rows each, bit-exact).
 # Comment rows only. Journal: research/journal/2026-11-17-md92-untamed-ride-replay.

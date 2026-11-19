@@ -178,15 +178,17 @@ pub fn ai_entry() -> game_sim::ai::Entry {
 ///
 /// P313: with `bot` (`--race-bot`, the port's own: the original's AllAI leaves the player's bike at
 /// the gate), the first human rides on a brain too, [`bot_rider`], spawned before the roster's.
+///
+/// P374: with `garage`, the AI riders' gear and bikes are drawn after the roster, before the bikes
+/// are built ([`draw_roster`]), and answered beside it.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_ai(
     sim: &mut game_sim::Sim, riders: i32, humans: i32, file: Option<&game_sim::phy::Ini>, seed: u32,
-    notes: Option<(&std::sync::Arc<game_sim::engine_note::NoteSounds>, &[&str])>, bot: bool,
-) -> game_sim::ai::Roster {
-    use game_sim::ai::{RosterIn, spawn_roster};
+    notes: Option<(&std::sync::Arc<game_sim::engine_note::NoteSounds>, &[&str])>, bot: bool, garage: Option<&crate::roster::AiGarage>,
+) -> (game_sim::ai::Roster, Option<Vec<crate::roster::AiOutfit>>) {
     // S333: in a race, the roster draws on, and leaves, the race's generator: one for the load and the race.
     let mut rng = sim.race.as_ref().map_or_else(|| Rng::from_seed(seed), |r| r.rng);
-    let input = RosterIn { racers: riders, humans, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
-    let roster = spawn_roster(&mut rng, input);
+    let (roster, outfits) = draw_roster(&mut rng, riders, humans, garage);
     let mut in_sim = game_sim::ai::Roster { humans: 1, ..roster.clone() };
     if bot {
         in_sim.humans = 0;
@@ -196,7 +198,20 @@ pub fn spawn_ai(
         Some((sounds, models)) => sim.spawn_ai_noted(&in_sim, file, AI_DIFFICULTY, RACE_EVENT_KIND, &ai_entry(), rng, sounds, models),
         None => sim.spawn_ai(&in_sim, file, AI_DIFFICULTY, RACE_EVENT_KIND, &ai_entry(), rng),
     }
-    roster
+    (roster, outfits)
+}
+
+/// P374: the load's draws for a race's AI riders on `rng`, in the original's order: the roster for
+/// `riders` racers, `humans` of them local seats ([`game_sim::ai::spawn_roster`] at
+/// [`AI_DIFFICULTY`] over [`RIDER_IDENTITIES`]), then with `garage` each AI rider's gear and bike
+/// ([`crate::roster::AiGarage::draw`], `None` where it cannot draw). The ride's picture draws them
+/// once more, on a copy of the race's generator, before the brains are spawned on it.
+pub fn draw_roster(rng: &mut Rng, riders: i32, humans: i32, garage: Option<&crate::roster::AiGarage>) -> (game_sim::ai::Roster, Option<Vec<crate::roster::AiOutfit>>) {
+    use game_sim::ai::{RosterIn, spawn_roster};
+    let input = RosterIn { racers: riders, humans, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
+    let roster = spawn_roster(rng, input);
+    let outfits = garage.and_then(|g| g.draw(rng, roster.ai.len()));
+    (roster, outfits)
 }
 
 /// P313: the brain `--race-bot` gives the first human: the first AI identity, at the top of the

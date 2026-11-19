@@ -1065,7 +1065,12 @@ struct PeerDress<'a> {
 /// jersey and the plates, its bike model's `.sub` — every model under names of its own (`@peer<n>`),
 /// which the GPU is handed after. Posed and drawn, with no view: its cameras are never looked through.
 fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, Vec<String>), String> {
-    let tag = format!("@peer{n}");
+    dress_tagged(p, &format!("@peer{n}"), pick, None)
+}
+
+/// [`dress_peer`] under model names ending `tag`, its name and number drawn in the fonts of `fonts_of`
+/// (a gear set and bike) where that is not the pick's own (P374: a race's AI rider's).
+fn dress_tagged(p: &mut PeerDress, tag: &str, pick: &roster::Pick, fonts_of: Option<(&str, &str)>) -> Result<(Rig, Vec<String>), String> {
     let mut made = Vec::new();
     let theirs = member_ending(p.disc, &format!("{}.res", pick.rider)).ok();
     let body = match (p.rider_member, &theirs) {
@@ -1084,7 +1089,8 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
     }
     // Its own name and number, on whatever of its bike and body is loaded below.
     if let Some(k) = p.kit.as_mut() {
-        p.assets.make_texture(dress::NAME_TEXTURE, k.texture(p.disc, &pick.rider, &pick.look, &pick.bike));
+        let (rider, bike) = fonts_of.unwrap_or((&pick.rider, &pick.bike));
+        p.assets.make_texture(dress::NAME_TEXTURE, k.texture(p.disc, rider, &pick.look, bike));
     }
     // Its own bike model's `.sub` when it is not the first player's.
     let own_bike = match pick.bike != p.own.bike {
@@ -1567,12 +1573,18 @@ impl Rig {
 
 /// One of a one-player race's AI riders as the picture has it (V128): player `player` of the first
 /// seat's Sim (P313a), its body and bike posed as a seat's [`Rig`] poses its own — the body's machine
-/// and the chassis' off the rider the Sim steps — and drawn in the first seat's bike, parts and rider
-/// models, which on the GPU are shared and posed by node matrices of their own.
+/// and the chassis' off the rider the Sim steps — and drawn in models of its own (P374), or the first
+/// seat's bike, parts and rider models, which on the GPU are shared and posed by node matrices of
+/// their own.
 struct AiRig {
     player: usize,
     body: Option<Body>,
     chassis: Option<Chassis>,
+    /// P374: the bike, parts and body models it is drawn in — its own gear and bike, as the original's
+    /// load draws them, else the first seat's.
+    bike_model: String,
+    parts: Vec<game_render::scene::Part>,
+    body_model: Option<String>,
 }
 
 /// What the picture shows of one seat at a tick (P52), kept from the tick before the last so a drawn
@@ -1712,29 +1724,29 @@ fn ai_shown(rigs: &[AiRig], sim: &Sim, assets: &Assets, ragdolled: Option<&game_
         .collect()
 }
 
-/// An AI rider's bike, its parts and its body as actors (V128), as a seat's are drawn: in the first
-/// seat's models (`rig`), posed by the AI rider's own `shown` node matrices, pushed onto `poses`.
-fn ai_actors<'a>(rig: &'a Rig, ai: &AiRig, shown: Shown, alpha: f32, assets: &Assets, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
+/// An AI rider's bike, its parts and its body as actors (V128), as a seat's are drawn: in its own
+/// models (P374), posed by the AI rider's own `shown` node matrices, pushed onto `poses`.
+fn ai_actors<'a>(ai: &'a AiRig, shown: Shown, alpha: f32, assets: &Assets, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
     let mut actors = Vec::new();
     let bike_at = shown.bike;
     let pose = (!shown.chassis.is_empty()).then(|| {
         poses.push(shown.chassis.clone());
         poses.len() - 1
     });
-    actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha, casts: true });
+    actors.push(Actor { model: ai.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha, casts: true });
     let node_now = |name: &str| -> Option<M4> {
         let blended = ai.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));
         blended.and_then(|j| shown.chassis.get(j).copied()).or_else(|| {
-            let model = &assets.models.get(CHASSIS)?.model;
+            let model = &assets.models.get(&ai.bike_model)?.model;
             let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
             Some(model.world(i))
         })
     };
-    for part in &rig.parts {
+    for part in &ai.parts {
         let at = node_now(&part.placement).map_or(bike_at, |node| node.mul(bike_at));
         actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None, alpha, casts: true });
     }
-    if let (Some(pose), Some(model)) = (shown.body, &rig.body_model) {
+    if let (Some(pose), Some(model)) = (shown.body, &ai.body_model) {
         poses.push(pose);
         actors.push(Actor { model: model.as_str(), at: bike_at, pose: Some(poses.len() - 1), lod_from: None, alpha, casts: true });
     }
@@ -7529,8 +7541,56 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // into one model per rider.
     let ai_count = race_start.as_ref().map_or(0, |s| s.ai.len());
     let mut ai_rigs: Vec<AiRig> = Vec::with_capacity(ai_count);
+    // P374: each in their own gear and bike, as the original's load draws them after the roster, and
+    // their name and number: drawn here on a copy of the race's generator, which the brains' spawn
+    // below draws the same on.
+    let ai_garage = match race_start.as_ref().filter(|s| !s.ai.is_empty()) {
+        Some(_) => roster::AiGarage::read(&mut disc, args.set.unwrap_or(roster::Set::FREERIDE).engine)
+            .map_err(|e| println!("race: AI riders in the first seat's look — {e}"))
+            .ok(),
+        None => None,
+    };
+    let ai_picks: Vec<(roster::Pick, Option<(String, String)>)> = match (&race_start, &ai_garage) {
+        (Some(s), Some(g)) => {
+            let mut rng = s.rng;
+            let (roster, outfits) = race_start::draw_roster(&mut rng, s.riders, riders as i32, Some(g));
+            outfits.unwrap_or_default().iter().zip(&roster.ai).map(|(o, r)| (g.pick(r.identity, o), g.own(r.identity))).collect()
+        }
+        _ => Vec::new(),
+    };
+    let first_pick = own_pick(&args);
+    let mut ai_kit: Option<dress::Kit> = None;
     if gpu_on {
         for k in 0..ai_count {
+            if let Some((pick, own)) = ai_picks.get(k) {
+                let mut dress = PeerDress {
+                    disc: &mut disc,
+                    assets: &mut assets,
+                    kit: if kit.is_some() { &mut kit } else { &mut ai_kit },
+                    rider_member: rider_member.as_deref(),
+                    own: &first_pick,
+                    bike_member: &bike_member,
+                    vehicle: &vehicle,
+                    archives: &archives,
+                    stunts: &table.stunts,
+                    pack: pack_clips.as_ref().map(|c| (c, stunts.stunts.as_slice())),
+                    motion: phy.motion(),
+                    body_model: join_body_model.as_deref(),
+                    gpu_on,
+                    cameras: &join_cameras,
+                    car_cameras: &car_cameras,
+                };
+                let fonts_of = own.as_ref().map(|(u, b)| (u.as_str(), b.as_str()));
+                match dress_tagged(&mut dress, &format!("@ai{}", k + 1), pick, fonts_of) {
+                    Ok((rig, _)) => {
+                        println!("race: AI rider {} is {} {} in {} on {}", k + 2, pick.look.number, pick.look.name, pick.rider, pick.bike);
+                        let Rig { body, chassis, bike_model, parts, body_model, .. } = rig;
+                        ai_rigs.push(AiRig { player: k + 1, body, chassis, bike_model, parts, body_model });
+                        continue;
+                    }
+                    Err(e) => println!("race: AI rider {} in the first seat's look — {e}", k + 2),
+                }
+            }
             let body = match &rider_member {
                 None => None,
                 Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
@@ -7552,7 +7612,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 c.stop_fork_in(&assets.models, CHASSIS, &vehicle.parts);
                 c
             });
-            ai_rigs.push(AiRig { player: k + 1, body, chassis });
+            ai_rigs.push(AiRig { player: k + 1, body, chassis, bike_model: CHASSIS.to_string(), parts: vehicle.parts.clone(), body_model: join_body_model.clone() });
+        }
+        // A rider dressed after them in the disc's own name texture, not the last AI rider's.
+        if kit.is_none() && !ai_picks.is_empty() {
+            assets.make_texture(dress::NAME_TEXTURE, None);
         }
     } else if ai_count > 0 {
         println!("race: {ai_count} AI riders not drawn — the software path draws the seats' riders only");
@@ -8324,7 +8388,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }))
     });
     let racers = race_start.as_ref().map_or(1, |s| s.riders.max(riders as i32).max(1) as usize);
-    let note_models = vec![bike_member.as_str(); racers];
+    // P374: an AI rider's model its drawn bike's, the humans' theirs.
+    let ai_members: Vec<String> = ai_picks.iter().map(|(p, _)| member_ending(&disc, &format!("{}.res", p.bike)).unwrap_or_else(|_| bike_member.clone())).collect();
+    let mut note_models = vec![bike_member.as_str(); racers];
+    for (slot, member) in note_models.iter_mut().skip(racers - ai_members.len().min(racers)).zip(&ai_members) {
+        *slot = member.as_str();
+    }
     if let (Some(sounds), Some(_)) = (note_sounds.as_ref(), race_start.as_ref().filter(|s| s.ai.is_empty() && !args.race_bot)) {
         seats[0].sim.load_notes(sounds, &note_models);
     }
@@ -8337,7 +8406,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         let file = file.ok().map(|b| game_sim::phy::Ini::parse_bytes(&b));
         let notes = note_sounds.as_ref().map(|n| (n, note_models.as_slice()));
-        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED, notes, args.race_bot);
+        let (roster, outfits) = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED, notes, args.race_bot, ai_garage.as_ref());
+        // P374: the gear and bikes drawn on the race's generator, which the picture's were drawn ahead of.
+        let drawn: Vec<(String, String)> = outfits.unwrap_or_default().iter().map(|o| (o.uniform.to_ascii_lowercase(), o.bike.to_ascii_lowercase())).collect();
+        let shown: Vec<(String, String)> = ai_picks.iter().map(|(p, _)| (p.rider.clone(), p.bike.clone())).collect();
+        if drawn != shown {
+            println!("race: AI riders drawn in {drawn:?} but shown in {shown:?}");
+        }
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
         if args.race_bot {
@@ -11916,8 +11991,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     });
                 }
             }
-            // The race's AI riders (V128), each on the first seat's bike, parts and rider models,
-            // blended between the last two ticks as a seat's are, and cut on a put-back.
+            // The race's AI riders (V128), each in its own gear and bike (P374), blended between the last two ticks as a seat's are, and cut on a put-back.
             let ai_now = perf.time(Stage::Skinning, || ai_shown(&ai_rigs, &world.seats[0].sim, &assets, ragdolled.as_ref()));
             for (k, now) in ai_now.into_iter().enumerate() {
                 let sim = &world.seats[0].sim;
@@ -11926,9 +12000,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     Some(b) if !rider.drawn_jumps() => b.blend(&now, &blend),
                     _ => now,
                 };
-                let rig = &rigs[0];
                 let alpha = vehicle::shown_alpha(rider.ghost.shown(), world.seats[0].paused);
-                actors.extend(ai_actors(rig, &ai_rigs[k], shown, alpha, &assets, &mut gpu_poses));
+                actors.extend(ai_actors(&ai_rigs[k], shown, alpha, &assets, &mut gpu_poses));
             }
             // Every player's plane, in its own livery (P87), while it is flown.
             for (p, seat) in world.seats.iter().enumerate() {
