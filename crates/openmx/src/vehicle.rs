@@ -2597,8 +2597,11 @@ impl CarRide {
         };
         let ground = ground_under(world, place)?;
         let facing = level(heading).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
         let at = Vf::new(place.x(), ground + self.rest_height(), place.z(), 1.0);
-        let mut m = game_sim::car::Machine::new(&self.car, &self.model, at, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
+        let lift = game_sim::car::cofg_ai_lift(&self.car, facing, up);
+        let at = at.merge(ps2_float::Dest::XYZ, at.add(lift));
+        let mut m = game_sim::car::Machine::new(&self.car, &self.model, at, facing, up);
         m.drive(true);
         self.struck = self.rays.clone().map(|rays| {
             let mut c = game_sim::car::collision_of_model(&self.car, &self.model, &m.body, rays);

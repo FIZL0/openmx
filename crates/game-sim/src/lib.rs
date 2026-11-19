@@ -315,6 +315,13 @@ impl Sim {
         self.step(dt, &controls, world)
     }
 
+    /// **The map's parked machines** (S484): [`Sim::parked`] built from each car settled with nobody
+    /// in it ([`car::Machine::settle`]) and its `f.col` hull ([`car::Kind::hull`]), stood where its
+    /// body sleeps ([`ai::parked_hull`]), in the order given.
+    pub fn park<'m>(&mut self, machines: impl IntoIterator<Item = (track::Mesh, &'m car::Machine)>) {
+        self.parked = machines.into_iter().map(|(hull, m)| ai::parked_hull(hull, &m.body)).collect();
+    }
+
     /// The pad half of a frame: the device manager's update, and the rider's hands off it.
     ///
     /// Split out of [`Sim::frame`] for the shell, which reads the pad on every frame and rides on

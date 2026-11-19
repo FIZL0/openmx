@@ -1745,6 +1745,29 @@ ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (th
 #                                           (4594, 141.38817, 3838), +0x280 nose (0,0,-1). Hull
 #                                           +0x120 = node_of(body) bit for bit; the body has fallen
 #                                           ~7 ft from the spawn to rest on the ground
+#                                           S484: car+0x160 is a pointer to the body. Physics
+#                                           wrapper W = car+0x50 (vtable at W+0x38 = 0x0045edac;
+#                                           W+0x134 world node 0x00e17ef0, W+0x1b0 fresh, W+0x1bc
+#                                           countdown, W+0x1c0 ResetTime -1, W+0x1c4.. thresholds
+#                                           0.3 0.3 1 1 MAX MAX). vt+0xdc put-back thunk 0x00399510
+#                                           -> 0x00396e90(car): 0x0015a030(W) re-places the body at
+#                                           W+0x90/+0xa0/+0xb0 via vt+0xe4, launch on, each tire
+#                                           reset 0x0039ace0 (leaves +0xe0 +0x1a0 +0x1e0 +0x1f4
+#                                           +0x214 +0x230 +0x250 +0x2b0), engine 0x00399e20.
+#                                           vt+0xe0 0x0015a180 stores (pos, dir, up) at W+0x90..;
+#                                           vt+0xe4 0x0015a1b0 places the body AT pos (no CofG
+#                                           offset). vt+0x124 enable thunk 0x003994b0 -> 0x00398c50:
+#                                           car+0x4ac = 1, then 0x0015b790 (fresh = 1); the car's
+#                                           first step clears +0x4ac again with nobody in it. The
+#                                           listener is the props' 0x0015b2a0 / at-rest 0x0015b400.
+#                                           Put back at the spawn and node-updated (0x0026f800) at
+#                                           0.03333 it sleeps on frame 56; the port matches every
+#                                           frame bit for bit (tests/car_spawn.rs). Spawn y =
+#                                           ground under machine.txt's spot + model bounds centre
+#                                           y (134.99757 + 6.3906054). Bike ridden into its nose
+#                                           at ~55 ft/s (research/s484, live, copy 3): the bike
+#                                           stops dead, the truck wakes (vz 2.77), slides 0.2 ft
+#                                           and sleeps again ~9 frames later
 ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
 ai_iface_walk_end           boot 0x00281b70 vt+0x34 thunk (j 0x00280b10): closes the walk's query
 #                                           (0x001bb890 on rider+0x13b0); v0 = 1 (S323)
