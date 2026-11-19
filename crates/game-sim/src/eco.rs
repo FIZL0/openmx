@@ -716,6 +716,10 @@ impl<W: World> World for Wooded<W> {
         self.world.area()
     }
 
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        self.world.mxvatv_terrain()
+    }
+
     fn off_world(&self, at: Vf, margin: F) -> bool {
         self.world.off_world(at, margin)
     }

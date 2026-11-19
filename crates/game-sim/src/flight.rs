@@ -220,7 +220,9 @@ pub struct Flight {
     /// SLUS-21104's collision record on the plane (MD110, [`MxvatvRecord`]): with one, the frame's
     /// search is the record's pass over the world's SLUS-21104 terrain ([`world::World::mxvatv_terrain`])
     /// and the force listener resolves its contacts as SLUS-21104's record does, in place of MX
-    /// Unleashed's search and resolution. None as every plane is built; boxed, so a plane without one
+    /// Unleashed's search and resolution on the ground. MX Unleashed's still searches and resolves the
+    /// rest beside it (MD249): the props, trees and bikes, which the record's pass does not strike in
+    /// the port (no world rays or sweep). None as every plane is built; boxed, so a plane without one
     /// is a word bigger; not in the hash walk.
     pub record_mxvatv: Option<Box<MxvatvRecord>>,
 }
@@ -1380,6 +1382,9 @@ impl Flight {
         let Some(rays) = self.rays.clone() else { return (none, Vec::new(), Vec::new(), Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
+        // SLUS-21104's record meets SLUS-21104's terrain (MD249, [`Flight::pass_mxvatv`]): this search
+        // then searches everything else on it (props, trees, bikes), which the record's pass does not.
+        let record_ground = self.record_mxvatv.is_some() && world.mxvatv_terrain().is_some();
         let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
         let bounds = field.as_deref().map(field_box);
         let met = met.filter(|m| m.named.is_some() && bikes.is_some_and(|b| b.bikes.len() == m.bikes.len()));
@@ -1400,7 +1405,8 @@ impl Flight {
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
         records.extend(knocks.iter().chain(wrecks).map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
-        contact_search::collide(&mut records, 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
+        let searched_field = field.as_deref().filter(|_| !record_ground);
+        contact_search::collide(&mut records, 0, Some(&mut self.body), searched_field, &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
         let players = met.as_deref().map(|m| m.bikes.clone());
         self.heard = crate::material_hit::Heard(
@@ -1518,9 +1524,13 @@ impl Flight {
         let held = self.record_mxvatv.as_mut().map(|r| &mut r.held);
         collision_force(&mut self.body, self.gravity, |body| match held {
             // SLUS-21104's record (MD110): its resolution, handed 1 as the body's force listener hands it.
+            // Then what MX Unleashed's search met beside it (MD249): on SLUS-21104's terrain that
+            // search leaves the ground to the record and files the props, trees and bikes, which the
+            // record's pass does not strike; elsewhere the record meets no ground and this is all.
             Some(h) => {
                 let mut me = Weighed { body, mass };
                 crate::atv_contact::resolve(&mut h.record, &mut contact::Own::Body(&mut me), &mut h.entries, &mut [], &h.movers, true);
+                contact::resolve(collider, &mut me, contacts, others, movers, true);
             }
             None => contact::resolve(collider, &mut Weighed { body, mass }, contacts, others, movers, true),
         });
@@ -1627,8 +1637,9 @@ impl Flight {
         // The aero model's true speed is on while a wheel is down or the collision record touched
         // anything (S193: a wreck tumbling on its body rays has it on, which the chord's first frame
         // back flies on).
-        // SLUS-21104's record's touch, for a plane with one (MD110).
-        let touching = self.record_mxvatv.as_ref().map_or(self.record.touching, |r| r.record.touching);
+        // SLUS-21104's record's touch, for a plane with one (MD110), or what MX Unleashed's search met
+        // beside it (MD249: on SLUS-21104's terrain, everything but the ground).
+        let touching = self.record_mxvatv.as_ref().map_or(self.record.touching, |r| r.record.touching || self.record.touching);
         let (touchdown, true_speed) = self.measure.contacts(wheels, touching);
         // The touchdown sound's pick (P146) draws one `rand()` even from its list of one, before the
         // crash test's: the plane's draws include it.
@@ -1639,8 +1650,11 @@ impl Flight {
         let m = &self.measure;
         // What the world rays last struck, in the plane's mask of categories the speed rule spares.
         // SLUS-21104's record strikes no object in the port's worlds (no props: [`RecordOnPlane`]). Its
-        // mask is the same category by name, VEHICLE, in its own table's bit (MD113).
-        let ignored = self.record_mxvatv.is_none() && self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
+        // mask is the same category by name, VEHICLE, in its own table's bit (MD113). Beside it MX
+        // Unleashed's search strikes the props and bikes (MD249): its struck object counts on a frame
+        // it touched something (the record leaves it the last one, frames back, otherwise).
+        let met_beside = self.record_mxvatv.is_none() || self.record.touching;
+        let ignored = met_beside && self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
         let c = CrashContact { touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;
         let edge = self.area.filter(|a| wrap == [false, false] || holed || crate::off_map::outside_axes(a, wrap, b.position, F(crate::biplane::EDGE)));

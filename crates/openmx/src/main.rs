@@ -2216,6 +2216,23 @@ fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Opti
         .collect()
 }
 
+/// Whether a track is MX vs. ATV's (MD249): import-mxvatv's ids are `mxvatv_<map>`, the map's
+/// SLUS-21104 terrain file brought over as it is. Untamed's (`untamed_…`) are another game's.
+fn mxvatv_map(track: &str) -> bool {
+    track.strip_prefix("mxvatv_").is_some_and(|map| !map.is_empty())
+}
+
+#[cfg(test)]
+mod mxvatv_map_tests {
+    #[test]
+    fn only_import_mxvatvs_tracks_are_mxvatv_maps() {
+        assert!(super::mxvatv_map("mxvatv_nat13"));
+        assert!(!super::mxvatv_map("untamed_sm_hs"));
+        assert!(!super::mxvatv_map("free06"));
+        assert!(!super::mxvatv_map("mxvatv_"));
+    }
+}
+
 /// Where a seat's MX vs. ATV car is drawn this frame (MD157): its scene node, slid from the tick
 /// before's (`before`) as the car is.
 fn mxvatv_car_drawn(car: &vehicle::MxvatvCarRide, before: Option<M4>, blend: &pace::Blend) -> Option<M4> {
@@ -5206,6 +5223,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     let sim_terrain = track::Terrain::parse(terrain_bytes)?;
     let sim_terrain: &track::Terrain = keep_terrain.get_or_init(|| sim_terrain);
+    // Whether the terrain is MX vs. ATV's, an imported SLUS-21104 map's (MD249): its ground then
+    // answers SLUS-21104's terrain object, which a pack plane's collision record asks.
+    let mxvatv_map = mxvatv_map(&args.track);
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.
     let mut tiled = match &world_mod {
         Some(w) => {
@@ -5802,7 +5822,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // What it reads its own (P127): it outlives the load's thread.
     let plane_files = Arc::new(std::sync::Mutex::new(plane_files));
     // Whether the ground the plane flies is SLUS-21104's terrain, where a pack plane takes its record (MD110a1).
-    let mxvatv_ground = vehicle::takes_mxvatv_record(&sim_world::Ground::new(&sim_terrain, &place.terrain));
+    // A world of tiles has no one terrain object (MD249).
+    let mxvatv_ground = tiled.is_none() && vehicle::takes_mxvatv_record(&sim_world::Ground::new(&sim_terrain, &place.terrain).mxvatv(mxvatv_map));
     let flight_for = {
         let (files, bike_box, t) = (plane_files.clone(), bike_box.clone(), place.terrain.clone());
         let wreck_hull = wreck_hull.clone();
@@ -6071,7 +6092,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut sim = match tiled.take() {
         Some(t) => Land::Tiles(t),
         None => {
-            let track = Place { ground: sim_world::Ground::new(&sim_terrain, &place.terrain), props };
+            let track = Place { ground: sim_world::Ground::new(&sim_terrain, &place.terrain).mxvatv(mxvatv_map), props };
             match trees {
                 Some(trees) => Land::Woods(Box::new(game_sim::eco::Wooded { world: track, trees })),
                 None => Land::Track(track),
@@ -6835,7 +6856,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut drawn_land = match (&sim, keep_terrain.get()) {
         (Land::Tiles(t), _) => Some(Land::Tiles(Box::new(t.picture_copy()))),
         (_, None) => None,
-        (_, Some(terrain)) => Some(Land::Track(Place { ground: sim_world::Ground::new(terrain, &place.terrain), props: Default::default() })),
+        (_, Some(terrain)) => Some(Land::Track(Place { ground: sim_world::Ground::new(terrain, &place.terrain).mxvatv(mxvatv_map(&args.track)), props: Default::default() })),
     };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
     let mut kiowa_drawn: Vec<Kiowa> = match lot.mxvatv_kiowa.is_empty() {
