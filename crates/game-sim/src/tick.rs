@@ -824,6 +824,8 @@ impl crate::Sim {
         let progress = |j: usize, c: &crate::ai::Other| laps.and_then(|l| l.card(j)).map_or(c.progress, |l| l.progress);
         let others: Vec<crate::ai::Other> =
             lane.cards.iter().enumerate().filter(|&(j, _)| j != i).map(|(j, c)| crate::ai::Other { progress: progress(j, c), ..*c }).collect();
+        let tuning = if i == 0 { &self.phy.air } else { &self.others[i - 1].phy.air };
+        let (preload_time, max_preload) = (tuning.preload_time, tuning.max_preload);
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
         rider.sense.ai_route = true;
         let (seen, cofg) = crate::ai::mount_of(rider);
@@ -852,8 +854,20 @@ impl crate::Sim {
         let track = laps.zip(edge.as_deref()).and_then(|(l, e)| crate::ai::on_track_of(l, e, i));
         // S364: the habits' keeper word, the score keeper's mode for this ride.
         pilots[k].1.racer.habits.keeper_state = keeper;
+        // S347a: the habits' preload words are the bike's (`+0x494` force y, `+0x4a4` firing, `+0x4b0`
+        // clock): a pop on a take-off fires the bike's preload there, for its next frame. Its most
+        // (`+0x4c4`) and the clock it starts from (`+0x4ac`) are the bike's tuning.
+        let air = &rider.ride.air;
+        let h = &mut pilots[k].1.racer.habits;
+        (h.preload_force, h.preload_firing, h.preload_clock) = (ps2_float::F(air.preload_force.y()), i32::from(air.preload_firing), air.preload_timer);
+        (h.preload_clock_start, h.max_preload) = (preload_time, max_preload);
         // S461: the map's parked machines in its scene, between the map's movers and the bikes.
         pilots[k].1.think_amid(mount, world, &self.parked, &bikes, seek, tables, &others, tricks, racing, track, rng, dt);
+        let h = &pilots[k].1.racer.habits;
+        let air = &mut rider.ride.air;
+        let f = air.preload_force;
+        air.preload_force = ps2_float::Vf::new(f.x(), h.preload_force.to_f32(), f.z(), f.w());
+        (air.preload_firing, air.preload_timer) = (h.preload_firing != 0, h.preload_clock);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());

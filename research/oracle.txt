@@ -13341,6 +13341,12 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 #   bike_clutch's rearm (0x002574b8) compares lever +0x644 and gas +0x63c (the lever, not +0x658) with 1.0;
 #   bike_stand_upright loads +0x63c too (0x00257504). An AI rider pulling the clutch with gas in one frame
 #   rearms while +0x658 is still 0.3333; the ramp then moves chassis +0x190 z back (0x002574ac).
+# S347a — C33's ai0 at 188 / ai1 at 201 / ai2 at 274. Comment rows only.
+#   The AI habits' pop on a take-off node writes the bike's preload: +0x494 = MaxPreload (+0x4c4) * preload,
+#   +0x4a4 firing = 1, +0x4b0 = PreloadTime (+0x4ac), and the pitch lever -0.3. bike_preload (0x00256940)
+#   then adds the +0x490 vector to chassis +0x130 every substep while +0x4b0 > 0 (600 on y for C33's
+#   Race250A). The Sim's think dropped those words; on tick 188's first substep ai0's force y was 759 vs
+#   1359, every other word equal. Sim::think now hands the bike's preload to the habits and back.
 # F62b: the rider controller's clip advance vt +0x88 0x0013c7b0 and clip start 0x0013ea90 in Rust (anim::advance,
 # anim::start, anim::set_clip; tests/mxvatv_bike_ride.rs rider_leaf serves Call::ClipAdvance / Call::ClipStart).
 # Journal: research/journal/2026-11-13-f62b-clip-advance-and-crossfade.
