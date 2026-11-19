@@ -505,3 +505,21 @@ replayed on MD161a's harness (`tests/mxvatv_car_frame/untamed_sandrail.rs`): SLU
 spawn image is every capture row bit for bit, and the port's Untamed frame and Ride beside it equal its
 words every frame (throttle's 16 frames with a tire on an object excepted), on the original's and on the
 port's Rocksbury terrain. MD81f's recorder reads each row before its frame (row 0 is the spawn image).
+
+## The quad's follow camera (MD251)
+
+Untamed's quad camera is not SLUS-21104's. `Cam\FC_ATVDefault.pb` holds slow/fast pairs (`SlowAngleX`,
+`SlowFollowDistance`, `SlowLookAheadDistance`, `SlowFov`, `SlowSpeed` and the `Fast` five) and four
+tightnesses (on the ground and in the air, follow and look-ahead). SLUS-21701 blends each pair by the
+quad's speed between `SlowSpeed` and `FastSpeed`, aims 3 ft up the quad's up row (plus the preset's
+offset), and runs two springs: past 3 ft of follow distance the eye orbits the target and the look-at
+moves straight; nearer, the other way round. The eye keeps 2.5 ft over the ground. Normal Camera is
+17–19 ft, 18–15°, fov 75–85 from 2 to 75 ft/s. Only the `4x3/1p` screen is read; the file's
+`CameraSwing` is never read (the reader asks for `Swing`). Missing keys read the reader's defaults
+(tightnesses 16/32/10/20, `FastSpeed` 100, `AngleY` 180).
+
+Ported as `game_sim::camera::UntamedFollow`; the goal equals the spawn image's to 1e-4
+(`tests/untamed_camera.rs`). The shell follows the Untamed quad on it (`chase::untamed_follow`), with
+stand-in MX Unleashed presets for the preset cycle, look-back and stick. Not ported: the filter's two
+world sweeps, so the eye can enter walls and props. The cars' `FC_*Default.pb` files are the same layout
+and still ride their `.ini`s. Addresses in `research/oracle.txt # MD251`.
