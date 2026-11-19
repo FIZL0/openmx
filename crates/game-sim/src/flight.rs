@@ -1223,14 +1223,24 @@ impl Flight {
             // Named as the props' step's striker `me`; the late props' probes' mirrors that
             // [`PropSet::strike_in`] puts on the strike's entries are a riding bike's frame's (B29),
             // not the plane's: its rays meet the hull below.
-            Some((dt, movers)) => {
+            Some((dt, movers)) if !shared => {
                 strike.by = Some((me, first));
                 set.strike_in(&mut strike, dt, world, movers)
             }
             // Planes flown together push one body: each plane's resolve meets it by its own shift
-            // (MD254a).
-            None if shared => {
-                let pushed = set.strike(&strike);
+            // (MD254a). In the pass (B34a) the props it files search at once, the bodies left where
+            // they are: the seam shifts are noted below, not handed to the plane's frame.
+            late if shared => {
+                let pushed = match late {
+                    Some((dt, movers)) => {
+                        let across = std::mem::take(&mut strike.across);
+                        strike.by = Some((me, first));
+                        let pushed = set.strike_in(&mut strike, dt, world, movers);
+                        strike.across = across;
+                        pushed
+                    }
+                    None => set.strike(&strike),
+                };
                 set.across.retain(|a| a.player != me);
                 for &(i, by) in &strike.across {
                     let (collection, object, _) = strike.struck[i];
@@ -1239,7 +1249,7 @@ impl Flight {
                 pushed
             }
             // One struck across a seam is handed to its frame a width back, by the plane (MD254).
-            None => set.strike_as(&strike, me),
+            _ => set.strike_as(&strike, me),
         };
         for p in pushed {
             match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
@@ -2438,6 +2448,22 @@ pub fn frames_together_props(
     tables: &ride::Tables,
     props: Option<(&mut PropSet, &[usize])>,
 ) -> Vec<(Vec<Option<u32>>, [i8; 2])> {
+    frames_together_props_in(dt, fleet, ground, tables, props, None)
+}
+
+/// **[`frames_together_props`] in the props' collide pass** (B34a): with the pass's `movers`
+/// ([`crate::prop_seats::Shared::movers_mut`]) a prop a plane's strike files searches at once, as
+/// [`Flight::frame_props_in`] has a lone plane's, plane by plane in `fleet`'s order; a prop an
+/// earlier plane filed is not searched again. `None` only hears it (B28).
+pub fn frames_together_props_in(
+    dt: F,
+    fleet: &mut [Fly<'_>],
+    ground: &mut dyn world::World,
+    tables: &ride::Tables,
+    props: Option<(&mut PropSet, &[usize])>,
+    movers: Option<&mut crate::prop_set::PropMovers>,
+) -> Vec<(Vec<Option<u32>>, [i8; 2])> {
+    let mut pass = movers;
     let shapes = props.as_ref().map(|(set, _)| Arc::clone(&set.shapes));
     let own = match (&props, &shapes) {
         (Some((set, _)), Some(shapes)) => knocks(set, shapes),
@@ -2485,7 +2511,8 @@ pub fn frames_together_props(
         for (i, (f, k)) in fleet.iter_mut().zip(knocked).enumerate() {
             // Its resolve's sides: its met's vehicles, the other planes, then the struck bodies.
             let first = f.met.as_deref().map_or(0, |m| m.vehicles.len()) + n - 1;
-            shifts[i] = f.flight.knocked(set, me[i], first, &posed[i], k, &mut bodies, &mut *ground, None, true);
+            let late = pass.as_deref_mut().map(|m| (dt, m));
+            shifts[i] = f.flight.knocked(set, me[i], first, &posed[i], k, &mut bodies, &mut *ground, late, true);
         }
     }
     // The downed riders' wreck bikes (S276a, [`Met::wrecks`]) after the props: one body each for the

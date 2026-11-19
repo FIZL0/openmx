@@ -725,6 +725,62 @@ fn a_ball_the_plane_wakes_searches_in_its_strike_tick() {
     eprintln!("ball 0: port pos {:?} vel {:?}\n  original pos {:?} vel {:?}", b.position.0, b.velocity.0, a.position.0, a.velocity.0);
 }
 
+/// **A ball a plane flown together wakes searches in its strike tick** (B34a): as
+/// [`a_ball_the_plane_wakes_searches_in_its_strike_tick`], the plane flying with a second one 2000 ft
+/// off ([`flight::frames_together_props_in`], split screen's and online's planes), the props' collide
+/// pass run first ([`game_sim::traffic::Traffic::frame_held`]) and its movers passed. The original has
+/// one plane; the far one strikes nothing, so ball 0's list is still 11066's: the plane's mirror
+/// (naming it, striker 0) then the ground entry, every field the search writes. Heard only
+/// ([`flight::frames_together_props`]), the ground entry is missing.
+#[test]
+fn a_ball_planes_flown_together_wake_searches_in_its_strike_tick() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some((plane, hull)) = the_plane(&kit) else { return };
+    let Some((mut set, mut ground)) = free06() else { return };
+    let Some(ee) = image(&kit, "b34at-11065") else { return };
+    let Some(after) = image(&kit, "b34at-11066") else { return };
+    seed_by_place(&ee, &set);
+    let balls = seed(&ee, &mut set);
+    let (c, o) = balls[0];
+    assert!(!set.collections[c].bones[o].body.enabled, "ball 0 is asleep in 11065");
+    let mut near = plane.with_hull(hull);
+    near.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    let mut far = near.clone();
+    let by = Vf::new(0.0, 0.0, 2000.0, 0.0);
+    (far.body.position, far.body.last_position) = (far.body.position.add(by), far.body.last_position.add(by));
+    far.collider.cofg_world = far.collider.cofg_world.add(by);
+    let tables = game_sim::Sim::new(0x5241).tables;
+    let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
+    let mut list = |pass: bool| {
+        let (mut near, mut far) = (near.clone(), far.clone());
+        let mut traffic = game_sim::traffic::Traffic::default();
+        traffic.props = set.clone();
+        let mut movers = traffic.frame_held(dt, &mut ground);
+        let mut fleet = [
+            flight::Fly { flight: &mut near, pad: Default::default(), met: None, bikes: &[] },
+            flight::Fly { flight: &mut far, pad: Default::default(), met: None, bikes: &[] },
+        ];
+        let props = Some((&mut traffic.props, &[0usize, 1][..]));
+        let _ = flight::frames_together_props_in(dt, &mut fleet, &mut ground, &tables.ride, props, pass.then_some(&mut movers));
+        let ball = &traffic.props.collections[c];
+        assert!(ball.bones[o].body.enabled, "the near plane's rays wake ball 0");
+        ball.objects[o].collision.as_ref().unwrap().record.contacts.clone()
+    };
+    let orig = list_at(&after, after.u32_at(BALLS[0] + 0x120));
+    let plane_rec = the_record(&after) as usize;
+    let heard = list(false);
+    assert!(heard.len() < orig.len(), "heard only, the ground entry is missing: {heard:?}");
+    let port = list(true);
+    assert_eq!(port.len(), orig.len(), "ball 0's list\nport {port:?}\noriginal {orig:?}");
+    for (k, (p, e)) in port.iter().zip(&orig).enumerate() {
+        assert_eq!(searched_differ(p, e), Vec::<&str>::new(), "ball 0's entry {k}\nport {p:?}\noriginal {e:?}");
+        assert_eq!(p.other.is_some(), e.other.is_some(), "ball 0's entry {k}: the side it names\nport {p:?}\noriginal {e:?}");
+        if e.other == Some(plane_rec) {
+            assert_eq!(p.other, Some(0), "ball 0's entry {k} names the near plane, its striker 0");
+        }
+    }
+}
+
 /// A physics object put back at its placement (`+0x90` position, `+0xa0` nose, `+0xb0` up): its
 /// probes out of the broad phase, the object placed, and its probes filed again where it now stands.
 const OBJECT_RESET: u32 = 0x0015_a030;

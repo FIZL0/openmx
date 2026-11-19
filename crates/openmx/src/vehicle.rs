@@ -1159,7 +1159,11 @@ impl Plane {
             let respawned = match self.ready(sim, world) {
                 Some(ready) => {
                     let f = self.flight.as_mut().expect("a readied plane has its flight");
-                    let _struck = f.frame_props(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, seat);
+                    // A prop it wakes searches in the set's pass (B34a), once a seat has run it.
+                    let _struck = match shared.movers_mut() {
+                        Some(movers) => f.frame_props_in(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, seat, movers),
+                        None => f.frame_props(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, seat),
+                    };
                     self.settle(ready)
                 }
                 None => false,
@@ -1954,16 +1958,33 @@ pub fn fly_together(
     tables: &game_sim::ride::Tables,
     props: Option<(&mut game_sim::prop_set::PropSet, &[usize])>,
 ) {
-    match (fleet, props) {
-        ([], _) => {}
-        ([one], None) => {
+    fly_together_in(dt, fleet, world, tables, props, None)
+}
+
+/// [`fly_together`] in the seats' set's collide pass (B34a): with its `movers`
+/// ([`game_sim::prop_seats::Shared::set_in`]) a prop a plane wakes searches at once
+/// ([`Flight::frame_props_in`], [`flight::frames_together_props_in`]).
+pub fn fly_together_in(
+    dt: F,
+    fleet: &mut [flight::Fly<'_>],
+    world: &mut dyn World,
+    tables: &game_sim::ride::Tables,
+    props: Option<(&mut game_sim::prop_set::PropSet, &[usize])>,
+    movers: Option<&mut game_sim::prop_set::PropMovers>,
+) {
+    match (fleet, props, movers) {
+        ([], ..) => {}
+        ([one], None, _) => {
             let _ = one.flight.frame_met(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut());
         }
-        ([one], Some((set, seats))) => {
+        ([one], Some((set, seats)), Some(movers)) => {
+            let _ = one.flight.frame_props_in(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut(), set, seats[0], movers);
+        }
+        ([one], Some((set, seats)), None) => {
             let _ = one.flight.frame_props(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut(), set, seats[0]);
         }
-        (fleet, props) => {
-            let _ = flight::frames_together_props(dt, fleet, world, tables, props);
+        (fleet, props, movers) => {
+            let _ = flight::frames_together_props_in(dt, fleet, world, tables, props, movers);
         }
     }
 }
