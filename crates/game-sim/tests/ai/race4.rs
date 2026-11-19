@@ -55,7 +55,11 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// to it but the torn ones: the regression mark. S482: the free ride's jump watch took the generator
 /// from 84 to 130 and ai0 from 296 to 318; ai2 went from 280 to 278, on the draws after the
 /// generator parts at 131 (with the generator put back to the capture's each row, it agrees to 729).
-const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 278, 130];
+/// S482a: an AI rider's note reads its brain's clutch, and the generator agrees through 131 (it parts
+/// at 132 on ai0's foot dust, which needs the riding ragdoll this replay does not seed). The human
+/// went from 1802 to 944: ai1, off the original's since 304, now rides into it there, where before
+/// its own fiction of a path happened to miss it.
+const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 944, 278, 131];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -644,7 +648,7 @@ fn c33_notes(ee: &Ee) -> engine_note::Notes {
 }
 
 /// The last tick [`C33_DUST`] is held to here: it covers 132, where ai0's foot dust (entry 4) draws
-/// in the original and not in the Sim (S482's follow-up).
+/// in the original and not in the Sim, whose riders have no riding ragdoll here (S482b).
 const C33_DUST_THROUGH: u64 = 131;
 
 /// S328c: the image's emitters as the Sim's, by Sim player: each rider's manager (`+0x1490`) entries
