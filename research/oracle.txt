@@ -13432,6 +13432,9 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   Heap (Free Ride Rocksbury, kept-context/md81e/addresses.txt): cart 0x01be4740 (kind +0xbac = 7), body
 #   0x01c00060, record 0x01c02cb0, engine 0x01c151a0 (3 gears 2.8/2.6/2.2, final 3.8); idle second cart
 #   0x01c17c00. Car +0x344 the gas pedal (SLUS-21104's +0x314), +0x1134 MaxAnalogThrottle 0.1.
+#   Replay (MD170, tests/mxvatv_car_frame/untamed_golfcart.rs): MD161a's frame / sim / world step unchanged on
+#   MD81e's spawn RAM image and scratchpad; its recorder reads rows after the frame. Cross counts from
+#   pressure byte 27 (analog.csv row 33, frame 47; the recorder missed 14 rows, so MD81e's "byte 25" was off).
 # MD81f — Untamed's sandrail: the buggy/baja class in both games and captured (comment rows only; journal
 #   research/journal/2026-11-16-md81f-untamed-sandrail). SLUS-21104's MD39a sandrail image: object 0x01b158a0,
 #   vtable 0x003cec60 (class update 0x004c6ce0), kind +0xbbc = 8. SLUS-21701's spawn image: vtable 0x003f09d0

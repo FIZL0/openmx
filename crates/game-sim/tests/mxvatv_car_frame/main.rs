@@ -2509,6 +2509,7 @@ mod untamed; // MD161a: MD160's Untamed monster-truck drives beside SLUS-21701
 mod untamed_terrain; // MD234: those drives with the ground and noise from the port
 mod untamed_sandrail; // MD81f: Untamed's sandrail drives beside SLUS-21701
 mod untamed_baja; // MD163a: MD164's Untamed baja drives beside SLUS-21701
+mod untamed_golfcart; // MD170: MD81e's Untamed golf-cart drives beside SLUS-21701
 
 use own_back::*;
 use own_calls::*;

@@ -151,6 +151,22 @@ fn put_input(ee: &mut Ee, car: u32, p: &Input) {
     ee.set_u32(car + u(at::GASSED), u32::from(p.gassed));
 }
 
+/// The least pressure byte a tape's `button@byte` press counts from (MD170: MD81e's analog drive, its
+/// Cross stepped through bytes 21, 23, 25 .. 49, gasses from byte 27 on, frame 47; bytes 21-25 leave
+/// the gas 0, and no tape holds 26). A counted press is fed at a strength of one: the golf cart's
+/// `MaxAnalogThrottle` 0.1 makes any counted press the whole gas, so the drive cannot tell a part
+/// strength from one.
+const U_PRESS_LEAST: u32 = 27;
+
+/// Whether a tape tick's held word `h` (a button, or `button@byte` with its pressure) presses
+/// button `b`.
+fn pressed(h: &str, b: &str) -> bool {
+    match h.split_once('@') {
+        Some((name, byte)) => name == b && byte.parse::<u32>().unwrap() >= U_PRESS_LEAST,
+        None => h == b,
+    }
+}
+
 /// The input step's words for frame `j` (the `j`th from the image) off tape tick `j - 2`, through
 /// [`atv_car::input_untamed`]: a held button (Cross the gas, Square the brake, Circle the hand brake:
 /// MD164's brake drive) at a strength of one, the stick [`stick_of`] the tape's, the pad word's command
@@ -167,7 +183,7 @@ fn u_feed(ee: &mut Ee, d: &UDrive, ticks: &[Row], j: usize) {
     let held: Vec<&str> = t.map_or(Vec::new(), |t| t["buttons"].split(' ').collect());
     let mut p = input_of(ee, d.car);
     let (speed, side_slip) = (F(ee.f32_at(d.car + u(drive::at::SPEED))), F(ee.f32_at(d.car + u(drive::at::SIDE_SLIP))));
-    let value = |c: Command| if drive::button(c).is_some_and(|b| held.contains(&b)) { F::ONE } else { F::ZERO };
+    let value = |c: Command| if drive::button(c).is_some_and(|b| held.iter().any(|&h| pressed(h, b))) { F::ONE } else { F::ZERO };
     let stick = t.map_or((F::ZERO, F::ZERO), |t| (stick_of(t["lx"].parse().unwrap()), stick_of(t["ly"].parse().unwrap())));
     atv_car::input_untamed(&keys_of(ee, d.car), &mut p, speed, side_slip, stick, F::ZERO, value);
     put_input(ee, d.car, &p);
@@ -178,11 +194,28 @@ fn u_feed(ee: &mut Ee, d: &UDrive, ticks: &[Row], j: usize) {
 /// 0x004ff110), outside the sim frame; the respawn stands the truck there.
 pub(crate) const U_SPOT: std::ops::Range<u32> = 0xd30..0xd6c;
 
+/// The frames run when each row was read: row `r` after frame `r + 1` (`r` for a recorder that reads
+/// before), but a row the recorder missed (MD170: MD81e's analog drive, its vsync 2 a frame, skips
+/// rows 13 and 126 one frame and row 22 twelve) moves the rows after it on by the frames it missed.
+pub(crate) fn u_frames(d: &UDrive, rows: &[Row]) -> Vec<usize> {
+    let first = usize::from(!d.before);
+    let Some(v0) = rows.first().and_then(|r| r.get("vsync")).map(|v| v.parse::<usize>().unwrap()) else { return (0..rows.len()).map(|r| r + first).collect() };
+    let mut out: Vec<usize> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let v = row["vsync"].parse::<usize>().unwrap() - v0;
+        assert!(v % 2 == 0, "{}: a row at an odd vsync {v} past the first", d.name);
+        assert!(out.last().is_none_or(|&l| v / 2 + first > l), "{}: rows out of order", d.name);
+        out.push(v / 2 + first);
+    }
+    out
+}
+
 /// The words the game writes outside the sim frame, laid in before frame `j` off the row read after
 /// frame `j - 1` (the image's before frame 2; the row read before frame `j` for a recorder that reads
-/// before, the image's before frame 1).
+/// before, the image's before frame 1); the last row read before it when the recorder missed that one.
 fn u_lay(ee: &mut Ee, d: &UDrive, rows: &[Row], j: usize) {
-    let Some(row) = j.checked_sub(if d.before { 1 } else { 2 }).and_then(|r| rows.get(r)) else { return };
+    let frames = u_frames(d, rows);
+    let Some(row) = j.checked_sub(1).and_then(|f| frames.iter().rposition(|&at| at <= f)).map(|r| &rows[r]) else { return };
     let car = row_block(row, "car");
     for o in U_SPOT.step_by(4) {
         ee.set_u32(d.car + o, u32::from_le_bytes(car[o as usize..o as usize + 4].try_into().unwrap()));
@@ -269,8 +302,17 @@ pub(crate) fn u_capture_rows(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usize
     let snap = |ee: &Ee| -> Vec<u32> { blocks.iter().flat_map(|&(_, at, len)| (0..len as u32).step_by(4).map(move |o| (at, o))).map(|(at, o)| ee.u32_at(at + o)).collect() };
     let (mut early, mut torn) = (Vec::new(), Vec::new());
     let mut before = snap(&ee);
+    let frames = u_frames(d, &rows);
+    let mut j = 0;
     for (r, row) in rows.iter().enumerate() {
-        u_step(&mut ee, d, &rows, &ticks, r + 1);
+        // Up to the frame after the one the row was read after (the frames of rows missed unread).
+        while j < frames[r] + usize::from(d.before) {
+            if j + 1 == frames[r] + usize::from(d.before) {
+                before = snap(&ee);
+            }
+            j += 1;
+            u_step(&mut ee, d, &rows, &ticks, j);
+        }
         let now = snap(&ee);
         let want: Vec<u32> = blocks.iter().flat_map(|b| row_block(row, b.0).chunks(4).take(b.2 / 4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect::<Vec<_>>()).collect();
         assert_eq!(want.len(), now.len(), "{} row {r}: short blocks", d.name);
@@ -279,7 +321,6 @@ pub(crate) fn u_capture_rows(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usize
         } else if want != now {
             torn.push(r);
         }
-        before = now;
     }
     Some((rows.len(), early, torn))
 }
@@ -913,9 +954,10 @@ pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_
         s.repeats += pieces.rest.ground.len();
         s.wrecked += usize::from(car.state != atv_car::RIDING);
     }));
-    for r in 0..rows.len() {
-        *frame_no.borrow_mut() = r + 1;
-        u_step(&mut ee, d, &rows, &ticks, r + 1);
+    // Every frame to the last row's, those of rows the recorder missed too (MD170).
+    for j in 1..=u_frames(d, &rows).last().map_or(0, |&f| f + usize::from(d.before)) {
+        *frame_no.borrow_mut() = j;
+        u_step(&mut ee, d, &rows, &ticks, j);
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
