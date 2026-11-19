@@ -2939,6 +2939,8 @@ impl Machine {
     /// whole bounds ([`Part::inertia`] of their full extents), each tire hung at its model node moved
     /// out by the tire's `Width`, the undriven tires spun to the constructor's top wheel speed and the
     /// driven ones to the engine's, the launch counting down from the start and the preload unarmed.
+    /// The body stands at `at` itself, not `at` moved by the centre of mass (S484: the original's
+    /// place puts recording2's truck's body at its spawn to the bit).
     ///
     /// The original takes each node's place with the model already placed at the spot and turns it
     /// back into the root's frame; this takes it with the root unplaced, so a mount differs from the
@@ -2952,8 +2954,7 @@ impl Machine {
         let inertia = part.inertia(dims);
         let recip = |v: f32| (F::ONE / F(v)).0;
         let cofg = car.cofg_ai;
-        let at = Vf::new(at.x(), at.y(), at.z(), 1.0);
-        let position = at.merge(Dest::XYZ, at.add(crate::chassis::turn(quat, cofg)));
+        let position = Vf::new(at.x(), at.y(), at.z(), 1.0);
         let body = crate::biplane::Body {
             enabled: true,
             inv_mass: F::ONE / part.mass,
@@ -3035,7 +3036,7 @@ impl Machine {
             alpha: F::ZERO,
             side_slip: F::ZERO,
             euler: Vf::default(),
-            matrix: crate::math::quat_to_mat4(quat, at),
+            matrix: crate::math::quat_to_mat4(quat, position),
             forward: Vf::default(),
             up: Vf::default(),
             event: None,
@@ -3048,6 +3049,77 @@ impl Machine {
     pub fn drive(&mut self, on: bool) {
         self.human = on;
         self.controls.driven = on;
+    }
+}
+
+// --- the parked car's settle and sleep (S484) -----------------------------------------------------
+
+/// **Where a parked car is spawned** (S484): its map spot's x and z, and its height the ground's
+/// under the spot plus the model's bounds centre — so the body starts with its centre where the
+/// model's middle would stand on the ground, and drops onto its tires from there. free09's truck
+/// (`machine.txt`'s 4594, 135, 3838) gives the original's spawn bit for bit (141.38817).
+pub fn parked_spawn(world: &mut impl crate::world::World, model: &CarModel, at: Vf) -> Vf {
+    let (ground, _) = world.ground(Vf::new(at.x(), at.y(), at.z(), 1.0));
+    Vf::new(at.x(), (F(ground.y()) + F(model.bounds.centre.y())).0, at.z(), 1.0)
+}
+
+/// `CofGAI` turned to a car spawned along `facing` and squared to `up`: what [`Machine::new`] lifted
+/// the body by before S484 put it at the spot itself. The shell's taken car keeps the lift, so it
+/// is still dropped from where its tires were tuned.
+pub fn cofg_ai_lift(car: &Car, facing: Vf, up: Vf) -> Vf {
+    let lift = crate::chassis::turn(crate::flight::spawn_turn(facing, up), car.cofg_ai);
+    Vf::new(lift.x(), lift.y(), lift.z(), 0.0)
+}
+
+impl Machine {
+    /// **Whether the car may sleep** (S484): the generic physics object's at-rest test, the props'
+    /// ([`crate::prop_world::Collection::at_rest`]), with the six thresholds of the car's
+    /// `[Mass Properties]` — the body's speed, angular rate, acceleration, angular acceleration,
+    /// shock and twist each under its own. The original's test also refuses a body its enable has
+    /// just woken until the first force clears that; a car is pushed by its own forces every frame,
+    /// so after a step that never holds and is not kept here.
+    pub fn at_rest(&self, car: &Car) -> bool {
+        let p = &car.mass_properties;
+        let thresholds = [
+            p.speed_threshold,
+            p.angular_rate_threshold,
+            p.acceleration_threshold,
+            p.angular_acceleration_threshold,
+            p.speed_impulse_threshold,
+            p.body_angular_speed_impulse_threshold,
+        ];
+        let size = |v: Vf| Acc::mula(F(v.x()), F(v.x())).madda(F(v.y()), F(v.y())).madd(F(v.z()), F(v.z())).sqrt();
+        let b = &self.body;
+        [b.velocity, b.rates, b.accel, b.ang_accel, b.shock, b.twist].iter().zip(thresholds).all(|(&v, t)| size(v) < t)
+    }
+
+    /// **The parked car's settle** (S484): stepped with nobody in it, `dt` a frame, until its body
+    /// is at rest ([`Machine::at_rest`]), when the object listener's sleep disables the body; the
+    /// frame it slept on (0 the first), or `None` if it was still moving after `frames`. The truck
+    /// has no `ResetTime` (-1), so it is never put back and sleeps for good; a parked car's body
+    /// then stands as its hull ([`crate::ai::parked_hull`], [`crate::Sim::park`]).
+    ///
+    /// Proved on recording2's truck put back at its spawn and stepped by the original's own node
+    /// update at 0.03333 s a frame: the body bit for bit each frame and asleep on the same frame
+    /// (56), with the tire mounts and inertia the original's (see [`Machine::new`]).
+    pub fn settle(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        frames: usize,
+    ) -> Option<usize> {
+        for frame in 0..frames {
+            self.step_struck(car, world, collision, dt, acos, curve, &mut |_| F::ZERO);
+            if self.at_rest(car) {
+                self.body.enabled = false;
+                return Some(frame);
+            }
+        }
+        None
     }
 }
 

@@ -1,15 +1,19 @@
 //! A fresh car (S149e): what the car's constructor builds off its `.phy` and its model, against the
-//! cars the original parks, and that the car it builds drives.
+//! cars the original parks, and that the car it builds drives; and a parked car's settle and sleep
+//! (S484) against the original's own, stepped in the interpreter.
 
 use game_render::disc::Disc;
 use game_sim::air::AcosTable;
 use game_sim::bindings::Command;
 use game_sim::camera::CurveTable;
-use game_sim::car::{Car, CarModel, Kind, Machine, UNDRIVEN_TOP_WHEEL_SPEED};
-use game_sim::track::{Scene, Terrain};
-use game_sim::world::Ground;
+use game_sim::archive::Res;
+use game_sim::car::{Car, CarModel, Kind, Machine, UNDRIVEN_TOP_WHEEL_SPEED, collision_of_model, parked_spawn};
+use game_sim::eco::{Trees, Wooded};
+use game_sim::flight_search::Rays;
+use game_sim::track::{self, Scene, Terrain};
+use game_sim::world::{Ground, Place, Props};
 use ps2_float::{F, Vf};
-use ps2_oracle::{Ee, Kit, skip};
+use ps2_oracle::{Ee, Kit, addr, skip};
 
 /// A car the original parks: its RAM image (every one before anyone drives), where the car object
 /// is, and the model the factory gave it.
@@ -40,6 +44,17 @@ mod car_at {
     pub const PRELOAD: u32 = 0x440;
     pub const YAW_LIMIT: u32 = 0x540;
     pub const TIRES: [u32; 4] = [0x548, 0x54c, 0x550, 0x554];
+}
+
+/// The car's physics object wrapper (S484): where it is in the car, its vtable and world node, and
+/// the vtable's store (spot, nose, up), put-back and enable.
+mod wrapper_at {
+    pub const OF_CAR: u32 = 0x50;
+    pub const VTABLE: u32 = 0x38;
+    pub const NODE: u32 = 0x134;
+    pub const STORE: u32 = 0xe0;
+    pub const PUT_BACK: u32 = 0xdc;
+    pub const ENABLE: u32 = 0x124;
 }
 
 fn quad(ee: &Ee, at: u32) -> Vf {
@@ -141,4 +156,171 @@ fn a_fresh_car_drives_off_on_the_gas() {
         assert!(m.up.y() > 0.7, "{:?} is not upright: {:?}", p.kind, m.up);
         assert!(m.grounded, "{:?} is off the ground", p.kind);
     }
+}
+
+/// `f` on free09 as a parked car meets it: the terrain, the props and the trees, out of the disc's
+/// two track archives.
+fn on_free09<R>(disc: &mut Disc, f: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> R {
+    let names = ["Tracks\\free09.res", "Tracks\\free09_2.res"];
+    let parts: Vec<(Vec<u8>, Res)> = names.iter().filter_map(|n| disc.member(n).ok()).filter_map(|b| Res::parse(&b).ok().map(|r| (b, r))).collect();
+    let by_end = |end: &str| {
+        let want = end.to_ascii_lowercase();
+        parts.iter().find_map(|(b, r)| {
+            let e = r.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })?;
+            r.read(b, e).ok()
+        })
+    };
+    let (bytes, res) = &parts[0];
+    let member = |end: &str| res.read(bytes, res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(end)).unwrap()).unwrap();
+    let scene = Scene::parse(&member(".scn")).unwrap();
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_file = by_end(leaf.rsplit('\\').next().unwrap()).unwrap();
+    let terrain = Terrain::parse(&terrain_file).unwrap();
+    let (props, _) = Props::load(&scene, |want| by_end(want).ok_or_else(|| format!("no {want}")));
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let (trees, _) = Trees::on_ground(&member(".esb"), &ground, &CurveTable::build()).unwrap();
+    f(&mut Wooded { world: Place { ground, props }, trees })
+}
+
+/// The parked truck as the port builds it: its `.phy`, model, rays and hull out of `machine.res`.
+fn truck(disc: &mut Disc) -> (Car, CarModel, track::Rays, track::Mesh) {
+    let res = disc.res("machine.res").unwrap();
+    let kind = Kind::MonsterTruck;
+    let car = Car::read_bytes(&res.read(kind.phy()).unwrap(), kind);
+    let model = CarModel::read(&res.read(PARKED[0].model).unwrap()).unwrap();
+    let rays = track::Rays::parse(&res.read(kind.rays()).unwrap()).unwrap();
+    let hull = track::Mesh::parse(&res.read(kind.hull()).unwrap()).unwrap();
+    (car, model, rays, hull)
+}
+
+/// The original's frame time while free09 loads: the asleep truck's body steps a quarter of it.
+const LOAD_DT: f32 = 0.03333;
+
+/// **The parked truck's settle and sleep, against the original's** (S484). recording2's truck is put
+/// back at its spawn with its own calls (its store and put-back, then its enable) and stepped by
+/// free09's node update at the load's frame time; the port's car, built at the same spawn, steps
+/// beside it. The body matches bit for bit every frame, and both fall asleep on frame 56.
+///
+/// The put-back leaves a few of each tire's words from the image's own settle (its slip tangent,
+/// last velocity, force and torque, last compression, side ratio, the low-speed grip latch and the
+/// wheel's angle); a freshly built tire has them zero, as the port's are, so the test zeroes them.
+/// The tire mounts and the inertia are the original's: the port's are off by its model round trip
+/// ([`Machine::new`], under 0.002 ft and 1e-5 apart), which moves the bodies apart from touchdown.
+#[test]
+fn a_parked_truck_settles_and_sleeps_as_the_original() {
+    let Some(kit) = Kit::load().map_err(|why| skip(&why)).ok() else { return };
+    let Some(mut disc) = Disc::open_configured().map_err(|why| skip(&why)).ok() else { return };
+    let path = kit.ctx("states").join("recording2.p2m2_SaveState.eeMemory.bin");
+    let Some(mut ee) = Ee::from_ram(&path).map_err(|why| skip(&why)).ok() else { return };
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let (car, model, rays, hull) = truck(&mut disc);
+    on_free09(&mut disc, |world| {
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+
+    let c = PARKED[0].at;
+    let w = c + wrapper_at::OF_CAR;
+    let vt = ee.u32_at(w + wrapper_at::VTABLE);
+    let node = ee.u32_at(w + wrapper_at::NODE);
+    let spot = ee.scratch(0);
+    for (i, o) in [car_at::SPAWN, car_at::FACING, car_at::UP].into_iter().enumerate() {
+        let v = ee.read(c + o, 16);
+        ee.write(spot + 16 * i as u32, 16, v);
+    }
+    let (pos, dir, up) = (u64::from(spot), u64::from(spot + 16), u64::from(spot + 32));
+    ee.call(ee.u32_at(vt + wrapper_at::STORE), &[u64::from(w), pos, dir, up], &[], 50_000_000);
+    ee.call(ee.u32_at(vt + wrapper_at::PUT_BACK), &[u64::from(w)], &[], 50_000_000);
+    ee.call(ee.u32_at(vt + wrapper_at::ENABLE), &[u64::from(w)], &[], 50_000_000);
+    for t in car_at::TIRES.map(|o| ee.u32_at(c + o)) {
+        for o in [0xe0, 0x1a0, 0x1e0, 0x1f4, 0x214, 0x230, 0x234, 0x238, 0x250, 0x254, 0x258, 0x2b0] {
+            ee.set_u32(t + o, 0);
+        }
+    }
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    ee.set_f32(app + 0x344, LOAD_DT);
+    ee.set_f32(app + 0x348, 1.0 / LOAD_DT);
+    let b = ee.u32_at(c + car_at::BODY);
+    // The world node's update steps every awake body filed on it and runs their listeners.
+    let node_update = addr("collision_node_update").unwrap();
+
+    // The spawn: the ground under machine.txt's spot plus the model's middle.
+    let spawn = parked_spawn(world, &model, Vf::new(4594.0, 135.0, 3838.0, 1.0));
+    assert_eq!(bits3(spawn), bits3(quad(&ee, c + car_at::SPAWN)), "spawn {spawn:?}");
+    let mut m = Machine::new(&car, &model, spawn, quad(&ee, c + car_at::FACING), quad(&ee, c + car_at::UP));
+    for (k, o) in car_at::TIRES.into_iter().enumerate() {
+        m.wheels[k].mount = quad(&ee, ee.u32_at(c + o) + 0x80);
+    }
+    m.body.inv_inertia = quad(&ee, b + 0x120);
+    let mut col = collision_of_model(&car, &model, &m.body, Rays::of(&rays));
+    let fresh = (m.clone(), col.clone());
+
+    let words = |m: &Machine| {
+        let b = &m.body;
+        [("position", 0x60, b.position), ("velocity", 0x70, b.velocity), ("accel", 0xa0, b.accel), ("last position", 0x50, b.last_position),
+         ("last quat", 0x150, b.last_quat), ("quat", 0x170, b.quat), ("rates", 0x1b0, b.rates), ("ang accel", 0x1c0, b.ang_accel)]
+    };
+    let mut slept = None;
+    for frame in 0..200 {
+        ee.call(node_update, &[u64::from(node)], &[LOAD_DT], 2_000_000_000);
+        m.step_struck(&car, world, &mut col, F(LOAD_DT), &acos, &curve, &mut |_| F::ZERO);
+        for (name, o, v) in words(&m) {
+            let want = quad(&ee, b + o);
+            assert_eq!(bits3(v), bits3(want), "frame {frame} {name} {v:?} want {want:?}");
+        }
+        let asleep = ee.u32_at(b) == 0;
+        assert_eq!(m.at_rest(&car), asleep, "frame {frame}: at rest");
+        if asleep {
+            slept = Some(frame);
+            break;
+        }
+    }
+    eprintln!("the original's truck slept on frame {slept:?} at {:?}", quad(&ee, b + 0x60));
+    assert_eq!(slept, Some(56));
+
+    // The settle itself, from the same start, sleeps there too and leaves the body disabled.
+    let (mut m2, mut col2) = fresh;
+    assert_eq!(m2.settle(&car, world, &mut col2, F(LOAD_DT), &acos, &curve, 400), slept);
+    assert!(!m2.body.enabled);
+    assert_eq!(bits3(m2.body.position), bits3(quad(&ee, b + 0x60)));
+
+    // And the Sim's parked list stands its hull there.
+    let mut sim = game_sim::Sim::new(1);
+    sim.park([(hull, &m2)]);
+    assert_eq!(sim.parked.len(), 1);
+    });
+}
+
+/// The port's own parked truck, as the shell would build it (its model's mounts and inertia),
+/// settles near where both of the original's runs left it: those differ from each other by more
+/// than the port does from either, as each run's load frames stepped it at their own frame times.
+#[test]
+fn a_parked_truck_comes_to_rest_where_the_original_parks_it() {
+    let Some(kit) = Kit::load().map_err(|why| skip(&why)).ok() else { return };
+    let Some(mut disc) = Disc::open_configured().map_err(|why| skip(&why)).ok() else { return };
+    let (car, model, rays, _) = truck(&mut disc);
+    on_free09(&mut disc, |world| {
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+    let spawn = parked_spawn(world, &model, Vf::new(4594.0, 135.0, 3838.0, 1.0));
+    let mut m = Machine::new(&car, &model, spawn, Vf::new(0.0, 0.0, -1.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0));
+    let mut col = collision_of_model(&car, &model, &m.body, Rays::of(&rays));
+    let slept = m.settle(&car, world, &mut col, F(LOAD_DT), &acos, &curve, 400);
+    eprintln!("the port's truck slept on frame {slept:?} at {:?}, turned {:?}", m.body.position, m.body.quat);
+    assert!(slept.is_some_and(|f| (40..80).contains(&f)), "slept on {slept:?}");
+    let mut seen = 0;
+    for state in ["first_recording.p2m2_SaveState.eeMemory.bin", "recording2.p2m2_SaveState.eeMemory.bin"] {
+        let Some(ee) = Ee::from_ram(&kit.ctx("states").join(state)).map_err(|why| skip(&why)).ok() else { continue };
+        let b = ee.u32_at(PARKED[0].at + car_at::BODY);
+        assert_eq!(ee.u32_at(b), 0, "{state}: the truck is asleep");
+        let (at, q) = (quad(&ee, b + 0x60), quad(&ee, b + 0x170));
+        let off = (0..3).map(|i| (m.body.position.0[i] - at.0[i]).abs()).fold(0.0, f32::max);
+        let dot: f32 = (0..4).map(|i| q.0[i] * m.body.quat.0[i]).sum();
+        eprintln!("{state}: rests at {at:?} turned {q:?}: {off} ft off");
+        assert!(off < 0.15, "{state}: {off} ft from {at:?}");
+        assert!(dot.abs() > 0.99999, "{state}: turned {q:?}");
+        seen += 1;
+    }
+    eprintln!("{seen} images compared");
+    });
 }
