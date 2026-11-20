@@ -35,9 +35,14 @@ pub fn find(drawn: &[Car], machine: Machine, livery: usize) -> Option<&Car> {
 /// original's truck pose turns them). At rest for a car not out.
 pub fn tires(ride: &CarRide) -> [Tire; 4] {
     let Some(m) = ride.driven.as_ref() else { return [Tire::REST; 4] };
-    let rear = ride.car.animation.rear_tire_steer_scale.map_or(1.0, |s| s.0);
+    machine_tires(&ride.car, m)
+}
+
+/// [`tires`] off any car `car`'s state `m`: a driven one's, or a parked one's (F72).
+pub fn machine_tires(car: &game_sim::car::Car, m: &game_sim::car::Machine) -> [Tire; 4] {
+    let rear = car.animation.rear_tire_steer_scale.map_or(1.0, |s| s.0);
     std::array::from_fn(|k| {
-        let (s, spec) = (&m.wheels[k].s, &ride.car.tires[k]);
+        let (s, spec) = (&m.wheels[k].s, &car.tires[k]);
         Tire {
             spin: s.angle.0,
             steer: s.steer.0 * if k >= 2 { rear } else { 1.0 },
@@ -94,6 +99,13 @@ pub fn trace(p: usize, renderer: &str, drawn: &Car, at: M4, tires: &[Tire; 4]) {
     let o = at.0[3];
     let t: Vec<String> = tires.iter().map(|t| format!("{:.2}/{:.2}/{:.2}/{:.2}", t.spin, t.steer, t.compression, t.scale)).collect();
     println!("picture car: seat {p} {renderer} {} at {:.2} {:.2} {:.2} tires {}", drawn.model, o[0], o[1], o[2], t.join(" "));
+}
+
+/// `--trace-picture`'s line for a car the original parks in play drawn this frame (F72): the
+/// renderer, the model and where its origin stands.
+pub fn trace_parked(k: usize, renderer: &str, drawn: &Car, at: M4) {
+    let o = at.0[3];
+    println!("picture parked: {k} {renderer} {} at {:.2} {:.2} {:.2}", drawn.model, o[0], o[1], o[2]);
 }
 
 /// `--trace-picture`'s line for a parked car's bay drawn this frame: the model and where it stands.

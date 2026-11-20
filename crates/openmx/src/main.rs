@@ -2198,6 +2198,23 @@ fn car_drawn(car: &vehicle::CarRide, before: Option<M4>, blend: &pace::Blend) ->
     Some(before.map_or(now, |b| blend.slide(b, now)))
 }
 
+/// The cars the original parks in play where the first seat's Sim holds them (F72, every seat's
+/// alike in split screen): each one's machine, its state and its matrix, slid from the tick before's
+/// (`before`, in the same order) as a driven car is, unless `cut`.
+fn parked_drawn<'s>(seat: &'s Seat, before: &[M4], cut: bool, blend: &pace::Blend) -> Vec<(vehicle::Machine, &'s game_sim::car::Parked, M4)> {
+    let machines = seat.garage.in_play.handed();
+    if machines.len() != seat.sim.parked_cars.len() {
+        return Vec::new();
+    }
+    let slide = !cut && before.len() == machines.len();
+    (machines.into_iter().zip(&seat.sim.parked_cars).enumerate())
+        .map(|(k, (m, p))| {
+            let now = car_draw::placed(&p.machine);
+            (m, p, if slide { blend.slide(before[k], now) } else { now })
+        })
+        .collect()
+}
+
 /// Every seat's car driver (S245), as [`heli_pilots`] the helicopter's: the rider's own body posed
 /// by the plane's clips, its root in the car's seat ([`game_render::car::seat`]) and its limbs held
 /// to the model's seat nodes. `None` for a seat not driving one.
@@ -2335,6 +2352,18 @@ impl<P: sim_world::World> Game for World<P> {
         for s in &mut self.seats {
             s.garage.in_play.hand_to(&mut s.sim, &driven);
         }
+        // F72: split screen's seats share one copy of them, as the original has one truck: out of the
+        // seats for the pass ([`World::parked_out`]), the woken ones stepped ahead of the bikes as a
+        // Sim's own step has them (S485), their hulls in the riders' world after the vehicles', and
+        // struck and pushed by every seat's bike; back in every seat after ([`World::parked_back`]).
+        let mut parked = self.parked_out();
+        let resting: Vec<bool> = match parked.as_mut() {
+            Some(cars) => {
+                let t = &self.seats[0].sim.tables.ride;
+                cars.iter_mut().map(|p| p.frame(&mut self.place, dt, &t.acos, &t.curve)).collect()
+            }
+            None => Vec::new(),
+        };
         // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
         // replay of this tape will be handed (`game_sim::replay::Recorder`).
         // A tape is the first player's, so a pass where they wait for their pad is not on it: the
@@ -2373,12 +2402,21 @@ impl<P: sim_world::World> Game for World<P> {
                 .filter_map(|(i, s)| s.garage.atv_up()?.hull(i)),
         );
         let quads: Vec<usize> = hulls[flown.len() + driven.len()..].iter().map(|h| h.seat).collect();
+        // And the shared parked cars' (F72), last: car `k` named `seats + k`.
+        let cars_at = hulls.len();
+        hulls.extend(parked.iter().flatten().enumerate().map(|(k, p)| p.hull(self.seats.len() + k)));
         let met = game_sim::rider_contact::contacts_met(&riders(&self.seats, &on), &hulls, dt, &self.place);
         drop(hulls);
         let (mut lists, mut mirrors) = match met {
             Some((l, m)) => (Some(l), m),
             None => (None, Vec::new()),
         };
+        // A parked car a bike's body rays struck is woken (S485, `Sim::parked_struck`).
+        for (p, m) in parked.iter_mut().flatten().zip(mirrors.iter().skip(cars_at)) {
+            if !m.is_empty() {
+                p.struck();
+            }
+        }
         let n = self.seats.len();
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
         // ahead of the bike's own entries, as the original searches its planes first.
@@ -2412,6 +2450,8 @@ impl<P: sim_world::World> Game for World<P> {
                     .filter_map(|&j| Some(self.seats[j].garage.flight_flown()?.flown(j, from, &self.place)))
                     .chain(driven.iter().filter_map(|&j| self.seats[j].garage.car_up()?.flown(j, from, &self.place)))
                     .chain(quads.iter().filter_map(|&j| self.seats[j].garage.atv_up()?.flown(j, from, &self.place)))
+                    // The shared parked cars' bodies, which its resolve pushes (F72).
+                    .chain(parked.iter().flatten().enumerate().map(|(k, p)| p.flown(n + k, from, &self.place)))
                     .collect();
                 b
             });
@@ -2479,6 +2519,12 @@ impl<P: sim_world::World> Game for World<P> {
                 self.seats[me].garage.plane_reposed();
             }
             self.met_after(plane, met, bump.as_ref(), &mut struck);
+            // What its resolve did to the shared parked cars, written back (F72, `Sim::parked_pushed`).
+            if let (Some(cars), Some(b)) = (parked.as_mut(), bump.as_ref()) {
+                for f in b.planes.iter().filter(|f| f.seat >= n) {
+                    cars[f.seat - n].pushed(f);
+                }
+            }
         }
         // A flying seat's plane is its striker in the set's step (S259); the garage holds it.
         if let Some(p) = props {
@@ -2488,6 +2534,9 @@ impl<P: sim_world::World> Game for World<P> {
             for s in &mut self.seats {
                 s.garage.plane_reposed();
             }
+        }
+        if let Some(cars) = parked {
+            self.parked_back(cars, &resting);
         }
         true
     }
@@ -2571,6 +2620,38 @@ impl<P: sim_world::World> World<P> {
         }
     }
 
+    /// F72: the parked cars out of the seats for a pass of several, one copy for them all: seat 0's,
+    /// which every seat holds between passes ([`World::parked_back`]); the others' are dropped. A
+    /// lone seat's Sim steps its own (S485, `Sim::step`), and so does every seat while any has AI
+    /// riders, whose bikes meet them in that Sim's step: `None` then.
+    fn parked_out(&mut self) -> Option<Vec<game_sim::car::Parked>> {
+        if self.seats.len() < 2 || self.seats[0].sim.parked_cars.is_empty() || self.seats.iter().any(|s| !s.sim.others.is_empty()) {
+            return None;
+        }
+        for s in &mut self.seats[1..] {
+            s.sim.parked_cars.clear();
+        }
+        Some(std::mem::take(&mut self.seats[0].sim.parked_cars))
+    }
+
+    /// F72: the shared parked cars back in every seat after the pass, those that stepped to rest
+    /// asleep (S486, `Sim::parked_cars_sleep`); when one sleeps, every seat's AI riders' hulls stand
+    /// where they now rest (`Sim::park_cars`).
+    fn parked_back(&mut self, mut cars: Vec<game_sim::car::Parked>, resting: &[bool]) {
+        let mut slept = false;
+        for (p, _) in cars.iter_mut().zip(resting).filter(|(_, r)| **r) {
+            p.sleep();
+            slept = true;
+        }
+        for s in &mut self.seats {
+            if slept {
+                s.sim.park_cars(cars.clone());
+            } else {
+                s.sim.parked_cars.clone_from(&cars);
+            }
+        }
+    }
+
     /// What a seat's pass leaves for the others (N22a, N22b): its plane's pushes on the riders'
     /// bikes and the mirrors of its strikes for their lists, and its bike's bumps.
     fn met_after(
@@ -2588,7 +2669,9 @@ impl<P: sim_world::World> World<P> {
         if let Some(b) = bump {
             let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
             game_sim::rider_contact::bumped_riders(&mut all, b);
-            for f in &b.planes {
+            // The shared parked cars after the seats' (F72) are the caller's.
+            let seats = self.seats.len();
+            for f in b.planes.iter().filter(|f| f.seat < seats) {
                 self.seats[f.seat].garage.hull_pushed(f);
             }
         }
@@ -2979,6 +3062,66 @@ mod split_contact {
         assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
         assert!(woken, "the bike's strike never woke the truck");
         // Asleep it does not move at all; the 125's strike at 30 ft/s shoves it 0.09 ft on.
+        assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
+    }
+
+    /// F72: split screen's seats share one parked truck, as the original has one. The disc's truck is
+    /// settled 25 ft up seat 1's way and every seat is handed it; seat 0 stands 100 ft off. Seat 1's
+    /// bike rolls into its tail at 30 ft/s through the multi-seat step: the bike is stopped short of
+    /// it, the truck woken and pushed, and both seats' Sims hold that one truck where it went.
+    #[test]
+    fn split_seats_share_the_parked_truck_the_second_seat_pushes() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let rider = |x: f32| {
+            let mut sim = Sim::new(0xf72);
+            std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(x, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.sense.wrecks_enabled = false;
+            sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+            sim
+        };
+        let mut world = split(vec![rider(100.0), rider(0.0)]);
+        let in_play = crate::vehicle::InPlay::settled(&spots, &[false, false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+        assert_eq!(in_play.len(), 1, "the truck is parked");
+        for s in &mut world.seats {
+            s.garage.in_play = in_play.fresh();
+        }
+        world.simulate(DT, Input::default(), &mut Default::default());
+        let rest = world.seats[1].sim.parked_cars.first().expect("seat 1's Sim holds the truck").machine.body.position;
+        assert_eq!(world.seats[0].garage.in_play.handed(), vec![crate::vehicle::Machine::Monster], "the first seat draws it as the truck");
+        world.seats[1].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+        let mut woken = false;
+        for _ in 0..45 {
+            world.simulate(DT, Input::default(), &mut Default::default());
+            woken |= world.seats[1].sim.parked_cars.first().is_some_and(|p| p.awake());
+            let at = |i: usize| world.seats[i].sim.parked_cars.first().map(|p| p.machine.body.position);
+            assert_eq!(at(0), at(1), "the seats hold one truck");
+        }
+        let bike = world.seats[1].sim.rider.ride.position().z();
+        let pushed = world.seats[0].sim.parked_cars[0].machine.body.position.z() - rest.z();
+        println!("seat 1's bike at z {bike}, the truck woken {woken}, pushed {pushed} ft");
+        assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
+        assert!(woken, "the bike's strike never woke the truck");
         assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
     }
 
@@ -9025,6 +9168,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut before_helis: Vec<Option<(M4, Rotor)>> = Vec::new();
     // And each seat's driven car's (S245).
     let mut before_cars: Vec<Option<M4>> = Vec::new();
+    // And the parked cars' the first seat's Sim holds (F72).
+    let mut before_parked: Vec<M4> = Vec::new();
     // And each seat's quad's (MD138).
     let mut before_quads: Vec<Option<M4>> = Vec::new();
     let mut before_mxvatv_cars: Vec<Option<M4>> = Vec::new();
@@ -9098,6 +9243,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             std::mem::swap(&mut before_planes, &mut behind.planes);
             std::mem::swap(&mut before_helis, &mut behind.helis);
             std::mem::swap(&mut before_cars, &mut behind.cars);
+            std::mem::swap(&mut before_parked, &mut behind.parked);
             std::mem::swap(&mut before_quads, &mut behind.quads);
             std::mem::swap(&mut before_mxvatv_cars, &mut behind.mxvatv_cars);
             std::mem::swap(&mut before_surfaces, &mut behind.surfaces);
@@ -10154,6 +10300,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
         before_cars = world.seats.iter().map(|seat| Some(car_draw::placed(seat.garage.car_up()?.driven.as_ref()?))).collect();
+        before_parked = world.seats[0].sim.parked_cars.iter().map(|p| car_draw::placed(&p.machine)).collect();
         before_quads = world.seats.iter().map(|seat| quad_draw::placed(seat.garage.atv_up()?)).collect();
         before_mxvatv_cars = world.seats.iter().map(|seat| mxvatv_car_draw::placed(seat.garage.mxvatv_car_up()?)).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
@@ -12255,6 +12402,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     car_draw::trace_bay(drawn, car_draw::bay_at(bay));
                 }
             }
+            // And the cars the original parks in play (F72, free09's monster truck), solid where the
+            // Sim holds them, posed by their tires: one a bike pushed is seen moved.
+            let parked = parked_drawn(&world.seats[0], &before_parked, cut[0], &blend);
+            for (k, (machine, p, at)) in parked.into_iter().enumerate().filter(|_| !args.overview) {
+                let Some(drawn) = car_draw::find(&car_models, machine, 0) else { continue };
+                actors.extend(car_draw::actors(drawn, &assets, &car_draw::machine_tires(&p.car, &p.machine), at, 1.0, &mut gpu_poses));
+                if args.trace_picture {
+                    car_draw::trace_parked(k, "gpu", drawn, at);
+                }
+            }
             // And every player's helicopter while it is flown (P216), solid, in its own livery, at
             // the measure's matrix (where the original draws it), its rotor at the flight's angle;
             // slid between the last two ticks as the plane is unless the seat cuts (P216b).
@@ -12657,6 +12814,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("car@seat{p}")).collect();
             let quad_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("quad@seat{p}")).collect();
             let mxvatv_car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("mxvatv_car@seat{p}")).collect();
+            let parked_copies: Vec<String> = (0..world.seats[0].sim.parked_cars.len()).map(|k| format!("parked_car@{k}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -12782,6 +12940,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         }
                     }
                     actor.push((model.as_str(), pilot.at));
+                }
+            }
+            // And the cars the original parks in play (F72), solid, slid as the GPU's are.
+            let parked = parked_drawn(&world.seats[0], &before_parked, cut[0], &blend);
+            for (k, (machine, p, at)) in parked.into_iter().enumerate().filter(|_| !args.overview) {
+                let Some(drawn) = car_draw::find(&car_models, machine, 0) else { continue };
+                actor.push(car_draw::skinned(drawn, &parked_copies[k], &mut assets, &car_draw::machine_tires(&p.car, &p.machine), at));
+                if args.trace_picture {
+                    car_draw::trace_parked(k, "software", drawn, at);
                 }
             }
             // And the driven car (S245), solid, slid as the GPU's is, with its driver.
@@ -13658,6 +13825,7 @@ struct Behind {
     planes: Vec<Option<M4>>,
     helis: Vec<Option<(M4, Rotor)>>,
     cars: Vec<Option<M4>>,
+    parked: Vec<M4>,
     quads: Vec<Option<M4>>,
     mxvatv_cars: Vec<Option<M4>>,
     surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>>,
