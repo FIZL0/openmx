@@ -102,6 +102,8 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// are the original's within 0.004 ft but for the chassis' fresh start (to 16) and each AI rider's
 /// bars jump (S490_HOLDS_APART). Ridden in the frame, ai0's parts stay within 0.093 ft through 130
 /// (part 7 within 0.01 at 24-36). This replay goes in the frame once B42 moves the early touch.
+/// B42: the main bone is set with the last step's rest, and ridden in the frame ai0's parts stay
+/// within 0.0066 ft through 134; the foot dust draws on 132 with the original's (T9a).
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -446,13 +448,14 @@ fn s490_c33s_bodies_posed_in_the_frame_follow_the_original() {
 }
 
 /// How far any of ai0's riding parts may be from the original's in [`c33_replay`]'s in-frame run, in
-/// feet: 0.08 is the worst seen (0.04 to 0.05 at 127-131, after the restart at 120).
-const S490_BONES_WITHIN: f32 = 0.1;
-/// The last tick the in-frame run is held to. At 130 ai0's foot ball (bone 17) is 0.02 ft low and
-/// touches, a tick before the original's: its foot dust then draws on 131, the original's on 132.
-/// That gap stays with the original's joints and holds both fed, and the actor's fades, damping and
-/// hold pins agree, so it is in the riding body's own step after the restart at 120.
-const S490_THROUGH: u64 = 130;
+/// feet: 0.0066 is the worst seen (part 15 at 35). Before B42 it was 0.08 (0.04 to 0.05 at 127-131,
+/// after the restart at 120), the main bone set with this frame's rest and not the last one's.
+const S490_BONES_WITHIN: f32 = 0.01;
+/// The last tick the in-frame run is held to: past the foot dust's 132 and the foot ball's lift
+/// after 133. Before B42 ai0's foot ball (bone 17) was 0.02 ft low at 130 and touched a tick early,
+/// its foot dust drawing on 131; now it draws on 132 with the original's. Held through 400, the
+/// bones stay within [`S490_BONES_WITHIN`] until ai0's drawn holds jump 0.09 ft at 198 (R56).
+const S490_THROUGH: u64 = 134;
 
 /// T9: how far each rider's drawn chassis holds ([`c33_hold`], drawn in the frame after its body)
 /// may be from the original's request after the frame ([`c33_frame_holds`]), in feet: the root's
@@ -893,6 +896,11 @@ fn c33_riding_seed(
             })
             .collect();
         riding.seed_drawn(game_sim::ragdoll_ride::drawn(&nodes));
+        // B42: the main part's joint record (`+0x234`, 0x60 a joint, rest at `+0x50`), which the
+        // first step's set reads before that frame's normalise call rewrites it.
+        let main_joint = bodies[k].1.nodes[game_sim::ragdoll::MAIN] as u32;
+        assert_eq!(ee.u32_at(parts + 0x40), main_joint, "the main part's joint");
+        riding.seed_main_rest(quad(ee.u32_at(a + 0x234) + 0x60 * main_joint + 0x50));
         rider.body.veh.state = riding.actor.clip;
         rider.riding = Some(Box::new(riding));
         rider.holds = Some(Arc::new(holds));

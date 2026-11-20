@@ -74,6 +74,10 @@ pub struct Riding {
     /// they are the clip's drawn before it (S257), which the riding entry out of a trick moves from.
     pub(crate) was: Option<Vec<Mat4>>,
     pub(crate) rng: Rng,
+    /// The main part's rest as the last step's skeleton had it (B42): what this tick's main bone is
+    /// set with, as the original's set reads the joint record before the normalise call rewrites it
+    /// (R54). `None` before the first step, which sets with the rig's rest.
+    pub(crate) main_rest: Option<Vf>,
 }
 
 /// **What the drawn bike hands the riding body** (S110): the chassis' root node ("Bike") and the four
@@ -103,7 +107,7 @@ impl Riding {
         actor.slow_speed = SLOW_SPEED;
         actor.foot_points = FOOT_POINTS;
         actor.bike_box = BIKE_BOX;
-        Riding { actor, drawn: None, was: None, rng: Rng::new() }
+        Riding { actor, drawn: None, was: None, rng: Rng::new(), main_rest: None }
     }
 
     /// **One tick**: the skeleton's points and rests off `posed` (or the rig's fixed riding pose)
@@ -160,7 +164,11 @@ impl Riding {
         for (i, rest) in rests.iter_mut().enumerate() {
             *rest = posed.and_then(|p| p.rests.get(i)).or(kit.rig.parts.get(i).map(|p| &p.rest)).copied().unwrap_or(UNIT_W);
         }
-        let skeleton = Skeleton { points, rests, main_rest: rests[MAIN] };
+        // The main bone is set with the rest the last step left (B42, R54): the original's set reads
+        // the joint record before this frame's normalise call rewrites it.
+        let rig_rest = kit.rig.parts.get(MAIN).map_or(UNIT_W, |p| p.rest);
+        let skeleton = Skeleton { points, rests, main_rest: self.main_rest.unwrap_or(rig_rest) };
+        self.main_rest = Some(rests[MAIN]);
         self.actor.clip = clip;
         let was = self.history(kit);
         // A posed tick keeps the drawn matrices from before it (S257): out of a trick the entry
@@ -230,6 +238,13 @@ impl Riding {
     /// until it is stepped, and without them that first pose falls back on the skeleton's nodes.
     pub fn seed_drawn(&mut self, drawn: Vec<Mat4>) {
         self.drawn = Some(drawn);
+    }
+
+    /// **The main part's rest a loaded body's joint record holds** (B42): what its first step sets
+    /// the main bone with, as the original's set reads the record the frame before left. Unseeded,
+    /// that first step sets with the rig's rest.
+    pub fn seed_main_rest(&mut self, rest: Vf) {
+        self.main_rest = Some(rest);
     }
 
     /// The bodies' nodes' drawn matrices before a step, while the body is placed.
