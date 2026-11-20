@@ -14589,3 +14589,17 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   the world ray 0x004af7b0 misses it. Faces met: normal (0.1073, 0, 0.9942), then (0.0243, 0, 0.9997)
 #   from row ~365. Eye up to 5.68 ft behind the face (row ~352). Boost +0x29 reads 0 on every row.
 #   Quad +0x448 reads 21..32 here: not a dt. Replay: goal to 2e-6 ft, eye to 3e-5 ft on 653 frames.
+# C44 — player 1's plane dropped before a riding AI bike (tests/ai/c44.rs; journal
+#   2026-11-20-c44-plane-dropped-before-an-ai-bike). biplane.p2m2's state is free06 (not free09); its AI
+#   riders a0 0x018f7290 (brain 0x01934ec0), a1 0x019a44b0 (0x0188c530), a3 0x01881b10 (0x00850910),
+#   human 0x01890cd0; seats 1-3 by s12e_bike's player. A plane parked in a rider's way is steered round
+#   (16 ft off); research/c44/drop.py puts it 0.5 s ahead of a1 by its put-back. State
+#   context/states/c44-drop.eeMemory.bin (frame 11127, bodies = row 11128); csv context/capture/c44/drop-a.csv,
+#   frames 11130.., dt 0.03333 every row; drop-b and try2 equal on 149 common rows. a1 backs up from 11135
+#   (levers +0x628..+0x648: reverse 1, gas 0, brake 0), lists the plane's record 0x01e73b00 from 11145
+#   (kind-1 mirrors first), the plane pushed from 11146, wreck reason 7 at 11183. Lever phase: the ride
+#   into row t reads row t-1's levers. The AI's levers are the rider's own words: the pad's reverse
+#   rule (P72) does not run on them, so the reverse lever alone pushes the bike back at any speed
+#   (ReverseGain 30 x (-14.67 - speed) / mass 12.42; the original's extra slowing over a coasting bike is
+#   0.86..1.23 of it). The port's ride runs the rule on the AI's controls and drops that reverse: replay
+#   bit for bit through 11134, parts at 11135.

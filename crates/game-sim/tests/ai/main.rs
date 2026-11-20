@@ -126,6 +126,7 @@ mod career_roster; // S12f: the career rounds' rosters
 mod wreck_dust; // S422: the collision models and the foot dust on a wreck
 mod flown; // S479: the AI riders while player 1 flies
 mod flown_knock; // S492: an AI bike knocks a prop while player 1 flies
+mod c44; // C44: player 1's plane dropped before a riding AI bike, through the plane lane
 mod split_car; // R22: a split-screen bike into the other player's parked buggy
 
 use avoidance::*;
