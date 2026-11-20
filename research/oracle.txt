@@ -14449,3 +14449,36 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   Not checked: an asleep ball struck (the test's ball is already awake); the port's ball/bike bits
 #   against this run (the port's own another_rider_strikes_while_player_1_flies checks a player-2 bike
 #   against step_all, not this capture).
+# R22 — a split-screen bike into the other player's parked buggy (tests/ai/split_car.rs
+#   r22_a_split_bike_strikes_the_other_players_parked_buggy; capture watch/r22-split-car.toml, research/r22/)
+#   Journal: research/journal/2026-11-20-r22-split-bike-into-parked-buggy.
+#   Getting the car into split free09: Freestyle > Montauk Plains > setup page, Number Of Players 2,
+#   Machine 2 right x3 (Trophy Truck > Biplane > Helicopter > Dune Buggy); rider select P2 "No" to the
+#   profile (down, cross), both Start. Each player's machine is placed: P1 a monster truck (kind 4,
+#   actor 0x01a68e00), P2 a buggy (kind 3, actor 0x017ea820, body 0x01394700). P2's pause: down once
+#   "Switch To Machine", right to Dune Buggy, cross cross. The buggy put on P1's line by
+#   research/c34/place.py, P2 holding its brake (square; it rolls downhill at 4.8 ft/s without).
+#   State: states/r22/pre.ram, frame 12006. P1's ridden vehicle 0x0187f6d0 (player +0x30 0), chassis
+#   0x01356440, record 0x01359240; P2's parked bike 0x0137b2d0. Car record = actor+0x170 = 0x017e5c90.
+#   Level node 0x01a6af50 (+0x30 count 4, +0x38 list): truck rec 0x00c6b590, car rec 0x017e5c90, bike
+#   rec 0x01359240, 0x00df8410 (P2's parked bike's, by its pointers; not proved).
+#   Each tick, in order (returns logged):
+#   - collide 0x002708a0 on the node's 4 records, node order: the car's before the bike's;
+#   - node dynamics world 0x01a6afc8 (step 0x001f29a0): car_preforce 0x00397500 truck then buggy,
+#     4 resolves 0x00270dc0 of the car record, car_measure 0x00398150 (buggy);
+#   - player updates 0x0027c890: P2's parked bike 0x0137b2d0, then P1 0x0187f6d0 (2 resolves of the
+#     bike record inside it); then bike world 0x00dbcde0.
+#   So the car steps before every rider, whichever seat it is.
+#   Strike, frame 12012 (capture and interpreter equal bit for bit, 12007..12015):
+#   - bike record: [k1->car, k1->car, k1->car, k0->car]: the car's 3 rays' mirrors at the head, then the
+#     bike's one body ray. Normal ~(0.32, -0.12, -0.94). Struck words +0x40..+0x4c [1, 1, 0, 1].
+#   - car record: [k0->bike x3 (its own rays), k1->bike (the bike ray's mirror, after its own)]. Struck
+#     [1, 1, 0, 1]. 12013 same lists; 12014..12016 the car's 3 rays alone (and mirrors); none from 12017.
+#   - the car's first resolve (in its own step) takes the bike chassis +0x260 from 46.16 to 4.28 ft/s
+#     and the car body +0x70 to 3.42 ft/s; the step ends with the car at (-0.6998383, 0.2832146,
+#     2.2283938), 2.3528 ft/s. P1's update (the bike's 2 resolves) writes no word of the car body
+#     (0x300 bytes) nor its actor (0x800) nor its entries; of the record only +0xa0..+0xa8. The bike
+#     ends at (0.5428, 0.8805, -1.6497): thrown back off the tail.
+#   Port (main.rs World::simulate, car.rs) differs: no car rays on the bikes (F26 "not ported"); the
+#   bike's resolve pushes the car's body (Bump::planes, Car::pushed) where the original's car resolve
+#   does the meeting first; the seat order (other seats last first) steps a seat-0 car after a seat-1 bike.
