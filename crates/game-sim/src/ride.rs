@@ -942,6 +942,10 @@ pub struct Ride {
     /// motion. The [`crate::Sim`] lends them before the bike's frame and takes them back after it, so
     /// between frames this is `None`, and the hash walk and the snapshot never see it.
     pub props: Option<Box<crate::prop_wheel::Lent>>,
+    /// **The parked cars, lent for the frame** (F73, [`crate::ragdoll_scene::ParkedCar`]): the downed
+    /// rider's bones meet their hulls and mark the ones they strike, which the [`crate::Sim`] wakes
+    /// after the frame. Empty between frames, and the hash walk and the snapshot never see it.
+    pub parked: Vec<crate::ragdoll_scene::ParkedCar>,
 }
 
 impl Ride {
@@ -1017,6 +1021,7 @@ impl Ride {
             back_search: None,
             nearby: None,
             props: None,
+            parked: Vec::new(),
         };
         ride.place(at, facing);
         ride

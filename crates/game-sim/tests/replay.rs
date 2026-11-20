@@ -14262,6 +14262,9 @@ fn s485_capture() -> Option<Vec<[f32; 11]>> {
 /// S486c: that wake on the 10th is this spot's phase, not the original's cause: the port's bike stops
 /// 0.6 ft short of theirs, its wreck bike coasts into the nose late, and lined up it has left the
 /// nose by the 8th (`the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original`).
+/// F73: the thrown rider's bones meet the truck's hull, lie against its nose and wake it on the 10th
+/// and the 12th (and the 14th and 16th, which the original's does not). The rider is put back 9
+/// frames before the original's.
 #[test]
 fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let Some(cap) = s485_capture() else { return };
@@ -14311,6 +14314,9 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     assert!(!port[ours + 11].awake, "strike+11: asleep again");
     let step = port[ours + 11].truck.z() - port[ours + 10].truck.z();
     assert!(step > 0.0 && step < 0.003, "strike+11: the truck stepped {step} ft, the original's 0.0009");
+    // And the thrown rider's bones, against its nose, wake it again on the 12th (F73).
+    assert!(port[ours + 12].awake && cap[theirs + 12][1] != 0.0, "strike+12: the bones' wake");
+    assert!(!port[ours + 13].awake, "strike+13: asleep again");
     assert!(port[ours + 20..].iter().all(|p| !p.awake), "the truck stays asleep");
     // Where it slid to: 0.2 ft north, the other axes still.
     let last = port.last().unwrap();
@@ -14320,12 +14326,14 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     println!("slid {slid} ft, the original's {want}");
     assert!((slid - want).abs() < 0.02, "the truck slid {slid} ft, the original's {want}");
     assert!((last.truck.x() - port[0].truck.x()).abs() < 0.03 && (last.truck.y() - port[0].truck.y()).abs() < 0.01);
-    // The rider is put back short of the nose about when the original's is.
+    // The rider is put back short of the nose about when the original's is: 9 frames early since
+    // F73, the bones wedged against the nose settling sooner than the original's.
     let back = |z: Vec<f32>| z.windows(2).position(|w| w[1] < w[0] - 5.0).map(|t| t + 1);
     let ours_back = back(port.iter().map(|p| p.bike.z()).collect()).expect("the port's rider put back");
     let theirs_back = back(cap.iter().map(|r| r[10]).collect()).expect("the original's rider put back");
     println!("put back: port tick {}, the original's row {theirs_back}", ours_back + 1);
-    assert!((ours_back as i64 + 2 - theirs_back as i64 - lag).abs() <= 2, "put back at port tick {}", ours_back + 1);
+    let early = theirs_back as i64 + lag - ours_back as i64 - 2;
+    assert!((0..=11).contains(&early), "put back at port tick {}, {early} frames early", ours_back + 1);
 }
 
 /// S486c: S485's spot moved 0.68 ft along `z`, where the port's slower pull-away (S485's test) leaves
@@ -14344,8 +14352,13 @@ const S486C_BIKE: [f32; 3] = [S485_BIKE[0], S485_BIKE[1], S485_BIKE[2] + 0.68];
 /// 0.01 ft for 4 frames (3827.926, .950, .927, .860; theirs .918, .943, .925, .858). Not matched:
 /// from there the nose pushes it back at ~2.6 ft/s against theirs' ~3.1, so it trails theirs by
 /// 0.08 ft 8 frames on and 0.13 ft 12 on. It leaves the nose 8 frames after the strike, so it is not what wakes the
-/// original's truck at rest on rows 68 and 70 (10 and 12 frames after): the port's rider is thrown
-/// through the truck's body, whose collidable the bones do not meet.
+/// original's truck at rest on rows 68 and 70 (10 and 12 frames after).
+///
+/// F73: the thrown rider's bones do. They meet the truck's hull (`ragdoll_scene::ParkedCar`), lie
+/// against its nose, and wake it at rest on the 10th and the 12th frames, as ride1.csv's. Not
+/// matched: the port's rider stays wedged there (its main bone past the nose's face from the 4th
+/// frame), and goes on waking it every other frame until the put-back, where the original's sleeps
+/// from the 13th on.
 #[test]
 fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
     let Some(cap) = s485_capture() else { return };
@@ -14360,9 +14373,21 @@ fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
     assert!(port[ours].wrecked, "the rider wrecks on the strike");
     for k in 0..13 {
         let (got, want) = (port[ours + k].wreck.z(), cap[theirs + k][10]);
-        println!("strike+{k}: wreck bike z {got:.3} / {want:.3}, truck vz {:.4} / {:.4}", port[ours + k].truck_vel.z(), cap[theirs + k][7]);
+        println!(
+            "strike+{k}: wreck bike z {got:.3} / {want:.3}, truck awake {} / {}, vz {:.4} / {:.4}",
+            port[ours + k].awake as u8,
+            cap[theirs + k][1],
+            port[ours + k].truck_vel.z(),
+            cap[theirs + k][7]
+        );
         let near = if k < 4 { 0.02 } else { 0.15 };
         assert!((got - want).abs() < near, "strike+{k}: the wreck bike at z {got}, the original's {want}");
+    }
+    // F73: the thrown rider's bones lie against the nose and wake the truck at rest on the 10th and
+    // the 12th frames, as the original's, and it sleeps again between and after.
+    for k in 9..14 {
+        let (got, want) = (port[ours + k].awake, cap[theirs + k][1] != 0.0);
+        assert_eq!(got, want, "strike+{k}: the truck awake {got}, the original's {want}");
     }
     // It slides back from the first tick after, as theirs from the second.
     let back = |z: &[f32]| z.windows(2).position(|w| w[1] < w[0]);

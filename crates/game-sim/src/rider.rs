@@ -932,7 +932,8 @@ impl Rider {
                 };
                 // The bones strike the knockable props lent for the frame too (S240).
                 let knockable = ride.props.as_deref_mut().map(|l| &mut l.0);
-                doll.step_posed_among(kit, skeleton.as_deref(), dt, down, world, !unwrecks, knockable);
+                // And the parked cars lent for the frame (F73).
+                doll.step_posed_parked(kit, skeleton.as_deref(), dt, down, world, !unwrecks, knockable, &mut ride.parked);
                 out.separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
             }
         }
@@ -1490,7 +1491,7 @@ impl Rider {
         self.wreck_clocks.voice_entry(&mut self.wreck_sounds, &self.wreck_kit, i32::from(reason.0), rng);
         let held = doll.ragdoll.holds[0] || doll.ragdoll.holds[1];
         let knockable = self.ride.props.as_deref_mut().map(|l| &mut l.0);
-        doll.step_posed_among(kit, self.skeleton.as_deref(), dt, down, world, true, knockable);
+        doll.step_posed_parked(kit, self.skeleton.as_deref(), dt, down, world, true, knockable, &mut self.ride.parked);
         let separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
         self.ragdoll = Some(doll);
         separated
