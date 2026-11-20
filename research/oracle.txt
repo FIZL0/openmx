@@ -13938,6 +13938,17 @@ atv_bike_pad_reader         atv 0x004e36c0 = the bike/quad pad reader (quad vtab
 # Spawn: in md80a kiowa/kiowa3 the never-wrecked player (0x01ab7d20 / 0x014c8f00) holds the unwreck's
 #   -1369.9998779 (0xc4ab3fff), the idle twins (0x01b20740 / 0x01537000) the load's -1370; the port now
 #   builds the MX vs. ATV player's Ride with the former. Which spawn path calls the unwreck: not found.
+# S400 — R33's follow-up (the Kiowa's wreck entry and unwreck held to SLUS-21104's as MD112 held the plane's)
+#   was done by MD63f, which landed the day after R33 filed it: the port runs Crash::wreck_mxvatv +
+#   Wreckage::wreck_mx / unwreck_mx (openmx vehicle.rs via Wreckage::act_on), and the test above holds
+#   MXVehicle's base entry and unwreck to them bit for bit: the +0xbbc gate (kind 3, always taken), both
+#   dampings, the inertia scaled and its inverse (1/lane, 0 where <= 0: the Kiowa inverts the inertia as the
+#   plane does, no MX Unleashed division), rates *1.0, the blade throw unless reason 13, the unwreck's zeroed
+#   pad / altitude fraction / held height (+0x10f0..+0x1104, +0x1138). Only the posts were not the port's:
+#   now Wreckage::posts (flight::Posts) counts 11 per wreck and 13 per unwreck with Wreckage::mxvatv on,
+#   asserted against the original's hooked atv_post_event calls in the same 10000 cases. Neither posts 12
+#   (posts.latch stays 0; whether the Kiowa's crash test posts the plane's 12 is not checked). Nothing in the shell reads
+#   the Kiowa's counts yet (the plane's drive the rumble).
 # P328 — the race HUD's flags (journal 2026-11-16-p328-race-flags).
 race_overlay_bind           boot 0x002a6c60 (overlay) RacingOverlays' bind: children by name, +0xa4 Position,
 #                                           +0xa8 Lead, +0xac Lap, +0xb0 Time, +0xb8 WhiteFlag, +0xbc CheckerFlag,

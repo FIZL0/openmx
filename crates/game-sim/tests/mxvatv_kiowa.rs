@@ -983,6 +983,7 @@ fn the_mxvatv_wreck_and_unwreck_are_the_originals() {
             mass: F(mass),
             body_inertia: quad(&ee, body + wreck_at::BODY_INERTIA),
             nodes: Nodes { rotor: [hidden[1], hidden[2], hidden[3]], intact: hidden[4], wrecked: hidden[5] },
+            mxvatv: true,
             ..Wreckage::default()
         };
         let mut kiowa = Kiowa::default();
@@ -1017,6 +1018,9 @@ fn the_mxvatv_wreck_and_unwreck_are_the_originals() {
             counts[2] += usize::from(reason == THROWN);
         }
         assert_eq!(*asked.borrow(), want_asked, "case {case}: the calls out (reason {reason})");
+        // S400: MXVehicle's posts, counted as the plane's (flight::Posts): 11 a wreck, 13 an unwreck.
+        let posted = |n: u32| asked.borrow().iter().filter(|s| **s == format!("event 8 {n}")).count() as u32;
+        assert_eq!((w.posts.wreck, w.posts.latch, w.posts.unwreck), (posted(11), posted(12), posted(13)), "case {case}: the posts");
         assert_eq!(ee.u32_at(HELI + at::REASON), ride.crash.reason, "case {case}: the reason");
         same("the clock", case, ride.crash.clock, ee.f32_at(HELI + at::CLOCK));
         assert_eq!(ee.u32_at(HELI + at::DOWN) != 0, ride.crash.down, "case {case}: the latch");

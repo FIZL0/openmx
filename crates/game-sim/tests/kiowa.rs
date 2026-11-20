@@ -2043,6 +2043,7 @@ fn wreckage_of(ee: &Ee, mut blades: game_sim::kiowa::Blades) -> game_sim::kiowa:
         place: quads(ee, HELI + wreck_at::PLACE),
         spawn: quads(ee, HELI + wreck_at::SPAWN),
         mxvatv: false,
+        posts: Default::default(),
         nodes: Nodes { rotor: [hidden[1], hidden[2], hidden[3]], intact: hidden[4], wrecked: hidden[5] },
         blades: {
             blades_from(ee, &mut blades);

@@ -2456,6 +2456,11 @@ pub struct Wreckage {
     /// the place first, and the bodies placed by their model's origin ([`Wreckage::put_back`],
     /// [`Wreckage::throw_blades`]). Off: MX Unleashed's.
     pub mxvatv: bool,
+    /// What SLUS-21104's wreck and unwreck post (S400), counted as the plane's are
+    /// ([`crate::flight::Posts`]): MXVehicle's base entry's 11 on every wreck (a thrown helicopter's
+    /// too) and its base unwreck's 13 on every unwreck (the put-back's). Counted only with
+    /// [`Wreckage::mxvatv`] on. Neither posts the plane's 12, so `latch` stays 0.
+    pub posts: crate::flight::Posts,
     /// The four thrown blades. [`Wreckage::new`] leaves none: building them off the disc's files is
     /// [`Blades::new`]'s, and the caller's to put here.
     pub blades: Blades,
@@ -2585,6 +2590,9 @@ impl Wreckage {
     /// player's pad rumbles too.)
     pub fn wreck_mx(&mut self, ride: &mut Ride, reason: u32, throw: &Throw, rng: &mut Rng) {
         self.wreck(ride, reason);
+        if self.mxvatv {
+            self.posts.wreck = self.posts.wreck.wrapping_add(1);
+        }
         if reason != THROWN {
             self.throw_blades(ride, throw, rng);
         }
@@ -2665,6 +2673,9 @@ impl Wreckage {
     /// always builds both.)
     pub fn unwreck_mx(&mut self, ride: &mut Ride) {
         self.unwreck(ride);
+        if self.mxvatv {
+            self.posts.unwreck = self.posts.unwreck.wrapping_add(1);
+        }
         ride.rotor_hidden = false;
         self.nodes = Nodes { rotor: [false; 3], intact: false, wrecked: true };
         for k in 0..self.blades.set.objects.len() {
