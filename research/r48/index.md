@@ -116,3 +116,17 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
 - Left: from 1573 the braked rear tires stick-slip (force z flips ±4000 each substep). Small
   differences (rear spin after 1570: Sim 0.024 / -6.486, oracle 0.088 / -6.382) grow. The truck is
   3 ft/s slow at 1588, and from 1615 the two part (the Sim's truck climbs, vy 6-15).
+
+### In the riders' world (S491)
+
+- Tried: `Parked::struck` set the driven word, `Parked::frame` cleared it after the step (as
+  `InPlane`). The car steps the frame after a bike's strike, so it drove brakes-off then.
+- S484's `ride1.csv` says no. Strike+1 vz: brakes-off 2.533, ride1.csv 1.752, undriven (as now)
+  1.744. Brakes-off, the leaning wreck bike strikes it every frame and it drives on at ~1.7 ft/s
+  through strike+15 (ride1.csv: asleep from +13, slid 0.203 ft). Both S485 tests fail with it.
+- So the original's truck is braked on the step after a riders' strike. The change was reverted:
+  `Parked` stays undriven.
+- Not known: why. The clear (pc 0x3e1934) is in the truck's post 0x003e1710, after the controls,
+  so either something else clears +0x4ac between the riders' node and the car's next step, or the
+  bike's wake does not go through the enable 0x398c50. A store watch on car +0x4ac over S484's ride
+  (research/s484/truck.sh) would tell.
