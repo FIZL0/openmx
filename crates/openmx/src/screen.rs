@@ -213,6 +213,9 @@ impl Screen {
     pub fn refresh(&self) -> Option<f32> {
         match &self.inner {
             Inner::X(_) => None,
+            #[cfg(not(any(target_os = "ios", target_os = "android", target_arch = "wasm32")))]
+            Inner::Gpu(w) => w.refresh_now(),
+            #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
             Inner::Gpu(w) => w.refresh,
         }
     }

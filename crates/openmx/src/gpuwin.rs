@@ -285,6 +285,15 @@ impl GpuWindow {
         self.config.present_mode == wgpu::PresentMode::Fifo
     }
 
+    /// The display's refresh in hertz as the window says it now (P345): [`GpuWindow::refresh`], or,
+    /// where the window had no display yet when it opened — Wayland's, which learns its output only
+    /// once the window is shown — the one it is on since.
+    pub fn refresh_now(&self) -> Option<f32> {
+        self.refresh.or_else(|| {
+            self.window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map(|mhz| mhz as f32 / 1000.0).filter(|hz| *hz >= 30.0)
+        })
+    }
+
     /// Take in whatever the window has said, without waiting.
     pub fn poll(&mut self) {
         self.state.tapped = [false; KEYCODES];
