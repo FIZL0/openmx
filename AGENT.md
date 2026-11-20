@@ -91,4 +91,4 @@ branch; the runner merges, tests and pushes the shared one (`docs/agent/TASKS.md
 (an openmx-mods branch for your task) or other ad-hoc work goes in `$(agent-runner home)/wt/<slug>`, never beside
 the checkouts in `~/repos` (`../openmx-mods-<id>`); `git worktree remove` it once its branch is pushed.
 
-Tasks: this repo is worked by agent-runner. Use the agent-runner skill (or run `./kit guide`): queue work with `./kit plan add`, never edit the plan's TODO.md by hand, never merge task/* or wip/* branches.
+Tasks: this repo is worked by agent-runner. Use the agent-runner skill (or run `./kit guide`): queue work with `./kit plan add`, never edit the plan's TODO.md by hand, never merge task/* or wip/* branches. Asked to do something now? Use `./kit take "what" --kind K` (a worktree of your own; `--here` brings edits already made along); never edit the main checkout.
