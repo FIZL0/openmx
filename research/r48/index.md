@@ -130,3 +130,38 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
   so either something else clears +0x4ac between the riders' node and the car's next step, or the
   bike's wake does not go through the enable 0x398c50. A store watch on car +0x4ac over S484's ride
   (research/s484/truck.sh) would tell.
+
+## The thrown rider against the nose (R55)
+
+S486c's lined-up ride (`S486C_BIKE`, tests/replay.rs), probed with temporary prints (all removed).
+The strike is port tick 59; the rider is thrown at 54 ft/s (reason 1, throw (0, 400, -191) on the
+main bone for 0.2 s, hands held to +9). The nose's face is the hull's -z face at z 3831.2; the
+hull's underside is at y 135.95, so every bone (y 136.4-140) meets the face, none goes under it.
+
+- **Why the bones get through: they tunnel, they are not pushed through.**
+  1. On strike+1 (the first wreck frame) the bones' search is not built (no sphere has stood while
+     riding, S105), so no bone meets the truck that frame.
+  2. The ragdoll world steps one substep a frame (rate 25, dt 1/30) and integrates before its
+     three constraint passes. At 54 ft/s a bone moves 1.8 ft before anything tests it.
+  3. The sphere-mesh test is one-sided: a centre past a face's plane gets no contact from it.
+  4. The hull's class (0x52058) is not in the bone sweep's include list (0x20, S166), so nothing
+     sweeps it back out.
+  - Bone 17 is behind the face on +1, bones 3 and 16 on +2, bones 0 and 2 by +4: five bones end
+    inside the hull for the whole ride (four after +20). The joints hold the rest against the face,
+    so a front sphere touches it every frame and wakes the truck every other frame.
+  - Not deep first contact and not the joints: nothing has met the face when they cross.
+- **Lending the hull on the first frame too** (temporary: the parked cars listed around the first
+  sphere's centre while the search is unbuilt): no bone stays behind the face after +2. The wakes
+  at +10 and +12 still match ride1.csv's. But the head (bone 3) leans on the face, and the truck
+  wakes every other frame through +18 (the original's sleeps from +13). From S485's spot the
+  put-back does not move (port tick 138, the original's row 147).
+  - So the wedge is not the whole story, and it is not why the put-back is 9 frames early.
+- **Is the wedge the original's?** Probably: the first frame's empty search is S105's model, and
+  S166 says the original's bones tunnel through moving collidables too. Nothing in the port
+  should change on this evidence.
+- **Should the port's bones leave the nose by +13?** ride1.csv cannot say: it has no bone rows.
+  Its truck sleeping from +13 says only that the original's bones stop striking the hull by then.
+  Wedged or not, the port's keep striking it, so something else differs (the throw, or how the
+  rider falls off the face).
+  - What would tell: S484's ride re-recorded with the rider's ragdoll part bodies per row
+    (research/s484/ride.py), compared with the port's bones from strike+1.
