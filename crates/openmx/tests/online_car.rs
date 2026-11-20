@@ -98,53 +98,88 @@ fn ride_online_with(track: &str, frames: u32, scripts: [Option<&str>; 2], extra:
     // by the shell after its load was a window another slot's test could take it in (K29). The
     // host says its port; the guest is started on it; the host takes the guest's from its first
     // datagram (`net::udp`'s port-0 peer).
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let frames = frames.to_string();
     let ride = |me: &str, peer: &str, script: Option<&str>| {
-        let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
-        shell
-            .current_dir(&root)
-            .args(["--headless", "--track", track, "--frames", &frames, "--seats", "host,g"])
-            .args(["--online", me, "--peer", peer])
-            .stdout(std::process::Stdio::piped());
+        let mut words = vec!["--headless", "--track", track, "--frames", &frames, "--seats", "host,g", "--online", me, "--peer", peer];
         if me.starts_with("host@") {
-            shell.args(extra);
+            words.extend(extra);
         }
-        if let Some(s) = script {
-            shell.args(["--online-script", s]);
-        }
-        let mut kid = shell.spawn().expect("the shell starts");
-        // Its output, each line also sent on as it comes (the host's port).
-        let mut out = std::io::BufReader::new(kid.stdout.take().expect("piped stdout"));
-        let (lines, heard) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let mut said = String::new();
-            let mut line = String::new();
-            while std::io::BufRead::read_line(&mut out, &mut line).is_ok_and(|n| n > 0) {
-                let _ = lines.send(line.clone());
-                said.push_str(&line);
-                line.clear();
-            }
-            said
-        });
-        (kid, reader, heard)
+        shell(&words, script)
     };
-    let (mut host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0", scripts[0]);
-    let at = loop {
+    let (host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0", scripts[0]);
+    let (at, host, host_said) = said_after(host, host_said, &heard, "online: host on ", "port");
+    let at = at.split(',').next().unwrap().to_string();
+    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"), scripts[1]);
+    both_end([host, guest], [host_said, guest_said])
+}
+
+/// N27: two shells meeting in a LAN lobby room on `track` (`--lobby host`, then `--lobby join:CODE`
+/// on the code the host says) and riding its ride for `frames` ticks, host's and guest's on
+/// `scripts`, `extra` on the host's command line: each one's output. A lobby's ride takes a second
+/// player on a machine as it runs (`sit`), which a `--online` ride does not.
+fn ride_lobby(track: &str, frames: u32, scripts: [Option<&str>; 2], extra: &[&str]) -> [String; 2] {
+    let frames = frames.to_string();
+    let mut words = vec!["--headless", "--track", track, "--frames", &frames, "--lobby", "host"];
+    words.extend(extra);
+    let (host, host_said, heard) = shell(&words, scripts[0]);
+    let (code, host, host_said) = said_after(host, host_said, &heard, "lobby: code ", "lobby code");
+    let join = format!("join:{code}");
+    let (guest, guest_said, _) = shell(&["--headless", "--frames", &frames, "--lobby", &join], scripts[1]);
+    both_end([host, guest], [host_said, guest_said])
+}
+
+/// A headless shell on `words` and `--online-script` `script`: it, its output once it ends, and each
+/// line as it comes.
+fn shell(words: &[&str], script: Option<&str>) -> (std::process::Child, std::thread::JoinHandle<String>, std::sync::mpsc::Receiver<String>) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
+    shell.current_dir(&root).args(words).stdout(std::process::Stdio::piped());
+    if let Some(s) = script {
+        shell.args(["--online-script", s]);
+    }
+    let mut kid = shell.spawn().expect("the shell starts");
+    // Its output, each line also sent on as it comes (the host's port, the lobby's code).
+    let mut out = std::io::BufReader::new(kid.stdout.take().expect("piped stdout"));
+    let (lines, heard) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut said = String::new();
+        let mut line = String::new();
+        while std::io::BufRead::read_line(&mut out, &mut line).is_ok_and(|n| n > 0) {
+            let _ = lines.send(line.clone());
+            said.push_str(&line);
+            line.clear();
+        }
+        said
+    });
+    (kid, reader, heard)
+}
+
+/// What the host says after `start` on the line that starts with it (its port, its lobby's code,
+/// `what`), and the host back; a host that never says it is ended, its output in the panic.
+fn said_after(
+    mut host: std::process::Child,
+    said: std::thread::JoinHandle<String>,
+    heard: &std::sync::mpsc::Receiver<String>,
+    start: &str,
+    what: &str,
+) -> (String, std::process::Child, std::thread::JoinHandle<String>) {
+    loop {
         match heard.recv_timeout(std::time::Duration::from_secs(600)) {
-            Ok(l) if l.starts_with("online: host on ") => break l["online: host on ".len()..].split(',').next().unwrap().to_string(),
+            Ok(l) if l.starts_with(start) => return (l[start.len()..].trim().to_string(), host, said),
             Ok(_) => {}
             Err(_) => {
                 let _ = host.kill();
                 let _ = host.wait();
-                panic!("the host said no port:\n{}", host_said.join().unwrap_or_default());
+                panic!("the host said no {what}:\n{}", said.join().unwrap_or_default());
             }
         }
-    };
-    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"), scripts[1]);
+    }
+}
+
+/// Two shells waited on to the end, each one's output; one that fails ends the other.
+fn both_end(kids: [std::process::Child; 2], readers: [std::thread::JoinHandle<String>; 2]) -> [String; 2] {
     // A shell that fails takes its peer down with it: the peer would wait for its pads for ever.
-    let mut kids = [host, guest];
-    let readers = [host_said, guest_said];
+    let mut kids = kids;
     let started = std::time::Instant::now();
     let mut ended = [false; 2];
     while !ended.iter().all(|&e| e) {
@@ -196,28 +231,29 @@ fn two_online_shells_see_the_host_switch_into_the_monster_truck_and_back() {
     assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with the truck out");
 }
 
-/// T3: an online seat dressed as a peer's (`dress_peer`, N16) and looked through — as a second player
-/// sitting down on this machine in a lobby ride is (N20) — follows its car on the car's own presets
-/// (S268), as the seat the ride loaded does. No headless path seats a second local player online,
-/// so the host's `--online-script` word `dress` rebuilds its own seat through the same dressing at
-/// tick 20, before it switches into the monster truck at 40. Its traced camera stands at the bike's
-/// distance until then and at the truck's after, the same as an undressed host's; a dressed seat
-/// with no car cameras (S268's bug) stays at the bike's.
+/// T3, N27: a second player sitting down on the host's machine in a lobby's ride (N20, the
+/// `--online-script` word `sit` at tick 20) gets a seat dressed as a peer's (`dress_peer`, N16) and
+/// looked through, and follows its car on the car's own presets (S268), as the seat the ride loaded
+/// does: both of the host's players pick the monster truck at 40 (`monster`, `p2=monster`). The sat
+/// seat's traced camera (view 2) stands at the bike's distance until then and at the truck's after,
+/// the same as the loaded seat's (view 1) on the same side-by-side presets; a dressed seat with no
+/// car cameras (S268's bug) stays at the bike's.
 #[test]
 fn an_online_seat_dressed_as_a_peers_follows_its_car_on_the_cars_presets() {
     if disc().is_none() {
         return;
     }
-    // Camera 0's distances traced after the line `from` (the last one) and before `to`. The trace's
-    // ticks are the shell's, which count while a shell waits for its peer, so a session tick has
-    // no fixed number in it: the shell's own lines mark the moments.
-    let distances = |s: &str, from: &str, to: Option<&str>| -> Vec<f32> {
+    // Camera `view`'s distances traced after the line `from` (the last one) and before `to`. The
+    // trace's ticks are the shell's, which count while a shell waits for its peer, so a session tick
+    // has no fixed number in it: the shell's own lines mark the moments.
+    let distances = |s: &str, view: usize, from: &str, to: Option<&str>| -> Vec<f32> {
         let lines: Vec<&str> = s.lines().collect();
         let start = lines.iter().rposition(|l| *l == from).unwrap_or_else(|| panic!("no `{from}`:\n{s}"));
         let end = to.map_or(lines.len(), |to| start + lines[start..].iter().position(|l| *l == to).unwrap_or_else(|| panic!("no `{to}`:\n{s}")));
+        let camera = format!("camera {view} ");
         lines[start..end]
             .iter()
-            .filter(|l| l.starts_with("camera 0 "))
+            .filter(|l| l.starts_with(&camera))
             .map(|l| {
                 let w: Vec<&str> = l.split(' ').collect();
                 let at = w.iter().position(|&x| x == "distance").expect("a distance");
@@ -225,25 +261,27 @@ fn an_online_seat_dressed_as_a_peers_follows_its_car_on_the_cars_presets() {
             })
             .collect()
     };
-    let drive = "40:monster,41:gas";
-    let dressed = ride_online_with("free09", 120, [Some(&format!("20:dress,{drive}")), None], &["--trace-camera"]);
-    let plain = ride_online_with("free09", 120, [Some(drive), None], &["--trace-camera"]);
-    for (who, s) in ["dressed host", "guest", "plain host", "guest"].iter().zip(dressed.iter().chain(&plain)) {
+    let seated = ride_lobby("free09", 120, [Some("20:sit,40:monster,40:p2=monster,41:gas,41:p2=gas"), None], &["--trace-camera"]);
+    for (who, s) in ["lobby host", "lobby guest"].iter().zip(&seated) {
         assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
     }
-    let host = &dressed[0];
+    let host = &seated[0];
     let told: String = host.lines().filter(|l| !l.starts_with("camera ")).map(|l| format!("{l}\n")).collect();
-    let dress = "online: seat 1 dressed as a peer's, 3 car cameras";
-    assert!(host.lines().any(|l| l == dress), "{told}");
-    // On the bike, dressed, until the switch.
-    let bike = distances(host, dress, Some("vehicle: monster"));
-    assert!(!bike.is_empty() && bike.iter().all(|&d| d < 20.0), "the dressed seat's bike camera: {bike:?}");
-    // In the truck: past the switch's frame, on the truck's preset, as the undressed host is.
-    let truck = distances(host, "vehicle: monster", None);
-    let want = distances(&plain[0], "vehicle: monster", None);
+    // The host seats its second player, every machine at one tick, and dresses the seat as a peer's.
+    let added = line_with(host, "online: host adds a player at tick ");
+    let sat = line_with(host, "players: online, player 2 joined");
+    let dressed = host.lines().skip_while(|l| *l != added).find(|l| l.starts_with("online: seat ") && l.contains(") rides "));
+    assert!(dressed.is_some(), "the sat seat was not dressed:\n{told}");
+    // On the bike, seated and dressed, until the switch.
+    let bike = distances(host, 1, sat, Some("vehicle: monster"));
+    assert!(!bike.is_empty() && bike.iter().all(|&d| d < 20.0), "the sat seat's bike camera: {bike:?}");
+    // In the truck: past the switch's frame, on the truck's preset (side by side's), as the seat the
+    // ride loaded (view 1, undressed) is in its own truck.
+    let truck = distances(host, 1, "vehicle: monster", None);
+    let want = distances(host, 0, "vehicle: monster", None);
     assert!(truck.len() > 30, "too few traced frames in the truck: {}", truck.len());
-    let on = *want.last().expect("the plain host traced its truck");
-    assert!(on > bike[0] + 8.0, "the plain host's truck camera stands {on} ft back, the bike's {}", bike[0]);
+    let on = *want.last().expect("the loaded seat traced its truck");
+    assert!(on > bike[0] + 8.0, "the loaded seat's truck camera stands {on} ft back, the bike's {}", bike[0]);
     for (i, &d) in truck.iter().enumerate().skip(2) {
         assert_eq!(d, on, "frame {i} in the truck: the dressed seat's camera stands {d} ft back, an undressed seat's {on}:\n{told}");
     }
