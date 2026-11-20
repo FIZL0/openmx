@@ -15389,6 +15389,200 @@ fn r60a_the_strike_s_kick_is_the_riding_force_s_y_lane() {
     }
 }
 
+/// R62: the original's riding pose points on row `t` of an R60a `actor` capture, one per bone of
+/// [`R57_BONES`], in the world: the force listener (ragdoll_force_listener, 0x0024d6e0) solved for
+/// its point. The bone's last force (+0x80, the step's one) less gravity, in the bone's frame as the
+/// step began (+0x150), less the pose damper's pull to the request's velocity (its spin is ~0 here),
+/// over the spring, turned back and added to the bone's place as row `t - 1` left it.
+fn r62_their_points(head: &[String], rows: &[Vec<f32>], t: usize) -> Vec<Vf> {
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let (r, was) = (&rows[t], &rows[t - 1]);
+    let lanes = |r: &[f32], f: &dyn Fn(char) -> String| Vf::new(r[col(&f('x'))], r[col(&f('y'))], r[col(&f('z'))], 0.0);
+    let words = |o: usize| Vf::new(r[col(&format!("a{o:03x}"))], r[col(&format!("a{:03x}", o + 4))], r[col(&format!("a{:03x}", o + 8))], 0.0);
+    let (k, d) = (words(0x650), words(0x660));
+    let vel = Vf::new(r[col("req_vel0")], r[col("req_vel1")], r[col("req_vel2")], 0.0);
+    R57_BONES
+        .iter()
+        .map(|&n| {
+            let p = lanes(was, &|l| format!("b{n}_{l}"));
+            let v = lanes(was, &|l| format!("b{n}_v{l}"));
+            let q = Vf::new(r[col(&format!("b{n}_lastqx"))], r[col(&format!("b{n}_lastqy"))], r[col(&format!("b{n}_lastqz"))], r[col(&format!("b{n}_lastqw"))]);
+            let f = lanes(r, &|l| format!("b{n}_lastf{l}"));
+            let weight = 32.2 / r[col(&format!("b{n}_invmass"))];
+            let m = math::quat_to_mat4(q, Vf::new(0.0, 0.0, 0.0, 1.0));
+            let un = |a: Vf| Vf::new((0..3).map(|i| a.0[i] * m.0[0].0[i]).sum(), (0..3).map(|i| a.0[i] * m.0[1].0[i]).sum(), (0..3).map(|i| a.0[i] * m.0[2].0[i]).sum(), 0.0);
+            let tu = |a: Vf| Vf::new((0..3).map(|i| a.0[i] * m.0[i].0[0]).sum(), (0..3).map(|i| a.0[i] * m.0[i].0[1]).sum(), (0..3).map(|i| a.0[i] * m.0[i].0[2]).sum(), 0.0);
+            let l = un(Vf::new(f.x(), f.y() + weight, f.z(), 0.0));
+            let dv = un(vel.sub(v));
+            let dp = tu(Vf::new((l.x() - d.x() * dv.x()) / k.x(), (l.y() - d.y() * dv.y()) / k.y(), (l.z() - d.z() * dv.z()) / k.z(), 0.0));
+            p.add(dp)
+        })
+        .collect()
+}
+
+/// R62: a world point in a 4x4's frame (its rows the axes, the last row the origin).
+fn r62_in(m: &Mat4, p: Vf) -> Vf {
+    let d = p.sub(m.0[3]);
+    Vf::new((0..3).map(|i| d.0[i] * m.0[0].0[i]).sum(), (0..3).map(|i| d.0[i] * m.0[1].0[i]).sum(), (0..3).map(|i| d.0[i] * m.0[2].0[i]).sum(), 0.0)
+}
+
+/// R62: each part's riding pose point (its centre of mass where the skeleton has it, as the riding
+/// step's pose call puts it) in the bike's frame, off the rider's skeleton.
+fn r62_skeleton_points(r: &Rider) -> Option<Vec<Vf>> {
+    let kit = r.ragdoll_kit.as_ref()?;
+    let nodes = game_sim::ragdoll_ride::nodes(kit, r.skeleton.as_deref(), &Mat4::IDENTITY);
+    Some(
+        nodes
+            .iter()
+            .zip(&kit.rig.parts)
+            .map(|(b, part)| {
+                let (mut drawn, mut start) = (Mat4([Vf::ZERO; 4]), game_sim::ragdoll_pose::Start::default());
+                game_sim::ragdoll_pose::pose(b, part.cofg, &mut drawn, &mut start, None, &kit.tables.acos, &kit.tables.curve);
+                start.position
+            })
+            .collect(),
+    )
+}
+
+/// R62: R58's drawn ride with the animated body, and on its strike tick the riding step run again
+/// from strike-1's body and holds after the shell has posed the body for the strike tick, once with
+/// the skeleton the tick ran with (posed after strike-1) and once with the one posed off the strike
+/// tick itself. Every riding body's velocity after each step, and after the tick as run.
+fn r62_strike_steps() -> Option<[Vec<Vf>; 3]> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes.into_iter().find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix(FREERIDE_PHY).is_ok()))?;
+    let bike = disc.res(&bike).ok()?;
+    let sub = bike.find_suffix(".sub")?.name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
+    let mut chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let root = chassis.nodes.root.expect("a chassis root");
+    let dt = F(1.0 / 30.0);
+    let mut draw = |r: &game_sim::rider::Rider| {
+        let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = chassis.riding_under(r, want);
+        chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
+        let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(&chassis) else { panic!("the chassis lacks a hold") };
+        let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+        game_sim::ragdoll_riding::Holds { root: Mat4(chassis.world[root].0.map(Vf)), hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] }
+    };
+    let (mut body, doll) = r24_body()?;
+    let mut was: Option<(Rider, Mat4, (bool, bool), i32)> = None;
+    let mut out = None;
+    s485_ride_from(S486C_BIKE, 62, true, |t, sim, world| {
+        if t == 1 {
+            r59_as_the_shell(&mut sim.rider);
+        }
+        let struck = out.is_none() && sim.parked_cars.first().is_some_and(|p| p.awake());
+        let tick = sim.rider.riding.as_ref().map(|rd| rd.actor.ragdoll.bones.iter().map(|b| b.body.velocity).collect::<Vec<_>>());
+        let gas = game_sim::ride::Controls { gas: F::ONE, ..game_sim::ride::Controls::default() };
+        body.ride(dt, &mut sim.rider, &gas, game_sim::rider::Gate::default());
+        sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(&doll)));
+        if let (true, Some((r0, before, table, clip)), Some(tick)) = (struck, was.as_ref(), tick) {
+            let kit = r0.ragdoll_kit.clone().expect("a kit");
+            let holds = r0.holds.clone().expect("holds");
+            let mut step = |skeleton: Option<Arc<game_sim::ragdoll_ride::Posed>>| {
+                let mut rider = sim.rider.clone();
+                rider.skeleton = skeleton;
+                let mut riding = r0.riding.clone().expect("a riding body");
+                riding.ride(&kit, &rider, &holds, before, *table, *clip, dt, world);
+                riding.actor.ragdoll.bones.iter().map(|b| b.body.velocity).collect::<Vec<_>>()
+            };
+            let late = step(r0.skeleton.clone());
+            let now = step(sim.rider.skeleton.clone());
+            out = Some([tick, late, now]);
+        }
+        let h = draw(&sim.rider);
+        sim.rider.holds = Some(Arc::new(h));
+        let veh = &sim.rider.body.veh;
+        was = Some((sim.rider.clone(), sim.rider.ride.transform(), (veh.from_table, veh.holding), veh.state));
+    })?;
+    out
+}
+
+/// **R62: the strike's downward kick is the riding pose's stop row, posed a tick late in the port**
+/// (R60a's follow-up; research/s484/index.md, R62).
+///
+/// * The original's force listener (0x0024d6e0) solved for its pose point, bone by bone, off R60a's
+///   capture (the force +0x80, gravity, the damper's pull to the request's velocity, the body as
+///   strike-1 left it, the spring 80/30/30): on rows 55-57 the points stand still in the bike's frame,
+///   where the port's skeleton puts them (to 0.11 ft, most of it across: the original's points are
+///   in the drawn transform's frame, the port's in the ride's). On the strike they drop: the feet
+///   and knees 0.9 ft, the main bone 0.78, the head 0.64, the hands 0.46.
+/// * That drop is the pose grid's speed band (the request's `band`, the contact speed): the bike stops
+///   dead on the strike, the band falls under the riding rows, and the grid plays the stopped row
+///   (`turn_stop_*`: both feet a foot under the pegs) at once, with no blend. The port's body does the
+///   same, and its skeleton posed off the strike tick puts every point where the original's are (as
+///   close as before the strike).
+/// * The port's riding step reads the skeleton the shell posed the tick before (after strike-1, still
+///   on the riding row); the original's reads the one posed off the strike tick itself. Run again
+///   with the strike tick's skeleton, the port's step gives the original's kick.
+#[test]
+fn r62_the_strike_s_kick_is_the_stop_row_posed_a_tick_late() {
+    let Some((head, rows)) = r60a_capture("r60a_actor1") else { return };
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let theirs = 58;
+    let bike_of = |r: &[f32]| Mat4(std::array::from_fn(|i| Vf::new(r[col(&format!("bike_m{i}0"))], r[col(&format!("bike_m{i}1"))], r[col(&format!("bike_m{i}2"))], r[col(&format!("bike_m{i}3"))])));
+    let show = |v: Vf| format!("{:7.3} {:7.3} {:7.3}", v.x(), v.y(), v.z());
+    // The original's points, in the bike's frame as the step began (the drawn transform of the row before).
+    let their: Vec<Vec<Vf>> = (theirs - 3..=theirs).map(|t| r62_their_points(&head, &rows, t).into_iter().map(|p| r62_in(&bike_of(&rows[t - 1]), p)).collect()).collect();
+    let mut log = Vec::new();
+    let Some((port, _)) = r58_port_ride(R58Skeleton::Animated, |_, sim| {
+        log.push((r62_skeleton_points(&sim.rider), sim.rider.body_request.band, sim.rider.feet.held));
+    }) else {
+        return;
+    };
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    let off = |a: &[Vf], b: &[Vf]| a.iter().zip(b).map(|(a, b)| (0..3).map(|i| (a.0[i] - b.0[i]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+    for (k, t) in (ours - 3..=ours).enumerate() {
+        let (pts, band, held) = &log[t];
+        let pts: Vec<Vf> = R57_BONES.iter().map(|&n| pts.as_ref().expect("a skeleton")[n]).collect();
+        println!("posed after tick {t} (strike {ours}): band {:.2}, feet held {held:?}", band.0);
+        for (i, &n) in R57_BONES.iter().enumerate() {
+            println!("  b{n:2} port {}  original's (row {}) {}", show(pts[i]), theirs - 3 + k, show(their[k][i]));
+        }
+        // The skeleton posed after tick t is the original's points on row t: theirs read the tick's own.
+        let o = off(&pts, &their[k]);
+        println!("  off by {o:.3} ft");
+        assert!(o < 0.15, "the port's skeleton after tick {t} is {o} ft off the original's points on row {}", theirs - 3 + k);
+    }
+    // On the strike the original's points drop in the bike's frame, the legs most.
+    assert!(off(&their[0], &their[2]) < 0.01, "the original's points moved before the strike");
+    for (i, &n) in R57_BONES.iter().enumerate() {
+        let drop = their[3][i].y() - their[2][i].y();
+        assert!(drop < -0.4, "b{n}: the original's point dropped only {drop} ft on the strike");
+    }
+    let (band, band_was) = (log[ours].1, log[ours - 1].1);
+    assert!(band_was > F(50.0) && band < F(5.0), "the band {band_was:?} -> {band:?}");
+
+    // The strike's step run again: with the skeleton the tick ran with it is the tick's; with the one
+    // posed off the strike tick it is the original's kick, and the box still lets the main bone go.
+    let Some([tick, late, now]) = r62_strike_steps() else { return };
+    let Some((rh, rr)) = r57_capture() else { return };
+    let rc = |name: &str| rh.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let want: Vec<f32> = R57_BONES.iter().map(|&n| rr[theirs][rc(&format!("b{n}_vy"))]).collect();
+    let vys = |v: &[Vf]| R57_BONES.iter().map(|&n| v[n].y()).collect::<Vec<_>>();
+    let row = |v: &[f32]| v.iter().map(|x| format!("{x:6.2}")).collect::<Vec<_>>().join(" ");
+    println!("strike vy, bones {R57_BONES:?}");
+    println!("  the tick           {}", row(&vys(&tick)));
+    println!("  strike-1 skeleton  {}  vz {:5.2}", row(&vys(&late)), late[0].z());
+    println!("  strike's skeleton  {}  vz {:5.2}", row(&vys(&now)), now[0].z());
+    println!("  the original's     {}  vz {:5.2}", row(&want), rr[theirs][rc("b0_vz")]);
+    let o = off(&late, &tick);
+    assert!(o < 0.01, "the step run again is {o} ft/s off the tick's");
+    let gap = vys(&now).iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    let was = vys(&late).iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    println!("  most off: {was:.2} ft/s with strike-1's skeleton, {gap:.2} with the strike's");
+    assert!(gap < 0.1, "with the strike's skeleton the kick is {gap} ft/s off the original's");
+    assert!(now[0].z() > 20.0, "the bike box caught the main bone (vz {})", now[0].z());
+}
+
 /// S485's control: without the parked truck the same ride goes on through its spot.
 #[test]
 fn without_the_parked_truck_the_bike_rides_through_its_spot() {

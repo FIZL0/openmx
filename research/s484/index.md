@@ -314,3 +314,75 @@ spin. A carried velocity plus a spin fits the gaps poorly (rms 1.07 ft/s), and s
 The gap grows down the body, the legs most. To name the term, the original's force listener
 (0x0024d6e0) has to be run on the strike from a save state at strike−1, reading its pose point
 and carried velocity per bone. Filed as R62.
+
+## The term is the pose points: the stop row, posed a tick late in the port (R62)
+
+The kick is the riding pose's spring pulling to a skeleton on the pose grid's stopped row. The
+original poses that skeleton off the strike tick itself; the port's step reads the one the shell
+posed the tick before. Test: `r62_the_strike_s_kick_is_the_stop_row_posed_a_tick_late` in
+crates/game-sim/tests/replay.rs.
+
+### How: the listener solved for its pose point, no save state
+
+No save state was needed. The listener is proved bit for bit against the port's `Ragdoll::forces`
+(`the_force_listener_matches_the_original`, tests/ragdoll.rs), and R60a's capture holds every other
+input. So each bone's pose point can be solved from the step's one force (+0x80):
+
+- take off gravity (32.2 / inv mass);
+- turn it into the bone's frame as the step began (+0x150);
+- take off the damper's pull to the request's velocity (the spin is ~0 on these rows);
+- divide by the spring (80, 30, 30), turn it back, and add the bone's place from the row before.
+
+The bodies are not touched before the step: +0x50 on row t is row t−1's place on every bone.
+
+### What it shows
+
+In the bike's frame (the row before's drawn transform):
+
+| bone | rows 55-57 (y) | row 58, the strike (y) | drop (ft) |
+|---|---|---|---|
+| feet 14, 17 | 1.899 / 1.857 | 0.987 / 0.942 | −0.91 |
+| knees 13, 16 | 2.841 / 2.803 | 1.945 / 1.903 | −0.90 |
+| main 0 | 4.569 | 3.789 | −0.78 |
+| neck 2 | 5.528 | 4.773 | −0.76 |
+| head 3 | 6.428 | 5.791 | −0.64 |
+| hands 6, 10 | 5.075 / 5.018 | 4.615 / 4.484 | −0.46 / −0.53 |
+
+- Rows 55-57: the points do not move (to 0.001 ft). The port's skeleton puts them there too, to
+  0.105 ft. Most of that is across (x): the original's points are in the drawn transform's frame,
+  the port's in the ride's.
+- Row 58: the points drop, the legs most. The port's skeleton posed **after** the strike tick puts
+  every point there, to 0.088 ft (main bone 3.789 / 3.789, neck 4.773 / 4.773).
+- The port's step on the strike used the skeleton posed after strike−1, still on the riding row.
+
+### Why the pose drops: the speed band
+
+- The pose grid (vehicle_anim, the `TURN_RIDING` arm) picks its rows by the request's band, the
+  bike's contact speed, with no blend in time.
+- On the strike the bike stops dead: the band goes 53.7 → 2.05. The grid plays the stopped and still
+  rows (`turn_stop_*` has both feet a foot under the pegs). The clip state (30), mix and ramp do not
+  change.
+- The same tick the feet switch lets both feet go, fade 0.5. That is R60a's unknown words
+  +0x638 / +0x63c (−0.033 → 0.5).
+
+### The proof
+
+The strike's riding step run again from strike−1's body and holds:
+
+| skeleton | vy feet 14 | main 0 | head 3 | hand 6 | knee 13 | main vz |
+|---|---|---|---|---|---|---|
+| posed after strike−1 (as the port runs) | −1.37 | −0.86 | 1.52 | 1.35 | −1.53 | 28.8 |
+| posed after the strike tick | −7.39 | −3.48 | −2.36 | −0.31 | −6.46 | 29.6 |
+| the original's | −7.39 | −3.50 | −2.39 | −0.35 | −6.48 | 29.9 |
+
+All nine bones are within 0.03 ft/s of theirs, and the bike box still lets the main bone go.
+
+### What it means
+
+- In the original the skeleton's local pose is the tick's own: the animation reads this tick's bike
+  before the body actor steps. Its world parent is still the bike's transform from before the move
+  (S253's trail), and the hold-gate words (+0x680, S257) are last tick's.
+- The port poses the body in the shell after `Sim::step`, so the riding step always pulls to last
+  tick's pose. At a steady speed that is invisible. A sudden change of band (a stop, a strike, a
+  landing) shows it.
+- Filed as B43: feed the riding step the skeleton posed off the same tick.
