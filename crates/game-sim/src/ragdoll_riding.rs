@@ -224,6 +224,14 @@ impl Riding {
         out
     }
 
+    /// **The skeleton's drawn matrices a loaded body was left with** (S347b1), one per part in the
+    /// file's order: what a held body's first step poses its bones at (the riding entry reads them),
+    /// as the original's does from its parts' drawn matrices. A body seeded off an image has none
+    /// until it is stepped, and without them that first pose falls back on the skeleton's nodes.
+    pub fn seed_drawn(&mut self, drawn: Vec<Mat4>) {
+        self.drawn = Some(drawn);
+    }
+
     /// The bodies' nodes' drawn matrices before a step, while the body is placed.
     fn history(&self, kit: &Kit) -> Option<Vec<Mat4>> {
         self.placed().then(|| ragdoll_ride::drawn(&self.bones(kit)))
