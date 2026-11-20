@@ -624,7 +624,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // set and put back to 0 inside the pass, so not walked and not on the wire.
     // 12448 since F73: the parked cars lent to the downed rider's bones (`Ride::parked`), empty
     // between frames, so not walked and not on the wire.
+    // 12472 since S494: the parked planes the bikes strike (`Sim::parked_planes`), the same way as
+    // the parked cars: one `parked_planes` blob only while present, on the wire behind their own tag.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12448, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12472, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
