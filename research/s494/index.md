@@ -35,4 +35,13 @@ free09 at S485's truck spot, nose to the bike: the bike stops 6.9 ft short of th
 peaks at (0, 0.49, 2.05) ft/s and moves 0.96 ft in 120 ticks. Same shape as plane1.csv, different
 map and contact point, so not held to its numbers.
 
-The helicopter is still the AI riders' hull only: filed as S494a.
+The helicopter (S494a) is the same: a `ParkedHeli` in `Sim::parked_helis` (game-sim
+`parked_heli.rs`), its frame the shell's settle frame (collision search, then `Kiowa::tick`
+unflown over `Grounded`, crash asks left undone), stepped after the parked planes; its hull
+(`kiowaf.col`) after the planes' in the bikes' list, its body after theirs on each resolve. The
+shell now settles it with `ParkedHeli::settled`, proved bit-identical to its own `parked_heli` on
+R52's free06 image (openmx tests/parked_fliers.rs), and hands it on a one-seat ride. Test:
+`a_bike_ridden_into_a_parked_helicopter_stops_and_pushes_it` parks it at the same free09 spot,
+facing the bike: the bike stops 14.4 ft short of the body, the helicopter peaks at (0, −0.08, 2.64)
+ft/s, slows to 1.72 ft/s 10 ticks on and 0.47 ft/s 40 on, and moves 1.87 ft in 120 ticks.
+heli1.csv: 2.22 ft/s, ~4.2 ft at 1.0–1.3 ft/s over 80+ frames. Same shape, not held to numbers.

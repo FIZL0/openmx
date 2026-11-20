@@ -822,14 +822,16 @@ impl crate::Sim {
     /// The parked planes' hulls follow the cars' (S494, [`crate::parked_plane`]): an entry on one
     /// names `players + cars + k`, and its mirrors follow the cars'.
     pub fn bike_contacts_parked(&self, dt: F, world: &dyn World) -> (Option<Vec<Vec<Contact>>>, Vec<Vec<Contact>>) {
-        if self.parked_cars.is_empty() && self.parked_planes.is_empty() {
+        if !self.parks_fliers_or_cars() {
             return (self.bike_contacts_in(dt, world), Vec::new());
         }
         let riders: Vec<(&Rider, bool)> = (0..self.players()).map(|i| (self.rider_of(i), true)).collect();
         let n = riders.len();
-        let cars = self.parked_cars.len();
+        let (cars, planes) = (self.parked_cars.len(), self.parked_planes.len());
         let hulls: Vec<Hull<'_>> = (self.parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)))
             .chain(self.parked_planes.iter().enumerate().filter_map(|(k, p)| p.hull(n + cars + k)))
+            // And the parked helicopters' after the planes' (S494a).
+            .chain(self.parked_helis.iter().enumerate().filter_map(|(k, h)| h.hull(n + cars + planes + k)))
             .collect();
         match contacts_met(&riders, &hulls, dt, world) {
             Some((lists, mirrors)) => (Some(lists), mirrors),
@@ -872,6 +874,11 @@ impl crate::Sim {
         let cars = self.parked_cars.len();
         for (p, f) in self.parked_planes.iter_mut().zip(bump.planes.iter().skip(cars)) {
             p.pushed(f);
+        }
+        // And to the parked helicopters' after the planes' (S494a).
+        let planes = self.parked_planes.len();
+        for (h, f) in self.parked_helis.iter_mut().zip(bump.planes.iter().skip(cars + planes)) {
+            h.pushed(f);
         }
     }
 

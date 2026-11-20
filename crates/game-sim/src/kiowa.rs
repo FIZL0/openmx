@@ -3735,3 +3735,20 @@ impl Phy {
         }
     }
 }
+
+// --- the built helicopter -----------------------------------------------------------------------------
+
+/// The helicopter's body's inertia tensor as the built helicopter holds it (C14's start state), which
+/// its collision object's response is tuned by ([`Collision::new`]); the inverse is
+/// [`BUILT_INV_INERTIA`]. The original works both out of the model's box, which `game_sim` does not
+/// read, so the built values are carried.
+pub const BUILT_INERTIA: Vf = Vf([f32::from_bits(0x4628_adfa), f32::from_bits(0x461f_901b), f32::from_bits(0x44a2_ae40), 1.0]);
+
+/// The helicopter's body's inverse inertia as the built helicopter holds it (C14's start state).
+pub const BUILT_INV_INERTIA: Vf = Vf([f32::from_bits(0x38c2_4305), f32::from_bits(0x38cd_5c6b), f32::from_bits(0x3a49_6ce0), 1.0]);
+
+/// The collective's filter as the constructor builds it (value 0.5, time 1).
+pub const BUILT_FILTER: Filter = Filter { value: F(0.5), time: F(1.0), step: F(0.0) };
+
+/// The engine's dynamics world the helicopter is stepped in: the plane's, 115 substeps a second.
+pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, rate: F(115.0) };

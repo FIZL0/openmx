@@ -110,8 +110,19 @@ fn the_parked_fliers_settle_where_the_originals_stand() {
             let (at, _) = vehicle::flier_spot(world, spot.at, ground_height, lift).expect("ground under the spot");
             println!("{}: stored {:?}, port {:?}", f.track, [stored.x(), stored.y(), stored.z()], [at.x(), at.y(), at.z()]);
             assert!(far(at, stored) <= f.spot_within, "{}: stored at {at:?}, the original {stored:?}", f.track);
-            let (body, hull, flight) = vehicle::parked_flier(f.machine, spot, ground_height, read, world, &tables).expect("settled");
-            assert_eq!(flight.is_some(), f.machine == Machine::Biplane, "{}: only the plane's flight is kept (S494)", f.track);
+            let (body, hull, flight, heli) = vehicle::parked_flier(f.machine, spot, ground_height, read, world, &tables).expect("settled");
+            assert_eq!(flight.is_some(), f.machine == Machine::Biplane, "{}: the plane's flight is kept (S494)", f.track);
+            assert_eq!(heli.is_some(), f.machine == Machine::Helicopter, "{}: the helicopter's is kept (S494a)", f.track);
+            // game-sim's settle (S494a) is the shell's own, bit for bit.
+            if let Some(heli) = &heli {
+                let k = vehicle::KiowaRide::new(&read(game_sim::kiowa::KIOWA_PHY).expect("kiowa.phy"), 0, None)
+                    .with_rays(&read(game_sim::kiowa::KIOWA_RAYS).expect("kiowam.col"));
+                let dt = ps2_float::F(game_sim::car::LOAD_DT);
+                let shell = vehicle::parked_heli(&k, at, spot.facing, world, &tables, dt, vehicle::FLIER_SETTLE_FRAMES);
+                let bits = |b: &game_sim::biplane::Body| [b.position, b.last_position, b.velocity, b.quat, b.rates].map(|v| v.to_bits());
+                assert_eq!(bits(&heli.ride.body), bits(&shell.ride.body), "{}: game-sim's parked helicopter is the shell's", f.track);
+                assert_eq!(heli.kiowa.control.hold_altitude.0.to_bits(), shell.kiowa.control.hold_altitude.0.to_bits(), "{}: its held height", f.track);
+            }
             let got = body.position;
             println!("{}: image body {:?}, port body {:?}", f.track, [want.x(), want.y(), want.z()], [got.x(), got.y(), got.z()]);
             assert!(far(got, want) <= f.body_within, "{}: settled at {got:?}, the original {want:?}", f.track);

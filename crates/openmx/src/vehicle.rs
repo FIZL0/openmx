@@ -3089,10 +3089,13 @@ pub fn parked_plane(mut flight: Flight, body_at: Vf, facing: Vf, up: Vf, world: 
 /// settled with nobody aboard ([`parked_heli`], [`parked_plane`]) for [`FLIER_SETTLE_FRAMES`]; the
 /// answer its hull where its body then stands ([`game_sim::ai::parked_hull`]), what the AI riders
 /// sweep, and a plane's whole flight as it settled, what a bike strikes (S494,
-/// [`Sim::park_planes`]). `None` for a car, or with a file missing or no ground under the spot.
+/// [`Sim::park_planes`]), or the helicopter's (S494a, [`Sim::park_helis`]: settled by
+/// [`game_sim::parked_heli::ParkedHeli::settled`], the same as [`parked_heli`]). `None` for a car,
+/// or with a file missing or no ground under the spot.
+#[allow(clippy::type_complexity)]
 pub fn parked_flier(
     m: Machine, spot: Spawn, ground_height: bool, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World, tables: &game_sim::ride::Tables,
-) -> Option<(game_sim::biplane::Body, game_sim::world::Prop, Option<Flight>)> {
+) -> Option<(game_sim::biplane::Body, game_sim::world::Prop, Option<Flight>, Option<game_sim::parked_heli::ParkedHeli>)> {
     let dt = F(game_sim::car::LOAD_DT);
     let (model, hull) = match m {
         Machine::Helicopter => (game_sim::kiowa::KIOWA_MODEL, game_sim::kiowa::KIOWA_HULL),
@@ -3102,20 +3105,21 @@ pub fn parked_flier(
     let lift = flight::spawn_lift(&read(model)?).map_err(|e| eprintln!("parked: {model}: {e}")).ok()?;
     let hull = game_sim::track::Mesh::parse(&read(hull)?).map_err(|e| eprintln!("parked: {hull}: {e}")).ok()?;
     let (at, normal) = flier_spot(world, spot.at, ground_height, lift)?;
-    let (body, flight) = match m {
+    let (body, flight, heli) = match m {
         Machine::Helicopter => {
-            let heli = KiowaRide::new(&read(game_sim::kiowa::KIOWA_PHY)?, 0, None).with_rays(&read(game_sim::kiowa::KIOWA_RAYS)?);
-            (parked_heli(&heli, at, spot.facing, world, tables, dt, FLIER_SETTLE_FRAMES).ride.body, None)
+            let k = KiowaRide::new(&read(game_sim::kiowa::KIOWA_PHY)?, 0, None).with_rays(&read(game_sim::kiowa::KIOWA_RAYS)?);
+            let heli = game_sim::parked_heli::ParkedHeli::settled(&k.phy, k.rays, hull.clone(), at, spot.facing, world, tables, dt, FLIER_SETTLE_FRAMES);
+            (heli.ride.body, None, Some(heli))
         }
         _ => {
             let rays = game_sim::track::Rays::parse(&read(game_sim::flight_search::BIPLANE_RAYS)?).ok()?;
             let plane = game_sim::phy::Plane::read_bytes(&read(game_sim::phy::BIPLANE_PHY)?);
             let flight = Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)).with_hull(hull.clone());
             let flight = parked_plane(flight, at, spot.facing, normal, world, tables, dt, FLIER_SETTLE_FRAMES);
-            (flight.body, Some(flight))
+            (flight.body, Some(flight), None)
         }
     };
-    Some((body, game_sim::ai::parked_hull(hull, &body), flight))
+    Some((body, game_sim::ai::parked_hull(hull, &body), flight, heli))
 }
 
 /// **The parked machines in a seat's Sim** (P378, P380): each car [`in_play`] parks, settled where it
@@ -3126,7 +3130,7 @@ pub fn parked_flier(
 /// The fliers (free06's helicopter, free10's plane; F80, [`InPlay::with_fliers`]) are settled once
 /// ([`parked_flier`]) and their hulls handed to [`Sim::parked`] after the cars'
 /// ([`Sim::park_cars_and_fliers`]), for the AI riders. A one-seat ride's bike strikes and pushes
-/// the plane too (S494, [`Sim::park_planes`]); not yet the helicopter.
+/// the plane too (S494, [`Sim::park_planes`]), and the helicopter (S494a, [`Sim::park_helis`]).
 #[derive(Clone, Debug, Default)]
 pub struct InPlay {
     /// The cars as the load settled them.
@@ -3134,6 +3138,10 @@ pub struct InPlay {
     /// The fliers as the load settled them (F80): each one's hull and its body where it came to rest
     /// ([`game_sim::ai::parked_hull`] of the two what the Sim is handed), and a plane's flight (S494).
     fliers: std::sync::Arc<[(Kind, game_sim::track::Mesh, game_sim::biplane::Body, Option<Flight>)]>,
+    /// Each flier's helicopter as the load settled it (S494a), in `fliers`' order: `None` for a plane.
+    helis: std::sync::Arc<[Option<game_sim::parked_heli::ParkedHeli>]>,
+    /// Each one as this seat's Sim last held it (S494a), as `kept_planes` for the planes.
+    kept_helis: Vec<Option<game_sim::parked_heli::ParkedHeli>>,
     /// Each car as this seat's Sim last held it (P380), once it has been handed one: where a car taken
     /// out of the Sim while a player drives its kind is put back from.
     kept: Vec<game_sim::car::Parked>,
@@ -3181,13 +3189,14 @@ impl InPlay {
         mut self, spots: &[(usize, Machine, Spawn)], ground_heights: &[bool], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
         world: &mut dyn World, tables: &game_sim::ride::Tables,
     ) -> InPlay {
-        self.fliers = (spots.iter().enumerate())
+        let (fliers, helis): (Vec<_>, Vec<_>) = (spots.iter().enumerate())
             .filter(|(_, (slot, m, _))| m.car_kind().is_none() && !flying.get(*slot).copied().unwrap_or(false))
             .filter_map(|(i, &(_, m, spot))| {
-                let (body, hull, flight) = parked_flier(m, spot, ground_heights.get(i).copied().unwrap_or(true), read, world, tables)?;
-                Some((m.kind()?, hull.mesh, body, flight))
+                let (body, hull, flight, heli) = parked_flier(m, spot, ground_heights.get(i).copied().unwrap_or(true), read, world, tables)?;
+                Some(((m.kind()?, hull.mesh, body, flight), heli))
             })
-            .collect();
+            .unzip();
+        (self.fliers, self.helis) = (fliers.into(), helis.into());
         self
     }
 
@@ -3210,7 +3219,12 @@ impl InPlay {
 
     /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
     pub fn fresh(&self) -> InPlay {
-        InPlay { parked: std::sync::Arc::clone(&self.parked), fliers: std::sync::Arc::clone(&self.fliers), ..InPlay::default() }
+        InPlay {
+            parked: std::sync::Arc::clone(&self.parked),
+            fliers: std::sync::Arc::clone(&self.fliers),
+            helis: std::sync::Arc::clone(&self.helis),
+            ..InPlay::default()
+        }
     }
 
     /// **`sim`'s parked cars** ([`Sim::park_cars`], P380): every one but those a player is up on
@@ -3221,8 +3235,9 @@ impl InPlay {
     /// is up on.
     ///
     /// On a one-seat ride (`driven` one long) the shown planes go to [`Sim::park_planes`] too (S494),
-    /// as the Sim last held them, as for the cars. Split screen's seats each step their own Sim, and
-    /// a plane in each would drift apart, so theirs stay the AI riders' hulls only.
+    /// and the shown helicopters to [`Sim::park_helis`] (S494a), as the Sim last held them, as for
+    /// the cars. Split screen's seats each step their own Sim, and a flier in each would drift apart,
+    /// so theirs stay the AI riders' hulls only.
     pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
         if self.parked.is_empty() && self.fliers.is_empty() {
             return;
@@ -3239,6 +3254,9 @@ impl InPlay {
         if self.kept_planes.len() != self.fliers.len() {
             self.kept_planes = self.fliers.iter().map(|(.., f)| f.clone()).collect();
         }
+        if self.kept_helis.len() != self.helis.len() {
+            self.kept_helis = self.helis.to_vec();
+        }
         // What the Sim did to the cars it held since it was last handed them, kept for their return.
         if let Some(was) = &self.handed {
             let held: Vec<usize> = (0..cars).filter(|&k| was[k]).collect();
@@ -3254,11 +3272,20 @@ impl InPlay {
                     self.kept_planes[k] = Some(p);
                 }
             }
+            // And to the helicopters (S494a).
+            let held: Vec<usize> = (0..self.kept_helis.len()).filter(|&k| self.planes_handed && was[cars + k] && self.kept_helis[k].is_some()).collect();
+            if held.len() == sim.parked_helis.len() {
+                for (k, h) in held.into_iter().zip(std::mem::take(&mut sim.parked_helis)) {
+                    self.kept_helis[k] = Some(h);
+                }
+            }
         }
         let fliers = (self.fliers.iter().zip(&shown[cars..])).filter(|(_, on)| **on).map(|((_, hull, body, _), _)| game_sim::ai::parked_hull(hull.clone(), body));
         sim.park_cars_and_fliers((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect(), fliers);
         let handed = (self.kept_planes.iter().zip(&shown[cars..])).filter(|(_, on)| planes && **on).filter_map(|(p, _)| p.clone()).collect();
         sim.park_planes(handed);
+        let handed = (self.kept_helis.iter().zip(&shown[cars..])).filter(|(_, on)| planes && **on).filter_map(|(h, _)| h.clone()).collect();
+        sim.park_helis(handed);
         self.handed = Some(shown);
         self.planes_handed = planes;
     }
@@ -3363,18 +3390,19 @@ impl Garage {
 /// (C14's start state, `c14-kiowa` in `context/states/`): the
 /// original works it out of the model's box, which `game_sim` does not read, so the built value is
 /// carried, as [`flight`]'s plane carries its own.
-const KIOWA_INV_INERTIA: Vf = Vf([f32::from_bits(0x38c2_4305), f32::from_bits(0x38cd_5c6b), f32::from_bits(0x3a49_6ce0), 1.0]);
+/// The same as the Sim's parked helicopter carries ([`game_sim::kiowa::BUILT_INV_INERTIA`], S494a).
+const KIOWA_INV_INERTIA: Vf = game_sim::kiowa::BUILT_INV_INERTIA;
 
 /// The collective's filter as the constructor builds it (value 0.5, time 1).
-const KIOWA_FILTER: game_sim::kiowa::Filter = game_sim::kiowa::Filter { value: F(0.5), time: F(1.0), step: F(0.0) };
+const KIOWA_FILTER: game_sim::kiowa::Filter = game_sim::kiowa::BUILT_FILTER;
 
 /// The engine's dynamics world the helicopter is stepped in: the plane's, 115 substeps a second.
-const KIOWA_WORLD: game_sim::biplane::World = game_sim::biplane::World { iterations: 1, rate: F(115.0) };
+const KIOWA_WORLD: game_sim::biplane::World = game_sim::kiowa::WORLD;
 
 /// The helicopter's body's inertia tensor as the built helicopter holds it (the body's `+0x110` in
 /// C14's start state), which its collision object's response is tuned by
 /// ([`game_sim::kiowa::Collision::new`]); the inverse is [`KIOWA_INV_INERTIA`].
-const KIOWA_INERTIA: Vf = Vf([f32::from_bits(0x4628_adfa), f32::from_bits(0x461f_901b), f32::from_bits(0x44a2_ae40), 1.0]);
+const KIOWA_INERTIA: Vf = game_sim::kiowa::BUILT_INERTIA;
 
 /// How far over the ground a helicopter taken is stood, feet: it settles onto its skids from there.
 /// The port's own number.
