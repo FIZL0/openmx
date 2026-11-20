@@ -15771,6 +15771,89 @@ fn a_bike_ridden_into_a_parked_plane_stops_and_pushes_it() {
     assert!(last.z() - rest.z() > 0.1, "the plane moved {:?}", last.sub(rest));
 }
 
+// S494a: the same strike on free06's parked helicopter (context/capture/s494/heli1.csv): the body,
+// awake all along, takes v (−0.94, −0.27, 2.22) ft/s on the strike and is pushed ~4.2 ft over 80+
+// frames at 1.0–1.3 ft/s, the bike pressed against it.
+
+/// **S494a: a bike ridden into a parked helicopter stops on its hull and pushes its body** (the
+/// comment above). S485's ride with the helicopter parked where free09's truck is, settled 150
+/// frames with nobody aboard as the shell parks free06's ([`game_sim::parked_heli::ParkedHeli::settled`]):
+/// free06's own ride is not in the port's replay kit, so, as for the plane, this is the same strike
+/// on another map, held to the capture's shape rather than its numbers.
+#[test]
+fn a_bike_ridden_into_a_parked_helicopter_stops_and_pushes_it() {
+    let parts = {
+        let Ok(mut disc) = game_render::disc::Disc::open_configured() else {
+            println!("no disc: S494a's helicopter is unchecked");
+            return;
+        };
+        let res = disc.res("machine.res").expect("machine.res");
+        let phy = game_sim::kiowa::Phy::read_bytes(&res.read(game_sim::kiowa::KIOWA_PHY).expect("the helicopter's phy"));
+        let rays = game_sim::track::Rays::parse(&res.read(game_sim::kiowa::KIOWA_RAYS).expect("its rays")).expect("its rays parse");
+        let hull = game_sim::track::Mesh::parse(&res.read(game_sim::kiowa::KIOWA_HULL).expect("its hull")).expect("its hull parses");
+        let lift = game_sim::flight::spawn_lift(&res.read(game_sim::kiowa::KIOWA_MODEL).expect("its model")).expect("its lift");
+        (phy, rays, hull, lift)
+    };
+    let mut heli: Vec<(Vf, Vf)> = Vec::new();
+    let mut before: Option<Sim> = None;
+    let ride = s485_ride_with(120, false, |t, sim, world| {
+        if t == 1 {
+            let (phy, rays, hull, lift) = &parts;
+            let (on, _) = world.ground(Vf::new(S485_TRUCK[0], S485_TRUCK[1] + 50.0, S485_TRUCK[2], 1.0));
+            let at = game_sim::flight::bay_spot(Vf::new(S485_TRUCK[0], on.y(), S485_TRUCK[2], 1.0), *lift);
+            let tables = Arc::clone(&sim.tables);
+            let rays = game_sim::flight_search::Rays::of(rays);
+            let h = game_sim::parked_heli::ParkedHeli::settled(phy, rays, hull.clone(), at, Vf::new(0.0, 0.0, -1.0, 0.0), world, &tables.ride, F(game_sim::car::LOAD_DT), 150);
+            sim.park_helis(vec![h]);
+            assert_eq!(sim.parked_helis.len(), 1, "the helicopter has a hull");
+            before = Some(sim.clone());
+        }
+        // A resync carries the helicopter: sent while it is pushed, decoded onto the state from before.
+        if t == 70 {
+            let bytes = game_sim::snapshot::encode(sim);
+            let mut there = before.clone().expect("the state from before the strike");
+            game_sim::snapshot::decode(&mut there, &bytes).expect("the state decodes");
+            assert_eq!(there.hash(), sim.hash(), "the decoded state's hash");
+            assert_eq!(game_sim::snapshot::encode(&there), bytes, "sent back");
+            let mut bare = there.clone();
+            bare.parked_helis.clear();
+            assert!(game_sim::snapshot::decode(&mut bare, &bytes).is_err(), "a ride with no parked helicopter took the state");
+            let mut without = sim.clone();
+            without.parked_helis.clear();
+            assert!(game_sim::snapshot::decode(&mut there, &game_sim::snapshot::encode(&without)).is_err(), "the helicopter's ride took a state without it");
+        }
+        let b = sim.parked_helis[0].ride.body;
+        heli.push((b.position, b.velocity));
+    });
+    let Some(ride) = ride else { return };
+    let rest = heli[0].0;
+    let speed = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    let struck = heli.iter().position(|(_, v)| speed(*v) > 0.3).expect("the bike never moved the helicopter");
+    let peak = heli.iter().map(|(_, v)| *v).max_by(|a, b| speed(*a).total_cmp(&speed(*b))).unwrap();
+    let last = heli.last().unwrap().0;
+    let bike = ride[struck].bike;
+    println!(
+        "struck on tick {}: bike at z {:.2} ({:.2} ft short of the helicopter's body), its peak v ({:+.2},{:+.2},{:+.2}), moved ({:+.2},{:+.2},{:+.2})",
+        struck + 1,
+        bike.z(),
+        rest.z() - bike.z(),
+        peak.x(),
+        peak.y(),
+        peak.z(),
+        last.x() - rest.x(),
+        last.y() - rest.y(),
+        last.z() - rest.z()
+    );
+    // Before the strike the settled helicopter holds still, stepped every tick.
+    assert!(heli[..struck.saturating_sub(1)].iter().all(|(p, _)| far3(*p, rest) < 0.05), "the helicopter crept before the strike");
+    // The bike stops on the hull, short of the body: it never rides through.
+    assert!(ride.iter().all(|r| r.bike.z() < rest.z()), "the bike rode through the helicopter");
+    // The push is along the bike's heading, of the capture's size (2.2 ft/s), and moves it.
+    assert!(peak.z() > 0.3 && peak.z() > peak.x().abs(), "the helicopter's peak velocity {peak:?} is not along the bike's heading");
+    assert!(speed(peak) < 10.0, "the helicopter was flung at {peak:?}");
+    assert!(last.z() - rest.z() > 0.1, "the helicopter moved {:?}", last.sub(rest));
+}
+
 /// The most two places differ along any axis.
 fn far3(a: Vf, b: Vf) -> f32 {
     [a.x() - b.x(), a.y() - b.y(), a.z() - b.z()].iter().fold(0.0f32, |m, d| m.max(d.abs()))

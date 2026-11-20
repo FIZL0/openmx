@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars, parked_planes } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars, parked_planes, parked_helis } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -163,7 +163,59 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         PARKED_PLANES.put(&mut out);
         parked_planes.put(&mut out);
     }
+    // And the parked helicopters (S494a), behind theirs.
+    if !parked_helis.is_empty() {
+        PARKED_HELIS.put(&mut out);
+        parked_helis.put(&mut out);
+    }
     out
+}
+
+/// What begins [`encode`]'s parked helicopters section.
+const PARKED_HELIS: u64 = u64::from_le_bytes(*b"S494heli");
+
+/// The Sim's parked helicopters in [`encode`]'s codec, which the state's hash walks as one blob
+/// (S494a).
+pub(crate) fn parked_helis_bytes(helis: &[crate::parked_heli::ParkedHeli]) -> Vec<u8> {
+    let mut out = Vec::new();
+    helis.to_vec().put(&mut out);
+    out
+}
+
+/// [`encode`]'s parked helicopters onto `here`'s, as many as here or an error: what one keeps off
+/// the wire (its collision object's ray probe, the rotor's rays and its hull) stays this machine's.
+fn parked_helis_take(r: &mut Reader<'_>, here: &[crate::parked_heli::ParkedHeli]) -> Result<Vec<crate::parked_heli::ParkedHeli>, String> {
+    let mut helis: Vec<crate::parked_heli::ParkedHeli> = Wire::take(r)?;
+    if helis.len() != here.len() {
+        return Err(format!("{} parked helicopters in the state, {} here", helis.len(), here.len()));
+    }
+    for (h, mine) in helis.iter_mut().zip(here) {
+        h.collision.rays = Arc::clone(&mine.collision.rays);
+        h.rotor = mine.rotor;
+        h.hull = mine.hull.clone();
+    }
+    Ok(helis)
+}
+
+impl Wire for crate::parked_heli::ParkedHeli {
+    /// Less the rotor's rays and the hull, constants of the disc [`parked_helis_take`] puts back.
+    fn put(&self, out: &mut Vec<u8>) {
+        let crate::parked_heli::ParkedHeli { kiowa, ride, collision, rng, rotor: _, hull: _ } = self;
+        kiowa.put(out);
+        ride.put(out);
+        collision.put(out);
+        rng.put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(crate::parked_heli::ParkedHeli {
+            kiowa: Wire::take(r)?,
+            ride: Wire::take(r)?,
+            collision: Wire::take(r)?,
+            rng: Wire::take(r)?,
+            rotor: [[Vf::ZERO; 2]; 8],
+            hull: None,
+        })
+    }
 }
 
 /// What begins [`encode`]'s parked planes section.
@@ -321,7 +373,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE, PARKED, PARKED_PLANES].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE, PARKED, PARKED_PLANES, PARKED_HELIS].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -484,6 +536,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     } else if !sim.parked_planes.is_empty() {
         return Err(format!("no parked planes in the state, {} here", sim.parked_planes.len()));
     }
+    // The parked helicopters (S494a) the same.
+    let mut parked_helis = Vec::new();
+    if r.bytes.get(r.at..r.at + 8) == Some(&PARKED_HELIS.to_le_bytes()[..]) {
+        r.at += 8;
+        parked_helis = parked_helis_take(&mut r, &sim.parked_helis)?;
+    } else if !sim.parked_helis.is_empty() {
+        return Err(format!("no parked helicopters in the state, {} here", sim.parked_helis.len()));
+    }
     // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
     // this seat drives the same car here; otherwise left empty for the shell to put back.
     if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
@@ -587,6 +647,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         parked_cars: parked_cars.unwrap_or_default(),
         // The parked planes (S494), as the state has them.
         parked_planes,
+        // The parked helicopters (S494a), as the state has them.
+        parked_helis,
     };
     Ok(())
 }
@@ -1539,6 +1601,21 @@ impl Wire for crate::kiowa::Collision {
         })
     }
 }
+
+// The parked helicopter's flight (S494a, [`crate::parked_heli::ParkedHeli`]).
+wire!(crate::kiowa::Kiowa { controller, rotor, aero, pad, commands, control, rotor_state, aero_state, wrecked });
+wire!(crate::kiowa::Controller { lateral_cyclic_gain, longitudinal_cyclic_gain, pedal_gain, max_altitude, hold_delay, collective_gain, climb_rate, descent_rate, altitude_hold_gain, integrator_gain, min_collective, max_pitch, max_roll, pitch_gain, roll_gain, speed_command_rate, min_speed_command, max_speed_command, speed_gain, min_feed_forward_speed, min_feed_forward_scale, max_feed_forward_speed, max_feed_forward_scale, min_rate, max_rate });
+wire!(crate::kiowa::Rotor { max_lateral_cyclic, max_longitudinal_cyclic, max_collective, max_tail_pitch, lift_curve_slope, blade_chord, blades, radius, radius_squared, angular_rate, max_moment });
+wire!(crate::kiowa::Aero { density, chord, span, area, cl_alpha, cd0, cy_beta, cl_beta, cl_p, cl_da, cm0, cm_alpha, cm_q, cm_de, cn_beta, cn_r, cn_dr, low_speed_drag, low_speed_aero, high_speed_aero });
+wire!(crate::kiowa::Pad { climb, descend, lateral, longitudinal, pedal });
+wire!(crate::kiowa::Commands { collective, lateral, longitudinal, pedal, filtered, altitude_fraction });
+wire!(crate::kiowa::Loop { speed_command, last_longitudinal, hold_altitude, hold_timer, integral, filter });
+wire!(crate::kiowa::Filter { value, time, step });
+wire!(crate::kiowa::RotorState { collective_pitch, tail_pitch, tilt, thrust, force });
+wire!(crate::kiowa::AeroState { fade, lift, drag, side, roll, pitch, yaw });
+wire!(crate::kiowa::Ride { body, measure, crash, flown, gravity_scale, throw_scale, gravity, area, touchdown_sound, rotor_angle, rotor_hidden });
+wire!(crate::kiowa::Measure { speed, alpha, beta, world_rates, velocity, forward, up, euler, matrix, was_touching });
+wire!(crate::kiowa::Crash { reason, down, min_wreck_speed, wreck_time, clock });
 
 // A seat's quad (MD172, [`crate::quad::Lane`]).
 wire!(crate::quad::Lane { ride, segments, was_down, taken_at, wrecks });
