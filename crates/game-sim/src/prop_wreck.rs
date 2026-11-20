@@ -575,10 +575,15 @@ fn woken(set: &mut PropSet, rayed: Vec<(usize, Strike)>) -> Vec<(usize, Strike)>
 /// entries and the bodies they struck, as [`strikes`] joins them.
 /// A body struck across a seam goes to the wreck bike's frame a width back, by the bike, noted as its
 /// side's ([`PropSet::strike_as`], MD167a).
-pub(crate) fn wreck_rays_filed(set: &mut PropSet, rayed: Vec<(usize, Strike)>, by_props: Vec<WreckStrike>) -> Vec<WreckStrike> {
+/// The hulls after the wreck bikes' (the parked cars', S486b) cast no rays: what the props' rays
+/// struck on them follows as it is.
+pub(crate) fn wreck_rays_filed(set: &mut PropSet, rayed: Vec<(usize, Strike)>, mut by_props: Vec<WreckStrike>) -> Vec<WreckStrike> {
     let mut pushed: Vec<Vec<Pushed>> = rayed.iter().rev().map(|(side, s)| set.strike_as(s, *side)).collect();
     pushed.reverse();
-    rayed.into_iter().zip(pushed).zip(by_props).map(|(((_, s), pushed), by)| joined(s.contacts, pushed, by)).collect()
+    let unrayed = by_props.split_off(rayed.len().min(by_props.len()));
+    let mut out: Vec<WreckStrike> = rayed.into_iter().zip(pushed).zip(by_props).map(|(((_, s), pushed), by)| joined(s.contacts, pushed, by)).collect();
+    out.extend(unrayed);
+    out
 }
 
 /// The wreck bike's strike on the props ([`wreck_rays_on_props`], put on the props by
@@ -609,6 +614,32 @@ pub(crate) type Hull = (usize, usize, std::sync::Arc<crate::ragdoll_scene::Bike>
 /// `hulls` as the props' searches take them.
 pub(crate) fn hulls_on_node(hulls: &[Hull]) -> Vec<Wreck<'_>> {
     hulls.iter().map(|(_, side, mesh, at, velocity)| Wreck { hull: flight_search::Plane { mesh: &mesh.mesh, at: *at, velocity: *velocity }, side: *side }).collect()
+}
+
+/// **The parked cars' hulls on the props' node** (S486b): each car's hull where its body's node
+/// stands it ([`crate::car::Parked::hull`]) and its body's velocity, after the wreck bikes' hulls, so
+/// a woken prop's rays strike it as they strike a wreck bike's. Car `k` is the other side `first + k`
+/// of the props' step: after its vehicles and the wreck bikes' bodies ([`crate::Sim::props_step`]).
+/// They cast no rays of their own there ([`PropSet::parked`]): a car's collision object is on the
+/// riders' node.
+pub(crate) fn parked_on_node(cars: &[crate::car::Parked], first: usize) -> Vec<Wreck<'_>> {
+    cars.iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let h = p.hull(first + k);
+            Wreck { hull: flight_search::Plane { mesh: h.mesh, at: h.at, velocity: p.machine.body.velocity }, side: first + k }
+        })
+        .collect()
+}
+
+/// Each parked car the props' rays struck (`strikes`, in [`crate::Sim::parked_cars`]' order) woken:
+/// the struck listener of its collision object, which the props' mirrors name (S486b).
+pub(crate) fn wake_parked(cars: &mut [crate::car::Parked], strikes: &[WreckStrike]) {
+    for (p, s) in cars.iter_mut().zip(strikes) {
+        if !s.mirrors.is_empty() {
+            p.struck();
+        }
+    }
 }
 
 /// **A late prop's strike on a wreck bike after the pass's** (S384): the prop searched at the walk's
@@ -688,12 +719,24 @@ impl crate::Sim {
     /// collision is on has its wreck bike's hull in every prop's world where its record stands it,
     /// and what the props' rays struck on it kept on the bike for its frame ([`WreckBike::struck`]),
     /// in place of [`crate::Sim::wreck_strike`]'s search after the pass.
+    ///
+    /// The parked cars' hulls follow the wreck bikes' (S486b, [`parked_on_node`]): one a prop's rays
+    /// strike is woken, and the props' step pushes its body.
     pub(crate) fn frame_held_wrecked(&mut self, dt: F, world: &mut dyn crate::world::World, players: &[(usize, usize)]) -> crate::prop_set::PropMovers {
         self.hear_ridden();
         let kept = self.wreck_hulls(players);
-        let wrecks = hulls_on_node(&kept);
-        let (movers, strikes) = self.traffic.frame_held_among(dt, world, &wrecks);
+        let first = 2 * self.players();
+        let crate::Sim { traffic, parked_cars, .. } = self;
+        let mut wrecks = hulls_on_node(&kept);
+        if !traffic.props.is_empty() {
+            wrecks.extend(parked_on_node(parked_cars, first));
+        }
+        traffic.props.parked = wrecks.len() - kept.len();
+        let (movers, mut strikes) = traffic.frame_held_among(dt, world, &wrecks);
+        traffic.props.parked = 0;
         drop(wrecks);
+        let cars = strikes.split_off(kept.len().min(strikes.len()));
+        wake_parked(parked_cars, &cars);
         for ((i, ..), strike) in kept.iter().zip(strikes) {
             let rider = if *i == 0 { &mut self.rider } else { &mut self.others[*i - 1].rider };
             if let Some(crash) = rider.crash.as_mut() {
