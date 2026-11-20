@@ -7,7 +7,7 @@
 // speeds, with the rows two of the three agree on kept (`free09-ai4-agreed.csv`). This seeds a Sim off
 // that image: each of the four riders built as the shell builds one and seeded as S174 seeds the 2p
 // riders (chassis, wheels, drivetrain, balance, air, levers), the three AI brains read out of RAM into
-// pilots as S323 reads recording2's, and free09 off the disc as the world. Then `Sim::step_all` runs
+// pilots as S323 reads recording2's, and free09 off the disc as the world. Then `Sim::step_all_posed` runs
 // the four, each AI rider's brain thinking after its bike's frame (the bike riding the levers of the
 // tick before, `Sim::think`, the others read off their cards, S330), and every agreed row's generator
 // and AI bodies are held against the port's.
@@ -104,7 +104,12 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// (part 7 within 0.01 at 24-36). This replay goes in the frame once B42 moves the early touch.
 /// B42: the main bone is set with the last step's rest, and ridden in the frame ai0's parts stay
 /// within 0.0066 ft through 134; the foot dust draws on 132 with the original's (T9a).
-const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
+/// T9a: this replay poses each body in the frame, before its riding step, and draws its chassis after
+/// it, whose grips are the holds that step rides (the first step's too, off a fresh chassis, not the
+/// image's holds). The generator now agrees through 172 (from 133; it parts at 173) and ai2 through
+/// 280 (from 279); ai0, ai1 and the human do not move. Ridden so, ai0's foot dust draws on 132 with
+/// the original's, as `C33_DUST_THROUGH` holds.
+const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 280, 172];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -502,8 +507,8 @@ fn c33_part_offs(copy: &Ee, sim: &Sim, k: usize) -> Vec<f32> {
 }
 
 /// C33's replay. `in_frame`: S490's run, the bodies posed inside the frame on the copy's holds and
-/// held to the copy's bones through [`S490_THROUGH`], where it stops; else S12e's, posed after the
-/// step as the shell's `ai_ride` does, held to its marks.
+/// held to the copy's bones through [`S490_THROUGH`], where it stops; else S12e's, posed inside the
+/// frame on its own drawn chassis holds (T9a), held to its marks.
 fn c33_replay(in_frame: bool) {
     let kit = match Kit::load() {
         Ok(k) => k,
@@ -553,7 +558,7 @@ fn c33_replay(in_frame: bool) {
     // S328b: the four engine notes, as the image holds them, on the lane's generator.
     sim.notes = Some(Box::new(c33_notes(&ee)));
     // S482b: the riding bodies, as the image holds them, whose bone collisions the foot dust reads.
-    // Each rider's body machine poses its skeleton after the step as the shell's does (ai_ride).
+    // Each rider's body machine poses its skeleton inside the frame, before its riding step (T9a).
     let Some(loaded) = C33_RIDERS.iter().map(|_| super::wreck_dust::s483_ragdoll_body()).collect::<Option<Vec<_>>>() else { return };
     let mut kits = Vec::new();
     let mut bodies: Vec<_> = loaded.into_iter().map(|(body, doll, kit, _, _)| {
@@ -621,8 +626,17 @@ fn c33_replay(in_frame: bool) {
         let gen_was = sim.ai.as_ref().unwrap().rng.state();
         match copy.as_mut() {
             None => {
-                sim.step_all(last.dt, &controls, &mut world);
-                c33_pose(&ee, &mut sim, &mut bodies, &mut chassis, &controls, last.dt);
+                // T9a: each body posed in the frame, before its riding step, on the levers its bike
+                // rode, and its chassis drawn after it: its grips are the holds the step rides.
+                sim.step_all_posed(last.dt, &controls, &mut world, &mut |p, rider, hands| {
+                    let (body, doll) = &mut bodies[by_player[p]];
+                    body.ride(last.dt, rider, hands, game_sim::rider::Gate::default());
+                    rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+                    c33_hold(rider, &mut chassis[by_player[p]], body, last.dt);
+                });
+                for (k, (body, doll)) in bodies.iter_mut().enumerate() {
+                    c33_drawn(sim.rider_of(c33_player(&ee, k)), body, doll);
+                }
             }
             Some((copy, clock)) => {
                 super::draws::neutral_pad(copy);
@@ -912,7 +926,7 @@ fn c33_riding_seed(
 }
 
 /// S488: body actor `a`'s animation state as the rider's body machine and its render body keep it,
-/// so the first [`c33_pose`] steps on from the image's clip, blend and phase and not from a machine
+/// so the first in-frame pose steps on from the image's clip, blend and phase and not from a machine
 /// built fresh. The offsets are `watch/rider-joints.toml`'s (motion.rs's V12 seeds from the same):
 /// the machine (`+0x680..+0x6a4`, `+0x8dc..+0x8fc`, the added record `+0x9f0`, the reverse clock
 /// `+0xa3c`, the two axis lags behind `+0x630`/`+0x634`), the clock (`+0x3c` finished, `+0x48..+0x94`)
@@ -1013,35 +1027,6 @@ fn c33_posed(ee: &Ee, a: u32, r: u32, body: &mut game_render::rider::Body, doll:
     };
     let bones = posed.bones.iter().map(|b| game_sim::ragdoll_pose::Bone { at: math::transform_point(&to, b.at), forward: turn(b.forward), up: turn(b.up) }).collect();
     game_sim::ragdoll_ride::Posed { bones, rests: posed.rests }
-}
-
-/// S482b: each rider's body machine after the step, as the shell's frame runs an AI rider's
-/// (openmx's `ai_ride`) and a seat's: the vehicle animation picks the clip on the levers the brain
-/// holds now (the human on its pad's), and the skeleton it poses is what the riding body follows on
-/// the next step. The clip is what lifts a slow rider's foot off its peg (the look-around clip).
-///
-/// T9: and each rider's chassis is drawn after its body, its holds handed to the next step
-/// ([`c33_hold`]), as `ai_ride` hands an AI rider's.
-fn c33_pose(
-    ee: &Ee,
-    sim: &mut Sim,
-    bodies: &mut [(game_render::rider::Body, game_render::rider::Ragdolled)],
-    chassis: &mut [game_render::vehicle::Chassis],
-    controls: &[Controls],
-    dt: F,
-) {
-    for (k, (body, doll)) in bodies.iter_mut().enumerate() {
-        let p = c33_player(ee, k);
-        let hands = match sim.ai.as_deref().and_then(|lane| lane.pilots.iter().find(|(q, _)| *q == p)) {
-            Some((_, pilot)) => ai::ride_controls(&pilot.levers, pilot.racer.habits.clutch),
-            None => controls[p],
-        };
-        let rider = if p == 0 { &mut sim.rider } else { &mut sim.others[p - 1].rider };
-        body.ride(dt, rider, &hands, game_sim::rider::Gate::default());
-        rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
-        c33_drawn(rider, body, doll);
-        c33_hold(rider, &mut chassis[k], body, dt);
-    }
 }
 
 /// T9: rider's chassis drawn off its ride as the shell's `ai_ride` draws an AI rider's (replay.rs's
