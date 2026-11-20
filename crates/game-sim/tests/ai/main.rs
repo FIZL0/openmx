@@ -129,6 +129,7 @@ mod flown_knock; // S492: an AI bike knocks a prop while player 1 flies
 mod c44; // C44: player 1's plane dropped before a riding AI bike, through the plane lane
 mod split_car; // R22: a split-screen bike into the other player's parked buggy
 mod split_seats; // R63: R22 with the seats swapped, player 1's buggy struck by player 2's bike
+mod parked_knock; // C45: player 1's parked bike in the node's dynamics world, knocked by player 2's
 
 use avoidance::*;
 use path_nets::*;

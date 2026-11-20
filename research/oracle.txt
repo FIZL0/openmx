@@ -14603,6 +14603,25 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   resolve (in its own step) takes the bike chassis from 26.568 to 2.383 ft/s and the car to 1.995 ft/s;
 #   9735's row: car v (-0.9455, 0.1083, 0.5273). 9736..9745 two of each. Two captures of the tape from
 #   slot 34 (try1.csv, strike.csv, frames 9657..9896) equal on every column but dt.
+# C45 — R63's parked bike in the node world, before and while it is knocked (tests/ai/parked_knock.rs
+#   c45_the_parked_bike_is_in_the_node_world_before_the_knock; journal
+#   2026-11-20-c45-parked-bike-in-the-node-world; research/c45/lists.py prints an image's lists).
+#   0x01362d30 is the collision record of player 1's parked bike's physics object 0x013613a0 (the body
+#   wrapper, physics_object_ctor 0x001590e0: interface vtables 0x0044e7e0.. at +0x40), body +0x1f0 =
+#   0x01361590 (+0 enabled). Node world 0x01a6afc8 lists: +0x50 bodies [buggy 0x01394710, 0x01361590],
+#   +0x68 forces [0x01832770, 0x0119fa60], +0x98 pre [truck 0x01a68e90, buggy 0x017ea870, 0x013613e0],
+#   +0xb0 post [0x017ea874, 0x013613e4]; the same in states/r63/in (9596), s34 (9656) and pre (9729).
+#   s34.ram run whole in the interpreter on the tape's pads (P1 Square read from frame 9658, P2 Cross
+#   from 9688; buttons high half of port +0, active low, pressures +0xc) equals strike.csv bit for bit
+#   on 9657..9729 (chassis, car, the bike's list). Every frame R63's order: the parked record resolved
+#   after the car's in all 4 passes; nothing changes at the knock. Parked body sliding 0.83 -> 0.71
+#   ft/s on 9657..9715, 12.2 ft/s on 9716 (the bike lists it 9716..9728). So it was in the world, awake,
+#   from being parked; the knock did not put it there.
+#   R22's image (12006): P2's parked bike's object 0x00df71e0, body 0x00df73d0 +0 = 0 (asleep), not in
+#   the world's +0x50 (buggy alone) nor +0x98/+0xb0's tails; its record 0x00df8410 still the node's
+#   fourth (collided, not resolved: R22's world resolves the car's record only).
+#   Port: Garage::switch (P102) takes the bike out of the world (not stepped, drawn or collided); the
+#   split step's riders list has a seat in a car not "on", so another seat's bike meets nothing there.
 # C43 — the Kiowa strikes a knockable prop on free09, captured live (research/c43/README.md; journal
 #   research/journal/2026-11-18-b34c-kiowa-strikes-props/2-c43-kiowa-strike-capture-FINAL.md). For S471.
 #   From C14's state (context/recordings/c43/strike.p2m2, its _SaveState.p2s C14's): climb, R1 9 ticks (nose
