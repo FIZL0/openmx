@@ -1843,7 +1843,7 @@ impl Pen<'_> {
             Screen::PauseGarage => self.pause_garage(menu),
             Screen::Tricks => self.tricks(menu),
             Screen::Online => self.online(menu),
-            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page(menu, screen),
+            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics => self.page(menu, screen),
             Screen::Tracks => self.tracks(menu),
             Screen::Join => self.join(menu),
             Screen::Assign => self.assign(menu),
