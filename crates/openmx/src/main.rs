@@ -3653,6 +3653,17 @@ impl Args {
     }
 }
 
+/// The moment the next picture is posed at, from the frame's `end` (P340, P345): on the display's
+/// `refresh` ([`pace::Refreshes`]) where a window's present waits for one, in the desktop's, the
+/// iPhone's and the Android phone's windows; the frame's end in the browser, on a steady clock, or
+/// with no refresh to keep to.
+fn picture_moment(refreshes: &mut pace::Refreshes, end: Instant, refresh: Option<Duration>, steady: bool) -> Instant {
+    match cfg!(target_arch = "wasm32") || steady {
+        true => end,
+        false => refreshes.moment(end, refresh),
+    }
+}
+
 /// The window presented with VSync or without, live, and the least time a picture takes for the
 /// frame limit (P90, [`pace::frame_floor`]). A display that does not say its refresh is taken as 60.
 fn picture_floor(window: &mut Screen, (vsync, limit): (bool, menu::FrameLimit)) -> Option<Duration> {
@@ -9191,10 +9202,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // blend came a tick's cost later on the frames that ran one than on those that did not, though
     // each went up at the display's next refresh, and the faster the ride the more that showed.
     let mut moment = clock.now();
-    // On iOS, the moments on the screen's refresh (P340, [`pace::Refreshes`]).
+    // In a window, the moments on the screen's refresh (P340 on iOS, P345 on Android and the
+    // desktop, [`pace::Refreshes`]).
     let mut refreshes = pace::Refreshes::default();
-    // The least and most time between two pictures' moments this second, for the phone's line.
+    // The least and most time between two pictures' moments this second, for the phone's line, and
+    // (P345) between the frame ends they were read at, for `--timings`.
     let mut apart: Option<(Duration, Duration)> = None;
+    let mut ends: Option<(Duration, Duration)> = None;
+    let mut frame_end = moment;
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
@@ -13318,27 +13333,35 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             },
             false => String::new(),
         };
+        // How evenly the pictures' moments came (P340): a refresh apart on a steady screen; and with
+        // `--timings`, the frame ends they were read at (P345).
+        let spread = |d: Option<(Duration, Duration)>, what: &str| d.map_or(String::new(), |(a, b)| format!(", {what} {:.1}-{:.1} ms apart", a.as_secs_f64() * 1000.0, b.as_secs_f64() * 1000.0));
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            timing(format!("     {}; {}; {}{uploaded}", stages.line(), stages.worst_line(), second.line()));
+            let apart = spread(ends.take(), "frame ends") + &spread(apart.take(), "pictures");
+            timing(format!("     {}; {}; {}{apart}{uploaded}", stages.line(), stages.worst_line(), second.line()));
             stages_since = Instant::now();
         } else if PHONE && stages_since.elapsed() >= Duration::from_secs(1) {
-            // How evenly the pictures' moments came (P340): a refresh apart on a steady screen.
-            let apart = apart.take().map_or(String::new(), |(a, b)| format!(", pictures {:.1}-{:.1} ms apart", a.as_secs_f64() * 1000.0, b.as_secs_f64() * 1000.0));
+            let apart = spread(apart.take(), "pictures");
             println!("     {}; {}{apart}{uploaded}", stages.brief(), second.line());
             stages_since = Instant::now();
         }
         top = Instant::now();
         let was_moment = moment;
-        moment = clock.now();
-        // iOS's present waits for the refresh in the next frame's drawable, after the frame is
-        // blended (P340): the moment is put on the refresh the picture goes up on.
-        if cfg!(target_os = "ios") && !clock.is_steady() {
-            let waits = window.as_ref().is_some_and(|w| w.waits()) && args.draw_frame().is_none();
-            moment = refreshes.moment(moment, refresh.filter(|_| waits));
-        }
-        if PHONE {
+        let was_end = frame_end;
+        frame_end = clock.now();
+        moment = frame_end;
+        // A window's present waits for the refresh in the next frame's surface, after the frame is
+        // blended (P340): the moment is put on the refresh the picture goes up on. iOS's frame ends
+        // wandered ±4 ms; the desktop's (Vulkan, Fifo, X11 and Wayland) and Android's, whose draw
+        // takes its surface the same way, wander ±1-2 ms (P345). The browser's loop waits on the
+        // page's frame ([`pace::shown`]), not a surface, and says no refresh; it is left as it was.
+        let waits = window.as_ref().is_some_and(|w| w.waits()) && args.draw_frame().is_none();
+        moment = picture_moment(&mut refreshes, frame_end, refresh.filter(|_| waits), clock.is_steady());
+        if PHONE || args.timings {
             let step = moment.saturating_duration_since(was_moment);
             apart = Some(apart.map_or((step, step), |(a, b)| (a.min(step), b.max(step))));
+            let step = frame_end.saturating_duration_since(was_end);
+            ends = Some(ends.map_or((step, step), |(a, b)| (a.min(step), b.max(step))));
         }
         perf.begin();
     }
@@ -17670,6 +17693,56 @@ mod opens_on_mod {
         assert!(!opens_on_mod(Some(&ride), false, Some(Path::new("/nonexistent/mods")), "f6_flat"));
         for d in [mine, other] {
             let _ = std::fs::remove_dir_all(d.parent().unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod android_frame_pacing {
+    //! P345: Android's and the desktop's windows, like the iPhone's, blend a frame before their
+    //! present waits for the next surface, so the frame ends wander around the refresh — the
+    //! desktop's measured 15.3-18.6 ms apart at 60 Hz (Vulkan, Fifo, on X11 and Wayland). The
+    //! pictures' moments keep to the refresh instead.
+    use super::{Instant, pace, picture_moment};
+    use std::time::Duration;
+
+    /// 600 frame ends a refresh apart plus 0-3 ms of the frame's own work: the desktop's spread.
+    fn frame_ends(start: Instant, r: f64) -> Vec<Instant> {
+        let mut seed = 0x9e37_79b9u32;
+        (0..600)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let work = f64::from(seed % 3000) / 1e6;
+                start + Duration::from_secs_f64(f64::from(i) * r + work)
+            })
+            .collect()
+    }
+
+    fn spread(moments: &[Instant]) -> (f64, f64) {
+        let steps = moments.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0);
+        steps.fold((f64::MAX, 0.0f64), |(a, b), s| (a.min(s), b.max(s)))
+    }
+
+    #[test]
+    fn android_frame_pacing_keeps_the_pictures_on_the_refresh() {
+        let r = Duration::from_secs_f64(1.0 / 60.0);
+        let ends = frame_ends(Instant::now(), r.as_secs_f64());
+        let (least, most) = spread(&ends);
+        assert!(least < 15.0 && most > 18.5, "the frame ends are not the desktop's: {least:.2}-{most:.2} ms apart");
+        let mut refreshes = pace::Refreshes::default();
+        let moments: Vec<Instant> = ends.iter().map(|&end| picture_moment(&mut refreshes, end, Some(r), false)).collect();
+        let (least, most) = spread(&moments[60..]);
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        assert!(least > 16.5 && most < 16.85, "the pictures are {least:.2}-{most:.2} ms apart");
+        // No refresh to keep to (a present that does not wait), or a steady clock: the frame's end.
+        let mut refreshes = pace::Refreshes::default();
+        for &end in &ends {
+            assert_eq!(picture_moment(&mut refreshes, end, None, false), end);
+            assert_eq!(picture_moment(&mut refreshes, end, Some(r), true), end);
         }
     }
 }
