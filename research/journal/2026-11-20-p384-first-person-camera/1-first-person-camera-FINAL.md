@@ -1,4 +1,4 @@
-# 1 — first person camera (PART)
+# 1 — first person camera (FINAL)
 
 Task P384. 2026-11-20.
 
@@ -21,13 +21,17 @@ Task P384. 2026-11-20.
     `OffsetFromBodyPoint` in the bike's axes (where a still head sits).
   - Wreck camera and thrill camera still take over from it, as they do from the follow camera.
   - A put-back or a marker's Up snaps it (it resets when the follow camera snaps).
+  - A bike with only one preset can still walk onto it (the camera button was gated on 2+ presets).
   - Split screens read their own section (full 1Player, stacked 2hPlayer, side by side 2vPlayer,
-    quarters/eighths 3Player). A 16:9 display takes `FOVWideScreen`.
+    quarters/eighths 3Player). A 16:9 display takes `FOVWideScreen`. Switching section gives the look
+    lags that section's `LookFilter` (`FirstPerson::set_viewport`), as the original's viewport select does.
   - `--trace-camera` says `first-person` while it has the screen.
 - MXA-style adjust, as ideas only (MXA reference is not on this machine): `--fp-adjust BOB,UP,FORWARD,FOV`,
   `chase::FpAdjust`. BOB is how much of the head's sway the eye keeps (1 = rides the head, 0 = pinned at
   the still-head point); UP/FORWARD are feet along the bike's axes; FOV is degrees added. The default is
   `1,0,0,0`, the disc camera untouched. Camera-page sliders for it are filed as P389.
+- `crates/openmx/src/player.rs` (named in the task) was not touched. The camera's state sits with the
+  other seat cameras in `main.rs`'s Rig. `player.rs` is the desktop start (disc browser), and has no camera.
 - `../opentennis`: no first-person or onboard camera there (searched its Rust for first person /
   onboard / helmet). Nothing taken.
 
@@ -66,7 +70,7 @@ Task P384. 2026-11-20.
 
 ## How it was proved
 
-- `crates/openmx/tests/first_person.rs`, 7 tests, on the disc's `fppreset.ini` (free06's `_2.res`):
+- `crates/openmx/tests/first_person.rs`, 9 tests, on the disc's `fppreset.ini` (free06's `_2.res`):
   - The reader gets the file's numbers, all four sections.
   - The eye is the head node, tick by tick as the head sways; the look is along the bike; FOV 85.
   - With no posed body, the eye is OffsetFromBodyPoint (4.5 ft) over the bike's point.
@@ -74,13 +78,17 @@ Task P384. 2026-11-20.
   - A yaw rate of 1 swings the look in, lagged, and it settles on 0.66 × 0.11 rad.
   - The up rolls by ObjectRollScale (half) of the bike's roll; none while tumbling.
   - The eye stays 1.5 ft over the ground.
-  - The camera button walks A → B → First Person → A, and leaves it out with no file.
+  - The camera button walks A → B → First Person → A, and leaves it out with no file. A one-preset bike
+    walks A → First Person → A.
+  - A section switch gives the look lags the new LookFilter.
   - A side-by-side split reads 2vPlayer (FOV 60); a wide display reads FOVWideScreen (90).
 - By eye: `openmx --track free06 --headless --frames 60 --shot fp.png --shot-frame 50 --size 960x540
   --camera "First Person"`. It shows a level onboard view from the rider's head over free06, the HUD on top.
   It looked right. Not committed (scratchpad only).
-- `--trace-camera`: the eye sits 2.4 ft over the spawn's height on tick 0 and 3.8 ft by tick 38. The head's
-  height over the ground was not measured against the original.
+- The real head, measured with a temporary print in the shell (free06 start, posed body): on tick 0, the
+  spawn pose, the head is 2.4 ft over the bike's point. From tick ~20, once the rider sits up, it is 5.5 ft
+  over it. That is about the file's 4.5 ft still-head offset plus the seat. The head's height was not
+  compared against the original.
 - Checked: `first_person`, `camera_view`, `bike_camera`, `car_camera`.
 
 ## Not verified / not 1:1
@@ -106,10 +114,14 @@ Task P384. 2026-11-20.
   menu sliders yet (P389).
 - **Look-back under the fp camera** still moves the follow camera underneath; the fp view stays. Not asked,
   not changed.
+- **The tests feed a stand-in head, not a posed body.** The shell's head transform was only checked by the
+  print above and by eye.
+- **Split screen and the wide display were not looked at by eye.** Only full screen, one rider.
 - The dust emitters' view test (S420a) reads the first seat's drawn camera. Under the fp camera it reads the
   fp eye. This is presentation-only state for the emitters' culling, and only when the player picks the fp
   camera. With it off, nothing changes.
 
 ## Next
 
-- Spec review, then `./kit done`.
+- Spec review done: one-preset walk and section lags fixed; the head-height worry was the spawn pose (see
+  above). Roll on screen is V137, adjust sliders P389.

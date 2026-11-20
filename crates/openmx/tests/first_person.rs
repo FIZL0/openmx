@@ -216,4 +216,21 @@ fn a_split_screen_reads_its_own_section() {
     assert_eq!(fp.cam.unwrap().fov().0, 60.0, "2vPlayer");
     fp.ensure(Some(&file()), 0, true, true);
     assert_eq!(fp.cam.unwrap().fov().0, 90.0, "1Player's FOVWideScreen");
+    // The look lags take the new section's LookFilter on a switch, as the original's viewport select.
+    let mut preset = FpPreset::read_bytes(&file());
+    preset.views[1].look_filter = Vf::new(0.3, 0.4, 0.5, 0.0);
+    let mut cam = FirstPerson::new(preset, 0, false);
+    cam.set_viewport(1);
+    assert_eq!(cam.look.map(|l| l.tau.0), [0.3, 0.4, 0.5]);
+}
+
+#[test]
+fn a_bike_with_one_preset_still_walks_onto_it() {
+    let one = Preset { name: "A".into(), cycle_thru_this_preset: true, ..Preset::default() };
+    let mut race = Race::new(vec![one], F(5.0));
+    let mut fp = FirstPersonCamera::default();
+    fp.ensure(Some(&file()), 0, false, false);
+    assert!(fp.next(&mut race.cam));
+    assert!(!fp.next(&mut race.cam));
+    assert_eq!(race.cam.preset, 0);
 }

@@ -3115,6 +3115,16 @@ impl FirstPerson {
         }
     }
 
+    /// Switch to a viewport's section. As the original's viewport select, the look lags take that
+    /// section's `LookFilter` times; what they hold is kept.
+    pub fn set_viewport(&mut self, viewport: usize) {
+        self.viewport = viewport.min(FP_SECTIONS.len() - 1);
+        let f = self.preset.views[self.viewport].look_filter;
+        for (lag, tau) in self.look.iter_mut().zip([f.x(), f.y(), f.z()]) {
+            lag.tau = F(tau);
+        }
+    }
+
     /// The viewport's section.
     pub fn view(&self) -> &FpView {
         &self.preset.views[self.viewport]

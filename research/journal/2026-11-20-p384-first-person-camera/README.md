@@ -6,4 +6,4 @@ The disc's own first-person camera, ported from SLUS_207.67 with its `appstart\f
 button walks onto "First Person" after the bike's presets (or `--camera "First Person"`), its eye on the
 rider's Head node, its look swung by the yaw rate and lagged with the file's numbers. MXA-style adjust is
 `--fp-adjust` (ideas only; MXA files absent). The roll is computed but not drawn (the renderer has no up).
-Details in 1-first-person-camera.
+The spec review's fixes (one-preset bikes, section lags) are in. Details in 1-first-person-camera.

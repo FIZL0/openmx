@@ -11877,7 +11877,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 fp.reset = true;
             }
             let presets = follow.cam.presets.len();
-            if steered && presets > 1 {
+            // A bike with one preset still walks onto the first-person camera (P384).
+            let fp_walk = presets > 0 && seat.garage.up == Kind::Bike && rig.first_person.cam.is_some();
+            if steered && (presets > 1 || fp_walk) {
                 let pad = seat.sim.input.pad(0);
                 // The shipped table's next-camera command, Select under either layout (P73). The walk
                 // is the original's next-camera routine: on to the next preset the file lets the player
@@ -12014,8 +12016,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let head = rig.body.as_ref().filter(|b| b.posed).and_then(|b| {
                         let m = b.rig.world().get(b.rig.set.skeleton.find("Head")?)?.mul(chassis_at(ride));
                         Some(Vf::new(m.0[3][0], m.0[3][1], m.0[3][2], 1.0))
-                    });
-                    rig.first_person.frame(ride, head, args.fp_adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
+                    });                    rig.first_person.frame(ride, head, args.fp_adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
                 }
                 _ => None,
             };

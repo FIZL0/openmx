@@ -1558,7 +1558,7 @@ impl FirstPersonCamera {
             self.on = start;
         }
         if let Some(cam) = &mut self.cam {
-            cam.viewport = viewport.min(game_sim::camera::FP_SECTIONS.len() - 1);
+            cam.set_viewport(viewport);
             cam.wide = wide;
         }
     }
