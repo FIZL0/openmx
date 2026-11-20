@@ -2442,6 +2442,10 @@ impl<P: sim_world::World> Game for World<P> {
         // their planes, then each seat's markers, in the walk's order.
         let together = flown.len() > 1;
         let mut held: Vec<Held> = Vec::new();
+        // Two quads or more step their frame together after the walk (N29), every record's pass
+        // before one world step, so each strikes and pushes the others: each seat's pad at its turn.
+        let quads_together = quads.len() > 1;
+        let mut held_quads: Vec<(usize, Controls, Option<game_sim::flight::Met>)> = Vec::new();
         for (step, &me) in order.iter().enumerate() {
             // P350: a race over several seats is the first's Sim's: the others' riders are told to it
             // before its pass, where theirs left them.
@@ -2510,6 +2514,12 @@ impl<P: sim_world::World> Game for World<P> {
                 }
                 continue;
             }
+            if quads_together && quads.contains(&me) {
+                if let Some(controls) = self.seats[me].pass_front(dt) {
+                    held_quads.push((me, controls, met));
+                }
+                continue;
+            }
             // A downed rider's wreck bike meets a lone flown plane (S276): its search with the hull in
             // its world before the plane's frame, the mirrors on the plane's list, and its step after,
             // which the rider's own pass later in the walk does not repeat.
@@ -2538,6 +2548,12 @@ impl<P: sim_world::World> Game for World<P> {
                 for f in b.planes.iter().filter(|f| f.seat >= n) {
                     cars[f.seat - n].pushed(f);
                 }
+            }
+        }
+        if quads_together {
+            self.ride_held_quads(dt, held_quads);
+            if quads.contains(&0) {
+                self.race_guests_out(dt);
             }
         }
         // A flying seat's plane is its striker in the set's step (S259); the garage holds it.
@@ -2702,6 +2718,24 @@ impl<P: sim_world::World> World<P> {
             for f in b.planes.iter().filter(|f| f.seat < seats) {
                 self.seats[f.seat].garage.hull_pushed(f);
             }
+        }
+    }
+
+    /// The quad seats' held passes finished (N29): their quads stepped in one
+    /// [`vehicle::garages_together`], in the walk's order, then each seat's fader and hands.
+    fn ride_held_quads(&mut self, dt: F, held: Vec<(usize, Controls, Option<game_sim::flight::Met>)>) {
+        let mut seats: Vec<Option<&mut Seat>> = self.seats.iter_mut().map(Some).collect();
+        let stepped = held
+            .iter()
+            .filter_map(|(me, controls, met)| {
+                let s = seats.get_mut(*me)?.take()?;
+                s.said = rider::Frame::default();
+                Some((&mut s.garage, &mut s.sim, *me, *controls, met.as_ref()))
+            })
+            .collect();
+        vehicle::garages_together(stepped, dt, &mut self.place);
+        for (me, controls, _) in held {
+            self.seats[me].pass_back(dt, me, controls, None);
         }
     }
 
@@ -3246,6 +3280,75 @@ mod split_contact {
         assert!(bike < through - 3.0, "the bike reached z {bike}, as far as with no hull (z {through})");
         assert!(fastest > idle + 1.0, "the quad was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
         assert!(pushed > still + 0.5, "the quad moved {pushed} ft along the bike's way (with no hull {still})");
+    }
+
+    /// N29: two split-screen seats' quads meet each other. Both seats take openmx-mods' Race 250 P
+    /// where their bikes stand, seat 1's 25 ft up seat 0's way and facing along it; seat 0's quad,
+    /// given 30 ft/s, runs into seat 1's standing one. Stepped together, seat 0's record strikes
+    /// seat 1's hull and its resolution pushes seat 1's quad along the way, and seat 0's stays behind
+    /// it; with no hull meshes the two ride through each other, as every quad did before N29.
+    /// Skips without the disc or the pack in this checkout's mods folder.
+    #[test]
+    fn split_seats_quads_meet_each_other() {
+        use game_render::disc::Disc;
+        let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+        if !pack.join("mod.json").is_file() {
+            eprintln!("skipped: no mods/machines/mxvatv_atv (openmx-mods' import-atv makes it)");
+            return;
+        }
+        if Disc::open_configured().is_err() {
+            eprintln!("skipped: no disc configured");
+            return;
+        }
+        let files = game_render::disc::Res::folder(&pack).expect("the pack's folder reads");
+        let quad = crate::vehicle::AtvRide::read("mxvatv_atv", "Veh/atv_Race250P.phy", &mut |n| files.read(&n.replace('/', "\\")).ok())
+            .expect("the quad builds");
+        assert!(quad.hull.is_some(), "the pack has no ATV_R_ChasisF.col");
+        let body = |world: &World<Flat>, i: usize| world.seats[i].garage.atv_up().and_then(|a| a.quad()).expect("the quad is out").body;
+        let ride = |hull: bool| {
+            let sims: Vec<Sim> = [0.0, 25.0]
+                .into_iter()
+                .map(|z| {
+                    let mut sim = Sim::new(0x29);
+                    let mounts = game_sim::stock::mounts(&sim.phy);
+                    sim.rider = Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                    sim
+                })
+                .collect();
+            let mut world = split(sims);
+            for seat in &mut world.seats {
+                let mut atv = quad.clone();
+                if !hull {
+                    atv.hull = None;
+                }
+                seat.garage.atv = Some(atv);
+                seat.garage.switch(Kind::Atv, &mut seat.sim, &mut world.place).expect("the quad is taken");
+            }
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let parked = body(&world, 1).position;
+            let mut fastest = 0.0f32;
+            for k in 0..60 {
+                if k < 10 {
+                    if let Some(q) = world.seats[0].garage.atv.as_mut().and_then(|a| a.ridden.as_deref_mut()) {
+                        q.ride.body.velocity = Vf::new(0.0, 0.0, 30.0, 0.0);
+                    }
+                }
+                world.simulate(DT, Input::default(), &mut Default::default());
+                fastest = fastest.max(body(&world, 1).velocity.z());
+            }
+            (body(&world, 0).position.z(), body(&world, 1).position.z() - parked.z(), fastest, parked.z())
+        };
+        let ((front, pushed, fastest, parked), (through, still, idle, _)) = (ride(true), ride(false));
+        println!(
+            "seat 1's quad parked at z {parked}; met: seat 0's at z {front}, seat 1's pushed {pushed} ft, at most {fastest} ft/s; \
+             with no hulls seat 0's at z {through}, seat 1's moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(through > parked + 3.0, "with no hulls seat 0's quad stopped at z {through}, short of seat 1's");
+        assert!(front < parked + pushed, "seat 0's quad went on to z {front}, through seat 1's at z {}", parked + pushed);
+        assert!(fastest > idle + 1.0, "seat 1's quad was pushed to {fastest} ft/s (with no hulls {idle})");
+        assert!(pushed > still + 0.5, "seat 1's quad moved {pushed} ft (with no hulls {still})");
     }
 }
 

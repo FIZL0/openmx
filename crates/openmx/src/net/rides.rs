@@ -290,6 +290,10 @@ impl Game for Rides<'_> {
         // their planes, then each seat's markers, before the first seat on its bike.
         let together = flown.len() > 1;
         let mut held: Vec<Held> = Vec::new();
+        // Two quads or more step their frame together after the walk (N29): every record's pass
+        // before one world step, so each strikes and pushes the others.
+        let quads_together = quadded.len() > 1;
+        let mut held_quads: Vec<(usize, Controls, Option<game_sim::flight::Met>)> = Vec::new();
         for seat in order {
             if !aloft[seat] && !held.is_empty() {
                 fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, std::mem::take(&mut held), &mut struck, props.as_mut());
@@ -381,7 +385,12 @@ impl Game for Rides<'_> {
                 continue;
             }
             // On the quad (MD152) neither, as offline's quad has none: the quad on the bike's hands,
-            // with the mirrors of the bikes' strikes on its hull (MD173).
+            // with the mirrors of the bikes' strikes on its hull (MD173). Two quads or more step
+            // together after the walk (N29), as split screen's, in the walk's order.
+            if quads_together && sim.quad.is_some() && self.quads.get(seat).is_some_and(Option::is_some) {
+                held_quads.push((seat, hands, met));
+                continue;
+            }
             if vehicle::ride_lane_met(sim, &hands, dt, self.world, met.as_ref()) {
                 continue;
             }
@@ -437,6 +446,13 @@ impl Game for Rides<'_> {
         }
         if !held.is_empty() {
             fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, held, &mut struck, props.as_mut());
+        }
+        if !held_quads.is_empty() {
+            let mut sims: Vec<Option<&mut Sim>> = self.sims.iter_mut().map(Some).collect();
+            let lanes = (held_quads.iter())
+                .filter_map(|(seat, hands, met)| Some((sims.get_mut(*seat)?.take()?, *seat, self.quads.get(*seat)?.as_ref()?, *hands, met.as_ref())))
+                .collect();
+            vehicle::lanes_together(lanes, dt, &mut *self.world);
         }
         if let Some(p) = props {
             p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);

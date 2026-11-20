@@ -2320,6 +2320,110 @@ pub fn ride_lane_met(sim: &mut Sim, controls: &Controls, dt: F, world: &mut dyn 
     true
 }
 
+/// The name seat `seat`'s quad record goes by to the other quads' records (N29): the seat's, off a
+/// base no world object or prop is named by, never 0 (a record's "nothing struck").
+pub fn quad_named(seat: usize) -> u32 {
+    0x0100_0000 + seat as u32
+}
+
+/// **One seat's quad among the other seats' quads** (N29): its ride and trigger segments, the
+/// seat's controls (its bike's hands), the seat, its pack's quad ([`AtvRide`], for the hull the
+/// others strike and the riding `.col`'s tree) and the mirrors of the bikes' strikes on it.
+pub struct Quadded<'a> {
+    pub ride: &'a mut game_sim::quad::Ride,
+    pub segments: [[Vf; 2]; 4],
+    pub controls: Controls,
+    pub seat: usize,
+    pub atv: &'a AtvRide,
+    pub met: Option<&'a flight::Met>,
+}
+
+/// **The seats' quads stepped together** (N29, [`game_sim::quad::step_together_met`]): every record
+/// cleared, every pass (each striking the others' hulls, [`AtvRide::hull`]'s mesh, with the riding
+/// `.col`'s stored tree), one world step whose resolutions push the others, then every tail; in
+/// `quads`' order, which the caller keeps the same on every machine. A quad of a pack with no hull
+/// mesh steps alone, as [`AtvRide::step_met`] does, before the others: they ride through it.
+pub fn ride_together(quads: Vec<Quadded<'_>>, dt: F, world: &mut dyn World) {
+    let (with, alone): (Vec<_>, Vec<_>) = quads.into_iter().partition(|q| q.atv.hull.is_some());
+    for q in alone {
+        q.ride.rest.clear();
+        q.ride.step_met(&q.controls, dt, world, q.segments, q.met);
+    }
+    let trees: Vec<[game_sim::flight_search::Rays; 1]> = with.iter().map(|q| [game_sim::flight_search::Rays::of(&q.atv.riding)]).collect();
+    let mets: Vec<Option<&flight::Met>> = with.iter().map(|q| q.met).collect();
+    let mut among: Vec<game_sim::quad::Among<'_, _>> = with
+        .into_iter()
+        .zip(&trees)
+        .filter_map(|(q, trees)| {
+            q.ride.rest.clear();
+            let hull = q.atv.hull.as_deref()?;
+            Some(game_sim::quad::Among { ride: q.ride, controls: q.controls, segments: q.segments, me: quad_named(q.seat), hull, trees })
+        })
+        .collect();
+    game_sim::quad::step_together_met(&mut among, &mets, dt, world);
+}
+
+/// **Split screen's seats' quads, one frame together** (N29): each seat's track path cars, as
+/// [`Garage::step_among`]'s quad runs them, then [`ride_together`] on every quad out, then each
+/// one's clips and wreck count. `seats`: each garage with its sim, the seat, its controls and the
+/// bikes' mirrors on its quad, in the walk's order. A garage not on its quad is left alone.
+pub fn garages_together(seats: Vec<(&mut Garage, &mut Sim, usize, Controls, Option<&flight::Met>)>, dt: F, world: &mut dyn World) {
+    let mut out: Vec<(&mut AtvRide, usize, Controls, Option<&flight::Met>)> = Vec::new();
+    for (garage, sim, seat, controls, met) in seats {
+        if garage.up != Kind::Atv {
+            continue;
+        }
+        let Some(atv) = garage.atv.as_mut() else { continue };
+        sim.traffic.frame(dt, world);
+        out.push((atv, seat, controls, met));
+    }
+    // The quads out of their packs for the step, and back after.
+    let mut taken: Vec<(Box<Quad>, &mut AtvRide, usize, Controls, Option<&flight::Met>)> =
+        out.into_iter().filter_map(|(atv, seat, c, met)| Some((atv.ridden.take()?, atv, seat, c, met))).collect();
+    let quads = taken
+        .iter_mut()
+        .map(|(q, atv, seat, controls, met)| Quadded { segments: q.segments, ride: &mut q.ride, controls: *controls, seat: *seat, atv: &**atv, met: *met })
+        .collect();
+    ride_together(quads, dt, world);
+    for (mut q, atv, ..) in taken {
+        if let Some(clips) = &mut q.clips {
+            clips.tick(&q.ride, dt.0);
+        }
+        let down = q.ride.down();
+        if down && !q.was_down {
+            atv.wrecks += 1;
+        }
+        q.was_down = down;
+        atv.ridden = Some(q);
+    }
+}
+
+/// **Online seats' quads, one tick together** (N29): [`ride_lane_met`] for every seat on its quad
+/// at once, through [`ride_together`]: each seat's track path cars, then the quads in `seats`' order
+/// (the walk's, the same on every machine), then each lane's wreck count. `seats`: each sim, the
+/// seat, its copy of the quad (its pack's, for the hull and tree), its hands and the bikes' mirrors.
+/// A seat with no lane's quad is left alone.
+pub fn lanes_together(seats: Vec<(&mut Sim, usize, &AtvRide, Controls, Option<&flight::Met>)>, dt: F, world: &mut dyn World) {
+    let mut lanes: Vec<(&mut game_sim::quad::Lane, usize, &AtvRide, Controls, Option<&flight::Met>)> = Vec::new();
+    for (sim, seat, atv, controls, met) in seats {
+        let Some(lane) = sim.quad.as_deref_mut() else { continue };
+        sim.traffic.frame(dt, world);
+        lanes.push((lane, seat, atv, controls, met));
+    }
+    let quads = lanes
+        .iter_mut()
+        .map(|(lane, seat, atv, controls, met)| Quadded { segments: lane.segments, ride: &mut lane.ride, controls: *controls, seat: *seat, atv, met: *met })
+        .collect();
+    ride_together(quads, dt, world);
+    for (lane, ..) in lanes {
+        let down = lane.ride.down();
+        if down && !lane.was_down {
+            lane.wrecks += 1;
+        }
+        lane.was_down = down;
+    }
+}
+
 /// **A seat that starts the ride in the plane online** (N18): a copy of `template` (the ride's
 /// biplane as built, never flown) into its [`Sim::plane`], standing in `bay`, the seat's own bay in
 /// the lot. Offline a player whose ride setup picked the plane starts in it in their bay (P41,

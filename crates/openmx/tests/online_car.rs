@@ -930,6 +930,98 @@ fn an_online_bike_is_stopped_by_the_other_seats_quad() {
     }
 }
 
+/// N29: two online seats' quads meet each other, as split screen's do. Both seats take openmx-mods'
+/// Race 250 P where their bikes stand, g's 25 ft up the host's way and facing along it, its pad idle;
+/// the host holds the gas from tick 30. Stepped together on every machine (every record's pass
+/// before one world step), the host's record strikes g's hull and its resolution pushes g's quad
+/// along the way, the host's staying behind it; with no hull meshes the two ride through each other.
+/// The two machines agree tick for tick throughout. Skips without the disc or the pack.
+#[test]
+fn two_online_seats_quads_meet_each_other() {
+    use ps2_float::Vf;
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+    if !pack.join("mod.json").is_file() {
+        eprintln!("skipped: no mods/machines/mxvatv_atv (openmx-mods' import-atv makes it)");
+        return;
+    }
+    if disc().is_none() {
+        return;
+    }
+    let files = game_render::disc::Res::folder(&pack).expect("the pack's folder reads");
+    let quad = vehicle::AtvRide::read("mxvatv_atv", "Veh/atv_Race250P.phy", &mut |n| files.read(&n.replace('/', "\\")).ok())
+        .expect("the quad builds");
+    assert!(quad.hull.is_some(), "the pack has no ATV_R_ChasisF.col");
+    let machine = |hull: bool| {
+        let mut quad = quad.clone();
+        if !hull {
+            quad.hull = None;
+        }
+        let sims = [0.0, 25.0]
+            .into_iter()
+            .map(|z| {
+                let mut sim = Sim::new(0x29);
+                let mounts = game_sim::stock::mounts(&sim.phy);
+                sim.rider = game_sim::rider::Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                sim
+            })
+            .collect();
+        Machine2 { sims, world: Flat::default(), cars: vec![Vec::new(); net::SEATS], glitch: false, shove: None, quads: vec![Some(quad); net::SEATS] }
+    };
+    // Both seats on their quads from the first tick; the host on the gas from tick 30.
+    let pad = |seat: usize, tick: usize| {
+        let mut r = Report::from_buttons(0);
+        if seat == 0 && tick >= 30 {
+            r = Report::from_buttons(game_sim::input::Control::Cross.mask());
+        }
+        r.0[net::SWITCH] = vehicle::Wanted { to: Some(Kind::Atv), dpad_rides: true, ..Default::default() }.byte();
+        r
+    };
+    let ride = |hull: bool| {
+        let lineup = Lineup::parse("host,g").unwrap();
+        driven();
+        let mut nets: Vec<Netplay<rides::State>> =
+            ["host", "g"].iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+        let mut games: Vec<Machine2> = (0..2).map(|_| machine(hull)).collect();
+        let mut parked: Vec<Option<f32>> = vec![None; 2];
+        let mut fastest = [0.0f32; 2];
+        // By the session's tick: a seat on its quad does not count its Sim's ticks.
+        rounds_on(&mut nets, &mut games, 3, 0..220, &pad, |_, nets, games| {
+            for (i, g) in games.iter().enumerate() {
+                let Some(lane) = g.sims[1].quad.as_ref() else { continue };
+                match nets[i].tick() {
+                    ..=30 => parked[i] = Some(lane.ride.body.position.z()),
+                    _ => fastest[i] = fastest[i].max(lane.ride.body.velocity.z()),
+                }
+            }
+        });
+        assert!(nets.iter().all(|np| np.desyncs.is_empty() && !np.desynced), "the machines parted");
+        let n = agree(&nets, 0);
+        assert!(n > 150, "only {n} ticks agreed");
+        games
+            .iter()
+            .zip(parked)
+            .zip(fastest)
+            .map(|((g, parked), fastest)| {
+                let parked = parked.expect("g's quad stood before the host set off");
+                let z = |s: usize| g.sims[s].quad.as_ref().expect("the quad is out").ride.body.position.z();
+                (z(0), z(1) - parked, fastest, parked)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (met, through) = (ride(true), ride(false));
+    for (who, (&(front, pushed, fastest, parked), &(past, still, idle, _))) in ["host", "g"].iter().zip(met.iter().zip(&through)) {
+        println!(
+            "{who}: g's quad parked at z {parked}; met: the host's at z {front}, g's pushed {pushed} ft, at most {fastest} ft/s; \
+             with no hulls the host's at z {past}, g's moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(past > parked + 3.0, "{who}: with no hulls the host's quad stopped at z {past}, short of g's");
+        assert!(front < parked + pushed, "{who}: the host's quad went on to z {front}, through g's at z {}", parked + pushed);
+        assert!(fastest > idle + 1.0, "{who}: g's quad was pushed to {fastest} ft/s (with no hulls {idle})");
+        assert!(pushed > still + 0.5, "{who}: g's quad moved {pushed} ft (with no hulls {still})");
+    }
+    assert_eq!(met[0], met[1], "the machines' quads stand apart");
+}
+
 /// T2: the pause of a rider online offers the cars. Set as the shell sets it in an online ride
 /// (main.rs: `menu.cars` from the seat's garage, which has its copies of the disc's cars, and
 /// `menu.session`), the pause's Garage (P341) has the bike and Buggy, Monster Truck and Baja tiles,
