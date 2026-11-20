@@ -15290,6 +15290,105 @@ fn r60_the_strike_s_downward_kick() {
     }
 }
 
+/// R60a's captures of S484's ride (research/s484/truck.sh): `r60a_bodies1`/`2` (`full`: R57's
+/// columns, then the bike's drawn transform `bike_m<r><c>`, the body actor's request `req_*`, its
+/// gravity scale and mode, and per bone its whole dynamics body `b<n>_<field><lane>`, ride.py's
+/// BODY_FIELDS; the two runs equal to the bit) and `r60a_actor1` (`actor`: those plus the actor's
+/// words +0x400..+0x6ff, `a<off>`). Its column names and rows; `None` where it is not here.
+fn r60a_capture(name: &str) -> Option<(Vec<String>, Vec<Vec<f32>>)> {
+    let path = private_dir("capture").join("s484").join(format!("{name}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {}: R60a's forces are unchecked", path.display());
+        return None;
+    };
+    let mut lines = text.lines();
+    let head = lines.next()?.split(',').map(str::to_string).collect();
+    Some((head, lines.map(|l| l.split(',').map(|c| c.parse().unwrap()).collect()).collect()))
+}
+
+/// **R60a: the strike's downward kick is the riding force's y lane** (R60's follow-up;
+/// research/s484/index.md, R60a). S484's ride re-recorded with every bone's dynamics body, the
+/// request and the actor's riding words (context/capture/s484/r60a_*.csv), beside R58's drawn ride
+/// with the animated body.
+///
+/// * Not a torn row: two runs, and R57's, agree to the bit; the frame counter is the same before
+///   and after each row.
+/// * The riding step is one integration of the whole tick (the body's step `h` = 0.03333). On the
+///   strike the feet are off their holds, and their vy change is exactly the force's
+///   (`accel * h`): the kick is in the force the step sums, not a constraint.
+/// * On strike-1 the port's force on every bone is the original's to 0.5 lb. On the strike x and z
+///   still match (to 13 lb of 150-220); y is 13-28 lb lower on theirs, the legs most.
+/// * Not what the port feeds the force: the request (velocity, rates, speed, frame), the gravity
+///   scale (1), the mode (riding), the pose spring (80, 30, 30) and the speed-scaled damper, the
+///   hold targets and hold velocity are theirs. Left: the pose points (the skeleton) or the carried
+///   velocity's spin. Seen as a carried velocity the gap is -8 ft/s on the legs, -4 on the hands;
+///   as a pose point, -0.9 ft and -0.5. Neither a velocity plus a spin nor a rigid move fits it.
+#[test]
+fn r60a_the_strike_s_kick_is_the_riding_force_s_y_lane() {
+    let Some((head, rows)) = r60a_capture("r60a_bodies1") else { return };
+    let Some((head2, rows2)) = r60a_capture("r60a_bodies2") else { return };
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    assert_eq!(head, head2, "the two runs' columns");
+    assert!(rows.iter().zip(&rows2).all(|(a, b)| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())), "the two runs differ");
+    assert!(rows.iter().all(|r| r[col("frame")] == r[col("frame_after")]), "a row read across a tick");
+    let theirs = 58;
+    let r = &rows[theirs];
+    let at = |r: &[f32], n: usize, f: &str| Vf::new(r[col(&format!("b{n}_{f}x"))], r[col(&format!("b{n}_{f}y"))], r[col(&format!("b{n}_{f}z"))], 0.0);
+    let vel = |r: &[f32], n: usize| Vf::new(r[col(&format!("b{n}_vx"))], r[col(&format!("b{n}_vy"))], r[col(&format!("b{n}_vz"))], 0.0);
+    // One step of the whole tick; the freed feet's vy change is the force's alone.
+    for n in R57_BONES {
+        assert!((r[col(&format!("b{n}_stepx"))] - 0.03333).abs() < 1e-6, "b{n}: the riding step is not one tick (0.03333)");
+    }
+    for n in [14, 17] {
+        let dv = vel(r, n).y() - vel(&rows[theirs - 1], n).y();
+        let forced = at(r, n, "acc").y() * r[col(&format!("b{n}_stepx"))];
+        println!("b{n}: vy change {dv:.3}, the force's {forced:.3}");
+        assert!((dv - forced).abs() < 0.2, "b{n}: the vy change {dv} is not the force's {forced}");
+    }
+    // What the request and the actor hand the force on the strike.
+    assert_eq!((r[col("gravity")], r[col("mode")], r[col("req_reason")]), (1.0, 1.0, 0.0), "the gravity scale, mode and reason");
+    let Some((ha, ra)) = r60a_capture("r60a_actor1") else { return };
+    let ca = |name: &str| ha.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let words = |o: usize| Vf::new(ra[theirs][ca(&format!("a{o:03x}"))], ra[theirs][ca(&format!("a{:03x}", o + 4))], ra[theirs][ca(&format!("a{:03x}", o + 8))], 1.0);
+    let (spring, damper) = (words(0x650), words(0x660));
+    let mut log = Vec::new();
+    let mut gains = Vec::new();
+    let Some((port, _)) = r58_port_ride(R58Skeleton::Animated, |_, sim| {
+        log.push(sim.rider.riding.as_ref().map(|rd| rd.actor.ragdoll.bones.iter().map(|b| b.body).collect::<Vec<_>>()));
+        gains.push(sim.rider.riding.as_ref().map(|rd| (rd.actor.pose_spring, rd.actor.pose_damping)));
+    }) else {
+        return;
+    };
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    let (k, d) = gains[ours].expect("the riding body's gains");
+    println!("strike: spring {k:?} / {spring:?}, damper {d:?} / {damper:?}");
+    assert!((0..3).all(|i| k.0[i] == spring.0[i]), "the pose spring {k:?}, theirs {spring:?}");
+    assert!((0..3).all(|i| (d.0[i] - damper.0[i]).abs() < 0.05), "the pose damper {d:?}, theirs {damper:?}");
+    let Some(was) = &log[ours - 1] else { panic!("no riding body on strike-1") };
+    let Some(now) = &log[ours] else { panic!("no riding body on the strike") };
+    for n in R57_BONES {
+        let (p, t) = (was[n].last_force, at(&rows[theirs - 1], n, "lastf"));
+        let off = (0..3).map(|i| (p.0[i] - t.0[i]).abs()).fold(0.0, f32::max);
+        assert!(off < 0.5, "strike-1, b{n}: the force {p:?}, theirs {t:?}");
+    }
+    // On the strike: x and z as theirs, y lower on theirs on every bone. Per bone, the gap seen as a
+    // carried velocity (through the damper) and as a pose point (through the spring), each in the
+    // bone's frame as the force is.
+    let show = |v: Vf| format!("{:7.2} {:7.2} {:7.2}", v.x(), v.y(), v.z());
+    for n in R57_BONES {
+        let df = at(r, n, "lastf").sub(now[n].last_force);
+        let m = game_sim::math::quat_to_mat4(was[n].quat, Vf::new(0.0, 0.0, 0.0, 1.0));
+        let un = |v: Vf| Vf::new((0..3).map(|i| v.0[i] * m.0[0].0[i]).sum(), (0..3).map(|i| v.0[i] * m.0[1].0[i]).sum(), (0..3).map(|i| v.0[i] * m.0[2].0[i]).sum(), 0.0);
+        let tu = |v: Vf| Vf::new((0..3).map(|i| v.0[i] * m.0[i].0[0]).sum(), (0..3).map(|i| v.0[i] * m.0[i].0[1]).sum(), (0..3).map(|i| v.0[i] * m.0[i].0[2]).sum(), 0.0);
+        let l = un(df);
+        let as_v = tu(Vf::new(l.x() / d.x(), l.y() / d.y(), l.z() / d.z(), 0.0));
+        let as_p = tu(Vf::new(l.x() / k.x(), l.y() / k.y(), l.z() / k.z(), 0.0));
+        println!("b{n:2} force {} / {}  off {}  as a velocity {}  as a point {}", show(now[n].last_force), show(at(r, n, "lastf")), show(df), show(as_v), show(as_p));
+        assert!(df.x().abs() < 13.0 && df.z().abs() < 13.0, "strike, b{n}: x/z off by {df:?}");
+        assert!(df.y() < -12.0 && df.y() > -30.0, "strike, b{n}: y off by {}", df.y());
+    }
+}
+
 /// S485's control: without the parked truck the same ride goes on through its spot.
 #[test]
 fn without_the_parked_truck_the_bike_rides_through_its_spot() {

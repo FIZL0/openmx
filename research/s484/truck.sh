@@ -3,8 +3,10 @@
 # pad here, so a held-gas from-savestate tape (research/c15/tape.py) plays on recording2's state over
 # AT-SPI (C6's recipe), and ride.py moves the bike in front of the truck while the tape's start holds
 # the VM paused, then logs the truck's body a row a frame.
-#   KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh PID X Z FRAMES OUT.csv [bones]
+#   KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh PID X Z FRAMES OUT.csv [bones|full|actor]
 # R57: `bones` adds the rider's nine bone collisions' bodies to each row (ride.py).
+# R60a: `full` adds the bike's transform, the request and the bones' whole bodies; `actor` adds the
+# body actor's words +0x400..+0x6ff too.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
