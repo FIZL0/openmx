@@ -290,6 +290,10 @@ impl Game for Rides<'_> {
         // their planes, then each seat's markers, before the first seat on its bike.
         let together = flown.len() > 1;
         let mut held: Vec<Held> = Vec::new();
+        // Two quads or more step their frames together after the walk (N29), in seat order, as
+        // split screen's: every quad seat's hands at its turn, then one frame of them all.
+        let abreast = quadded.len() > 1;
+        let mut held_quads: Vec<(usize, Controls, Option<game_sim::flight::Met>)> = Vec::new();
         for seat in order {
             if !aloft[seat] && !held.is_empty() {
                 fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, std::mem::take(&mut held), &mut struck, props.as_mut());
@@ -381,7 +385,13 @@ impl Game for Rides<'_> {
                 continue;
             }
             // On the quad (MD152) neither, as offline's quad has none: the quad on the bike's hands,
-            // with the mirrors of the bikes' strikes on its hull (MD173).
+            // with the mirrors of the bikes' strikes on its hull (MD173). Among other quads, held
+            // for their frame together (N29), its path cars at its turn as ride_lane_met runs them.
+            if abreast && quadded.contains(&seat) && sim.quad.is_some() {
+                sim.traffic.frame(dt, self.world);
+                held_quads.push((seat, hands, met));
+                continue;
+            }
             if vehicle::ride_lane_met(sim, &hands, dt, self.world, met.as_ref()) {
                 continue;
             }
@@ -437,6 +447,23 @@ impl Game for Rides<'_> {
         }
         if !held.is_empty() {
             fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, held, &mut struck, props.as_mut());
+        }
+        if !held_quads.is_empty() {
+            let quads = &*self.quads;
+            {
+                let mut abreast: Vec<vehicle::Abreast<'_>> = (self.sims.iter_mut().enumerate())
+                    .filter_map(|(i, s)| {
+                        let (_, hands, met) = held_quads.iter().find(|h| h.0 == i)?;
+                        vehicle::lane_abreast(s.quad.as_deref_mut()?, quads.get(i)?.as_ref()?, *hands, i, met.as_ref())
+                    })
+                    .collect();
+                vehicle::quads_abreast(&mut abreast, dt, &mut *self.world);
+            }
+            for &(i, ..) in &held_quads {
+                if let Some(lane) = self.sims[i].quad.as_deref_mut() {
+                    vehicle::lane_abreast_after(lane);
+                }
+            }
         }
         if let Some(p) = props {
             p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);

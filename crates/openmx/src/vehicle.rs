@@ -2320,6 +2320,66 @@ pub fn ride_lane_met(sim: &mut Sim, controls: &Controls, dt: F, world: &mut dyn 
     true
 }
 
+/// What a seat's quad's record goes by to the other seats' quads' (N29): this plus the seat. The
+/// original names a record by its address; any name no other record goes by will do, and 1 is the
+/// name of a quad alone ([`game_sim::quad::Ride::step`]).
+pub const QUAD_NAME: u32 = 0x0100_0000;
+
+/// **A seat's quad among the other seats' quads** (N29, [`quads_abreast`]): its ride and trigger
+/// segments, the seat's controls, the seat, its chassis' frame mesh (what the others' records
+/// strike, [`AtvRide::hull`]), its riding `.col` (whose stored tree its pass strikes them with) and
+/// the mirrors of the riders' bikes' strikes on its hull (MD179).
+pub struct Abreast<'a> {
+    pub ride: &'a mut game_sim::quad::Ride,
+    pub segments: [[Vf; 2]; 4],
+    pub controls: Controls,
+    pub seat: usize,
+    pub hull: &'a game_sim::track::Mesh,
+    pub riding: &'a game_sim::track::Rays,
+    pub met: Option<&'a flight::Met>,
+}
+
+/// **The seats' quads, one frame together** (N29): [`game_sim::quad::step_together_met`] in seat
+/// order whatever order `quads` comes in, so every machine steps them alike: every record cleared,
+/// every pass (each striking the others' hulls where they stand, the mirrors on the struck one's
+/// record), one world step that pushes each where the others' resolution leaves it, then every
+/// tail. Each record goes by [`QUAD_NAME`] plus its seat, and strikes with its riding `.col`'s
+/// stored tree ([`game_sim::flight_search::Rays::of`]), so the hits file in the original's order.
+/// What follows the step for each seat (its clips, its wreck count) is the caller's
+/// ([`AtvRide::abreast_after`], [`lane_abreast_after`]).
+pub fn quads_abreast(quads: &mut [Abreast<'_>], dt: F, world: &mut dyn World) {
+    quads.sort_by_key(|a| a.seat);
+    let trees: Vec<[game_sim::flight_search::Rays; 1]> = quads.iter().map(|a| [game_sim::flight_search::Rays::of(a.riding)]).collect();
+    let mets: Vec<Option<&flight::Met>> = quads.iter().map(|a| a.met).collect();
+    let mut among: Vec<game_sim::quad::Among<'_, _>> = quads
+        .iter_mut()
+        .zip(&trees)
+        .map(|(a, trees)| {
+            a.ride.rest.clear();
+            let me = QUAD_NAME + a.seat as u32;
+            game_sim::quad::Among { ride: &mut *a.ride, controls: a.controls, segments: a.segments, me, hull: a.hull, trees }
+        })
+        .collect();
+    game_sim::quad::step_together_met(&mut among, &mets, dt, world);
+}
+
+/// A seat's quad online among the other seats' (N29, [`quads_abreast`]): its lane on its copy
+/// `quad` (for the hull and the riding `.col`). `None` with no hull mesh: that quad is in no other
+/// quad's world, and steps alone ([`ride_lane_met`]).
+pub fn lane_abreast<'a>(lane: &'a mut game_sim::quad::Lane, quad: &'a AtvRide, controls: Controls, seat: usize, met: Option<&'a flight::Met>) -> Option<Abreast<'a>> {
+    let hull = quad.hull.as_deref()?;
+    Some(Abreast { segments: lane.segments, ride: &mut lane.ride, controls, seat, hull, riding: &quad.riding, met })
+}
+
+/// A lane's quad after [`quads_abreast`]: its wreck counted, as [`ride_lane_met`] counts it.
+pub fn lane_abreast_after(lane: &mut game_sim::quad::Lane) {
+    let down = lane.ride.down();
+    if down && !lane.was_down {
+        lane.wrecks += 1;
+    }
+    lane.was_down = down;
+}
+
 /// **A seat that starts the ride in the plane online** (N18): a copy of `template` (the ride's
 /// biplane as built, never flown) into its [`Sim::plane`], standing in `bay`, the seat's own bay in
 /// the lot. Offline a player whose ride setup picked the plane starts in it in their bay (P41,
@@ -4144,6 +4204,27 @@ impl AtvRide {
         q.was_down = down;
     }
 
+    /// It among the other seats' quads while it is out (N29, [`quads_abreast`]), for seat `seat`.
+    /// `None` for a quad not out, or with no hull mesh, which steps alone ([`AtvRide::step_met`]).
+    pub fn abreast<'a>(&'a mut self, controls: Controls, seat: usize, met: Option<&'a flight::Met>) -> Option<Abreast<'a>> {
+        let hull = self.hull.as_deref()?;
+        let q = self.ridden.as_deref_mut()?;
+        Some(Abreast { segments: q.segments, ride: &mut q.ride, controls, seat, hull, riding: &self.riding, met })
+    }
+
+    /// After [`quads_abreast`]: its clips ticked and its wreck counted, as [`AtvRide::step_met`] does.
+    pub fn abreast_after(&mut self, dt: F) {
+        let Some(q) = self.ridden.as_deref_mut() else { return };
+        if let Some(clips) = &mut q.clips {
+            clips.tick(&q.ride, dt.0);
+        }
+        let down = q.ride.down();
+        if down && !q.was_down {
+            self.wrecks += 1;
+        }
+        q.was_down = down;
+    }
+
     /// Its hull as the riders' bikes meet it while it is out (MD179, [`game_sim::quad::Ride::hull`]),
     /// for seat `seat`: `None` for a quad not out, or with no hull mesh or no record.
     pub fn hull(&self, seat: usize) -> Option<game_sim::rider_contact::Hull<'_>> {
@@ -4221,6 +4302,11 @@ impl Garage {
     /// The quad, while it is up.
     pub fn atv_up(&self) -> Option<&AtvRide> {
         self.atv.as_ref().filter(|_| self.up == Kind::Atv)
+    }
+
+    /// [`Garage::atv_up`] to step (N29, [`AtvRide::abreast`]).
+    pub fn atv_up_mut(&mut self) -> Option<&mut AtvRide> {
+        self.atv.as_mut().filter(|_| self.up == Kind::Atv)
     }
 }
 
