@@ -14449,3 +14449,22 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   Not checked: an asleep ball struck (the test's ball is already awake); the port's ball/bike bits
 #   against this run (the port's own another_rider_strikes_while_player_1_flies checks a player-2 bike
 #   against step_all, not this capture).
+# C43 — the Kiowa strikes a knockable prop on free09, captured live (research/c43/README.md; journal
+#   research/journal/2026-11-18-b34c-kiowa-strikes-props/2-c43-kiowa-strike-capture-FINAL.md). For S471.
+#   From C14's state (context/recordings/c43/strike.p2m2, its _SaveState.p2s C14's): climb, R1 9 ticks (nose
+#   yaw -90 -> -71.6 deg), stick back; flying backwards at ~30 ft/s, CofG y 155.3, the tail strikes the "egg".
+#   Prop: index 5 of the .toy's 62 (list {count 62, head 0x00e24030} at 0x00e1d0a4 in C14's image); collection
+#   0x00e2fd40 (+0x20 0 -> 2 active at the strike), physics object 0x00e325a0, body 0x00e301a0 (+0 enabled),
+#   collision object 0x00e3cdd0, f.col 0x00e3a3d0; asleep at (3244.705, 143.675, 3977.149).
+#   Strike frame 1579 (frame_counter): row 1578 the egg asleep, the heli's record empty (rec 0x01490870);
+#   row 1579 the egg enabled and already at v (47.19, -8.44, -21.92), w (0.21, 1.43, 2.03); heli v
+#   (32.90, 0.19, -6.95) -> (29.37, -0.93, -6.50), CofG 30 ft from the egg's. The heli's record: 17 entries,
+#   [k0 other 0x00e3cdd0 (+0x24 7.186, +0x8 0x014a6f20), then 16 k1 mirrors naming 0x00e3cdd0]; the egg's: 19,
+#   [k1 mirror of the heli's k0, two k0 with no other (the ground), 16 k0 naming 0x01490870]. Entry: +0 kind,
+#   +0x74 the other's collision object. Contact rows 1579..1592; no wreck (+0x3d4/+0x3d8 0 throughout);
+#   rng_state unchanged across the strike; dt 0.03333 every row.
+#   Images (each holds its own csv row, bodies bit-equal to body_raw/prop_body_raw): context/states/
+#   c43-strike-1578 (before), -1579 (the strike), -1580 (after), .ee.bin + .spr.bin; csv
+#   context/capture/c43/strike.csv, frames 1204..1663 (84 rows past the strike), research/c43/c43.toml.
+#   Checked: a second run of the tape (try6.csv) equals it on every lane but the pads, stamps and the two
+#   entry columns (re-defined between the runs) on all 460 rows.
