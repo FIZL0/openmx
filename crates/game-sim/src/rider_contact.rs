@@ -1027,6 +1027,19 @@ pub fn met_plane(riders: &[(&Rider, &Phy)], me: usize, named: usize, mirrors: Ve
     met
 }
 
+/// **Seat `me`'s driven car among the riders' bikes** (F76): [`met_plane`], with every other
+/// player's chassis where it stands nearest the car (`at`), in the world while it is on its bike
+/// (`on`, [`plane_bikes`]), and their collision files, so the car's own rays strike them
+/// ([`crate::car::Machine::step_met`]). R22: a split-screen buggy's body rays strike the bike that
+/// runs into its tail, and its resolve, before the bike's, stops the bike.
+pub fn met_car(riders: &[(&Rider, &Phy)], on: &[bool], me: usize, named: usize, mirrors: Vec<Contact>, at: Vf, world: &dyn World) -> crate::flight::Met {
+    let mut met = met_plane(riders, me, named, mirrors, at, world);
+    let near: Vec<(&Rider, bool)> = riders.iter().zip(on).map(|(&(r, _), &o)| (r, o)).collect();
+    met.rides = plane_bikes(&near, me, at, world);
+    met.bike_col = (riders.iter().enumerate()).filter(|&(j, _)| j != me).find_map(|(_, (r, _))| r.bike_col.clone());
+    met
+}
+
 /// [`met_plane`] on online's seats.
 pub fn met_plane_among(sims: &[Sim], me: usize, named: usize, mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
     let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();

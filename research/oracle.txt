@@ -14482,6 +14482,14 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   Port (main.rs World::simulate, car.rs) differs: no car rays on the bikes (F26 "not ported"); the
 #   bike's resolve pushes the car's body (Bump::planes, Car::pushed) where the original's car resolve
 #   does the meeting first; the seat order (other seats last first) steps a seat-0 car after a seat-1 bike.
+#   F76 (journal research/journal/2026-11-20-f76-split-car-rays-on-bikes): the port's car now strikes
+#   the bikes with its own rays (car.rs search_met) and steps before them. Test
+#   f76_the_ports_car_strikes_and_stops_the_bike_as_r22s: on 12012 the port's search (car body at
+#   collide 0x002708a0, bike frame collidable +0x120) gives the car's 3 k0 entries and the bike's
+#   3 k1 mirrors bit for bit; the port's resolve of the car's first 0x00270dc0 call, weighed by the
+#   car collision's mass 77.63975 (record +0x64 is 155.2795, which gives the wrong force), gives the
+#   car body +0x70/+0x90/+0xc0/+0x190/+0x1b0/+0x1e0 and the bike chassis +0x260/+0x290/+0x170/+0x180
+#   bit for bit (bike 46.16146 -> 4.2808557 ft/s).
 # C43 — the Kiowa strikes a knockable prop on free09, captured live (research/c43/README.md; journal
 #   research/journal/2026-11-18-b34c-kiowa-strikes-props/2-c43-kiowa-strike-capture-FINAL.md). For S471.
 #   From C14's state (context/recordings/c43/strike.p2m2, its _SaveState.p2s C14's): climb, R1 9 ticks (nose
