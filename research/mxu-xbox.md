@@ -47,3 +47,15 @@ textures and lays each pair side by side; checked by eye on free06 and the 250SX
 - **Cameras**: the `appstart\*cpresets.ini` files are retuned (e.g. cpresets Preset FOV 85 → 90, AngleX
   65 → 50; the biplane FollowingDistance 13 → 28), and `fppreset.ini` adds widescreen presets.
 - Terrain: `.dx.trn` 3.1 MB vs `.ps2.trn` 2.0 MB for free06. Not decoded.
+
+## The texture pack (P383)
+
+1. `tools/xbox_xiso.py XBOX.iso x X` and, for each `.res`, `tools/xbox_res.py X/<dir>/<name>.res x XU/<dir>/<name>`
+   (the unpacked tree mirrors `openmx --dump-textures`'s `<archive>/<member>` layout).
+2. `openmx --dump-textures` (PS2 disc → `mods/textures-src/`).
+3. `tools/xbox_textures.py pack mods/textures-src XU mods/xbox-textures [--keep NAME ...]`: every pair goes in
+   `mods/xbox-textures/survey.tsv`; an Xbox picture with more pixels than its PS2 twin, or one named in
+   `--keep` / the script's `KEEP`, is written as `textures/<member>-<PS2 key>.png` in a `"kind": "textures"`
+   pack. Needs numpy only (no PIL). Terrain pages (`.ps2.trn` vs `.dx.trn`) and `.atm` are not matched.
+4. Upscaled with the Xbox picture as the source: `tools/upscale_mods.py MODEL --disc mods/upscaled-disc --xbox
+   mods/xbox-textures`.

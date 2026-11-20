@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Decode PS2 .pst and Xbox .dxt textures to PNG and lay each pair side by side.
-xbox_textures.py PS2_DIR XBOX_DIR OUT_DIR  (dirs hold the unpacked .res trees; pairs matched by name)."""
-import os, struct, sys
+xbox_textures.py PS2_DIR XBOX_DIR OUT_DIR  (dirs hold the unpacked .res trees; pairs matched by name).
+xbox_textures.py pack TEXTURES_SRC XBOX_DIR OUT [--keep NAME ...]: the Xbox pictures with more pixels as a
+texture pack keyed to the PS2 textures (P383, `pack` below)."""
+import os, struct, sys, zlib
 import numpy as np
-from PIL import Image, ImageDraw
 
 def u32(b, o): return struct.unpack_from("<I", b, o)[0]
 
@@ -78,6 +79,7 @@ def dxt(b):
     return dxt_blocks(px, w, h, alpha5=(fmt == 0x36))
 
 def main(pd, xd, out):
+    from PIL import Image, ImageDraw              # the side-by-side sheets only; `pack` needs no PIL
     os.makedirs(out, exist_ok=True); rows = []
     for root, _, fs in os.walk(pd):
         for f in sorted(fs):
@@ -101,5 +103,67 @@ def main(pd, xd, out):
             rows.append(f"{name}\tPS2 {A.width}x{A.height}\tXbox {B.width}x{B.height}")
     open(f"{out}/sizes.tsv", "w").write("\n".join(rows) + "\n"); print(len(rows), "pairs")
 
+# ---- P383: the Xbox pictures as a texture pack, keyed to the PS2 textures they replace ----
+# Textures whose Xbox picture the user judged better at the same size (file names without "-<key>.png",
+# e.g. "free06_grass"): kept like the larger ones. Add to it, or pass --keep.
+KEEP = ()
+
+def png_size(p):                                  # (w, h) from the IHDR
+    return struct.unpack(">II", open(p, "rb").read(24)[16:24])
+
+def write_png(p, a):                              # RGBA8, unfiltered rows
+    h, w = a.shape[:2]
+    rows = b"".join(b"\0" + a[y].tobytes() for y in range(h))
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    open(p, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                        + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
+
+def pack(src, xd, out, keep=()):
+    """For every PS2 texture `openmx --dump-textures` wrote to `src` (`<archive>/<member>-<key>.png`), the
+    Xbox `.dxt` of the same archive and member under `xd` (each .res unpacked by xbox_res.py to
+    `<archive>/`, as `xbox_xiso.py` names it less `.res`; matched case-blind). Where the Xbox one has
+    more pixels, or its name is in `keep`, write it as `out/textures/<member>-<PS2 key>.png`: a texture
+    pack (`out/mod.json`, "kind": "textures"). Every pair goes in `out/survey.tsv`. How many were kept."""
+    xbox = {}
+    for root, _, fs in os.walk(xd):
+        for f in fs:
+            if f.lower().endswith(".dxt"):
+                p = os.path.join(root, f)
+                xbox[os.path.relpath(p, xd)[:-4].replace(os.sep, "/").lower()] = p
+    keep = {k.lower() for k in (*KEEP, *keep)}
+    rows, kept, alone = [], 0, 0
+    for root, _, fs in os.walk(src):
+        for f in sorted(fs):
+            stem, _, k = f[:-4].rpartition("-")
+            if not f.lower().endswith(".png") or len(k) != 16 or not all(c in "0123456789abcdef" for c in k):
+                continue
+            rel = os.path.relpath(os.path.join(root, stem), src).replace(os.sep, "/")
+            xp = xbox.get(rel.lower())
+            if xp is None:
+                alone += 1; continue
+            try:
+                b = dxt(open(xp, "rb").read())
+            except Exception as e:
+                print("skip", rel, e); continue
+            w, h = png_size(os.path.join(root, f))
+            why = "more pixels" if b.shape[0] * b.shape[1] > w * h else "kept" if stem.lower() in keep else ""
+            rows.append(f"{rel}\t{k}\tPS2 {w}x{h}\tXbox {b.shape[1]}x{b.shape[0]}\t{why or 'PS2'}")
+            if why:
+                p = os.path.join(out, "textures", f"{rel}-{k}.png")
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                write_png(p, np.ascontiguousarray(b, np.uint8)); kept += 1
+    os.makedirs(out, exist_ok=True)
+    mj = os.path.join(out, "mod.json")
+    if not os.path.exists(mj):
+        open(mj, "w").write('{"standard": 1, "kind": "textures", "id": "xbox-textures", "name": "Xbox textures"}\n')
+    open(os.path.join(out, "survey.tsv"), "w").write("\n".join(rows) + "\n")
+    print(f"{len(rows)} pairs, {kept} Xbox pictures kept, {alone} PS2 textures with no Xbox twin")
+    return kept
+
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    if sys.argv[1:2] == ["pack"]:
+        # xbox_textures.py pack TEXTURES_SRC XBOX_DIR OUT [--keep NAME ...]  (OUT: mods/xbox-textures)
+        a = sys.argv[2:]; ks = a[a.index("--keep") + 1:] if "--keep" in a else []
+        pack(*a[:3], keep=ks)
+    else:
+        main(*sys.argv[1:4])
