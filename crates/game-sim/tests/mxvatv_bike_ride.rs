@@ -23936,3 +23936,81 @@ fn r61_the_trails_rand_reaches_the_rider_through_the_noise() {
     assert_eq!((seen.noise_from, seen.rider_from), (None, None), "{seen:?}");
     assert!(seen.blend_rows.is_empty() && seen.flag_rows == 0, "{seen:?}");
 }
+
+// --- R64: why the emitters stop under the shown trail -----------------------------------------------
+
+/// The effects root's step (vt 0x003d1900 `+0x40`, the only word in RAM holding it) and the emitter
+/// listeners' thunk (0x00511c10 -> 0x0050ceb0), which the root's own closing walk steps.
+const R64_EFFECTS_STEP: u32 = 0x004f_a4a0;
+const R64_EMITTER_THUNK: u32 = 0x0051_1c10;
+
+/// Counts the calls to `at` into `n`, running the original's own `at` inside the hook.
+fn r64_count(ee: &mut Ee, n: &std::rc::Rc<std::cell::Cell<u32>>, at: u32) {
+    let n = n.clone();
+    ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+        n.set(n.get() + 1);
+        let (args, floats) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7)], [ee.f(12)]);
+        let (ra, sp, stack, written) = (ee.r(31), ee.r(29), ee.stack, ee.written.clone());
+        ee.stack = (sp as u32 - 0x400) & !0xf;
+        ee.call(at, &args, &floats, 100_000_000);
+        ee.written.extend(written);
+        (ee.stack, ee.pc) = (stack, at);
+        ee.set(29, sp);
+        ee.set(31, ra);
+    }));
+}
+
+/// **R64 — the shown trail is the bike's effects root switched off, so its walk never reaches the
+/// emitters.** The bike's "trail" (`+0x10dc`, vt 0x003d1900) is the effects listener itself, a child of
+/// the bike's listener group `+0xc`. What F44 calls its on (vt `+0x18`, 0x00128040) clears bits 0 and 1
+/// of its state byte `+0x21`; the walk 0x00128af0 steps a child only with bit 0 set ([`tail::steps`]),
+/// so the effects step 0x004fa4a0 and the walk of its listeners (every emitter, 0x0050ceb0 / 0x0050db60
+/// / 0x004fbcc0) are not called at all: no gate, mode or pool stops them. [`r61_replay`]'s two copies
+/// (trail rows 100-299): every row of both C15 rides the original stepped the root exactly when the
+/// port's [`tail::steps`] says so; the shown copy's `+0x21` is 0 on rows 100-299 and 3 elsewhere, and
+/// it steps no root and no emitter on those rows, the same as the plain copy on every other row. A
+/// pure frame that answers the sync's trail on with [`update::trail_on`] and walks with [`tail::walk`]
+/// already keeps `rand` in step.
+#[test]
+fn r64_the_shown_trail_leaves_the_effects_unwalked() {
+    use std::{cell::Cell, rc::Rc};
+    for (name, len) in [("ride-2", 459), ("flip-1", 465)] {
+        let (Some(a), Some(rows)) = (image(), rows(name)) else { return };
+        assert_eq!(rows.len(), len, "{name}'s rows");
+        let (mut a, mut b) = (hooked(a), hooked(image().unwrap()));
+        b.set_u32(BIKE + 0x444, 0x38);
+        let root = a.u32_at(BIKE + 0x10dc);
+        assert_eq!((a.u32_at(root + 4), a.u32_at(root + 0x14)), (0x003d_1900, BIKE + 0xc), "the trail's vtable and group");
+        assert_eq!(a.u32_at(0x003d_1900 + 0x40), R64_EFFECTS_STEP, "the trail's step is the effects step");
+        let counts: [[Rc<Cell<u32>>; 2]; 2] = Default::default();
+        for (ee, c) in [&mut a, &mut b].into_iter().zip(&counts) {
+            r64_count(ee, &c[0], R64_EFFECTS_STEP);
+            r64_count(ee, &c[1], R64_EMITTER_THUNK);
+        }
+        for (r, row) in rows.iter().enumerate() {
+            for ee in [&mut a, &mut b] {
+                match r {
+                    100 => ee.set_u32(BIKE + 0xb34, 1),
+                    300 => ee.set_u32(BIKE + 0xb34, 0),
+                    _ => {}
+                }
+                poke(ee, row, &READER);
+                ee.set(28, GP);
+                ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+            }
+            let shown = (100..300).contains(&r);
+            let took = |c: &[Rc<Cell<u32>>; 2]| [c[0].replace(0), c[1].replace(0)];
+            let (ta, tb) = (took(&counts[0]), took(&counts[1]));
+            for (ee, t, copy) in [(&mut a, ta, "plain"), (&mut b, tb, "shown")] {
+                let steps = tail::steps(&mut PartWalk { ee: &mut *ee }, root);
+                assert_eq!(t[0] == 1, steps, "{name} row {r}, {copy} copy: stepped {} times, the port's steps {steps}", t[0]);
+            }
+            assert_eq!(ta[0], 1, "{name} row {r}: the plain copy steps the root once");
+            assert!(ta[1] > 0, "{name} row {r}: the plain copy's emitters");
+            assert_eq!(b.u8_at(root + 0x21), if shown { 0 } else { 3 }, "{name} row {r}: the shown copy's state byte");
+            assert_eq!(tb, if shown { [0, 0] } else { ta }, "{name} row {r}: the shown copy's root and emitter steps");
+            poke(&mut a, row, &SPOT);
+            poke(&mut b, row, &SPOT);
+        }
+    }
+}

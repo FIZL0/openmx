@@ -11977,6 +11977,27 @@ atv_heap_free               atv 0x001b76d0 = free
 #   noise is the only path. So a pure frame that ever runs the first-person camera must
 #   keep the emitters' draws under a shown trail, or rand (and every later noise build, wreck spin and
 #   cue pick) parts from the original's.
+# R64 — why the emitters stop under the shown trail: nothing stops them inside; they are never called. The
+# shown trail is the bike's effects root switched out of its group's walk (tests/mxvatv_bike_ride.rs
+# r64_the_shown_trail_leaves_the_effects_unwalked). Found with S345's two copies, the emitter steps and
+# their callers hooked to count (each run inside its own hook).
+#   The "trail" bike+0x10dc (0x00eb58f0, vt 0x003d1900) is the effects listener itself: its step vt +0x40 is
+#   the effects step 0x004fa4a0 (the only word in RAM holding 0x004fa4a0 is 0x3d1940; no jal to it), whose
+#   closing walk 0x00128af0(root, dt) steps the emitter listeners (thunks 0x00511c10 -> 0x0050ceb0, which
+#   branches to 0x0050db60; 0x004ffd20 -> 0x004fbcc0). The root is a child of the bike's group +0xc (its
+#   +0x14 = 0x00e714ec).
+#   What F44 calls the trail's on (vt +0x18 = 0x00128040, the scene node's own: update::trail_on) clears
+#   bits 0 and 1 of +0x21 (3 -> 0), then vt +0x28; its off (0x00128080) sets both, then vt +0x2c. The walk
+#   0x00128af0 (group +0x1c & 2; each child with +0x21 & 1 set, & 4 and & 8 clear, +0x18 & 2:
+#   tail::steps) so skips the root from the first shown row: ride-2 and flip-1 alike, the shown copy calls
+#   0x004fa4a0 and the emitter thunk 0 times on rows 100-299 and as the plain copy on every other row (the
+#   sync runs before the part walk, so row 100 is already skipped and row 300 stepped). So F44's "on" is the
+#   effects' off: with the first-person camera current the bike's effects are neither stepped nor drawn.
+#   No gate (0x0050a040), mode or pool is involved; rand freezes on that copy only because nothing in the
+#   effects runs. For a pure frame: answering the sync's TrailOn with update::trail_on and walking the
+#   bike's group with tail::walk already skips the effects and their draws, which keeps rand in step with
+#   the original. A pure frame that drops TrailOn while running a first-person camera would draw where the
+#   original does not.
 # B35 —the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
 # (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
 #   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,
