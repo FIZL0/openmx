@@ -2216,8 +2216,10 @@ fn parked_drawn<'s>(seat: &'s Seat, before: &[M4], cut: bool, blend: &pace::Blen
 }
 
 /// Every seat's car driver (S245), as [`heli_pilots`] the helicopter's: the rider's own body posed
-/// by the plane's clips, its root in the car's seat ([`game_render::car::seat`]) and its limbs held
-/// to the model's seat nodes. `None` for a seat not driving one.
+/// by the car's steer clip at the lean its steer eases (S265, [`game_render::car::driver_palette`];
+/// the plane's clips where the rider's archive lacks it), its root in the car's seat
+/// ([`game_render::car::seat`]) and its limbs held to the model's seat nodes. `None` for a seat not
+/// driving one.
 fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
     seats
         .iter()
@@ -2232,7 +2234,12 @@ fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Opti
             let pelvis = game_render::car::seat(loaded)?;
             let anchors = game_render::car::SEAT.map(|n| game_render::car::node_at(loaded, n).map(|v| v.sub(pelvis)));
             let body = rig.body.as_mut()?;
-            let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
+            let clip = game_render::car::steer_clip(car_draw::model_name(car.machine, car.livery));
+            let (phase, _) = rig.pilot_lean.weights();
+            let palette = match game_render::car::driver_palette(body, &anchors, clip, phase) {
+                Some(p) => p,
+                None => biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?,
+            };
             let mut root = M4::IDENTITY;
             root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
             Some(Pilot { plane: at, at: root.mul(at), palette })
@@ -10998,6 +11005,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 match seat.garage.heli_up() {
                     // The helicopter's pilot leans with its stick (P216b).
                     Some(heli) => rig.pilot_lean.step_heli(dt, heli),
+                    // A car's driver leans with its steer (S265).
+                    None if seat.garage.car_up().is_some() => rig.pilot_lean.step_car(dt, seat.garage.car_up()),
                     None => rig.pilot_lean.step(dt, seat.garage.plane_flown(), seat.said.respawned),
                 }
             }
@@ -12452,6 +12461,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if args.trace_picture {
                         let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
                         trace_pilot(p, "gpu", model, pilot, &nodes);
+                        // S265: the clip the driver is posed by and where in it, off the steer.
+                        let clip = game_render::car::steer_clip(car_draw::model_name(car.machine, car.livery));
+                        let has = rigs[p].body.as_ref().is_some_and(|b| b.rig.set.id(clip).is_some());
+                        let steer = car.driven.as_ref().map_or(0.0, |m| m.controls.steer_input.0);
+                        // The body's topmost node, its head, in the seat's own space.
+                        let top = pilot.palette.iter().map(|m| m.0[3]).fold([0.0f32, f32::MIN, 0.0, 1.0], |a, b| if b[1] > a[1] { b } else { a });
+                        let phase = rigs[p].pilot_lean.weights().0;
+                        println!("picture driver: seat {p} clip {} phase {phase:.4} steer {steer:.4} top {:.3} {:.3} {:.3}", if has { clip } else { "plane" }, top[0], top[1], top[2]);
                     }
                 }
             }

@@ -8620,6 +8620,20 @@ atv_record_apply            atv 0x00207240 = collision_apply
 #   (ctor 0x003df770, .phy read 0x003e0200). Node writers they call: rotation set 0x001b2e50, post-rotate
 #   0x001b2c20, aim 0x001b1d70 / 0x001b1e20 (a frame built from an up vector and the target), translation
 #   set 0x001b2640. The baja/buggy upper arm's swing factor 1.25 is the float at 0x4218e0.
+# S265 — the driver's lean (crates/openmx/src/vehicle.rs PilotLean::step_car, game-render car.rs
+#   driver_palette/steer_clip; test openmx/tests/car_picture.rs a_driven_cars_driver_leans_with_its_steer).
+#   The rider build's per-kind record gives kind 3 (buggy) clip a "buggy_steer" and kinds 4/5 (truck, baja)
+#   "baja_steer", with no clip b: vehicle_animation (S25) mode 1 plays a alone at the phase axis.
+#   The driver request, 0x0039e850 (buggy/baja) / 0x003e02a0 (truck), block at car+0x650: +0x658 at_base 0,
+#   +0x65c held = car+0x2c0 (the unwreck latch), +0x7d0 base = body+0x50 (truck car+0xfe0), +0x7e0 rotation
+#   = body+0x150, +0x7c8 band = car+0x55c, limb targets +0x700..+0x730 from the Dummy nodes +0xf04..+0xf10,
+#   offsets +0x790/+0x794 -> +0xf20/+0xf30 (PelvisBoxPosition/Size), phase target +0x7c0 =
+#   0.5*(1 + car+0x4c0 steer input), +0x7fc = +0x178. The mix target +0x7c4 is never written (0 from the
+#   ctor, 0x0039d41c/0x0039d424). It runs in the measure from the post (0x003a02f0: car_measure 0x398150,
+#   vt+0x2e0, 0x39ed00, 0x39e9c0, 0x39e850; truck 0x003e1710), after the controls step: this tick's steer.
+#   The steering wheel: only buggy.psg has a "steeringWheel" node (23, child of root, at (-0.0025, 3.596,
+#   0.374), the hands not under it); the name is not in boot.elf and no pose step writes it, so the
+#   original leaves it at bind and so does the port.
 # The .psg node lists (a trailing section after the last stream): u32 count | flag<<24 (0x40 one list for
 #   every mesh, 0x80 a list a mesh through a u8 map a mesh), then per list u32 n and n u8 node indices. A
 #   vertex's (w>>4)-1 is a slot in its mesh's list. Disc survey: 4013 files without the section, 2119 with

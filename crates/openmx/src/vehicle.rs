@@ -1408,6 +1408,22 @@ impl PilotLean {
         self.stick = Some((h.kiowa.pad.longitudinal, h.kiowa.pad.lateral));
     }
 
+    /// [`PilotLean::step`] for a seat driving a car (S265). The car's measure (boot 0x003a02f0, the
+    /// truck's 0x003e1710) ends in its driver request (0x0039e850, 0x003e02a0), after the controls
+    /// step, so the driver leans to this tick's steer: the phase target `0.5 * (1 + steer)`, the
+    /// steer after its rate limit (car +0x4c0), and the measure's latch (+0x2c0, raised by the
+    /// unwreck) as the holding flag that snaps it. The mix target is never written past the
+    /// constructor's 0 (0x0039d424), and the car's one-clip record never reads it. Off the car the
+    /// lean is let go, as the plane's.
+    pub fn step_car(&mut self, dt: F, car: Option<&CarRide>) {
+        let Some(m) = car.and_then(|c| c.driven.as_ref()) else {
+            *self = PilotLean::default();
+            return;
+        };
+        let phase = F(0.5) * (F::ONE + m.controls.steer_input);
+        self.lean.ease(dt, phase, F::ZERO, m.latch);
+    }
+
     /// The two weights the pilot's clips are drawn at, `(phase, mix)` ([`game_render::biplane::seat`]).
     pub fn weights(&self) -> (f32, f32) {
         let (phase, mix) = self.lean.weights();
