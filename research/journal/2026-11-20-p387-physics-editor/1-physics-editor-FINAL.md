@@ -1,4 +1,4 @@
-# 1 — physics editor (PART)
+# 1 — physics editor (FINAL)
 
 Task P387. 2026-11-20.
 
@@ -19,8 +19,10 @@ Task P387. 2026-11-20.
   Reset All. The page only queues asks. The shell owns the file.
 - Shell (`main.rs`): every frame, with the switch on, it takes the asks. On a change it swaps player 1's
   stock bike for the edited one through `Mods::resim`, the same path a mid-ride modifier change takes. So
-  the ride retunes where it is, and the edit applies from the next tick. Edits carry to the next ride on the
-  same bike.
+  the ride retunes where it is, and the edit applies from the next tick. Turning the switch off mid-ride
+  puts the file's own bike back the same way, and turning it on again restores the edits (a spec-review
+  fix). Edits carry to the next ride on the same bike while the switch is on. Without that, a restart
+  would drop them, and an editor "as it rides" would lose its work on every restart.
 - Held (knobs dimmed, nothing changes) in three cases: an online ride, a tape (`--watch`/`--tape`), or a
   bike that isn't the disc's file as read (MX vs. ATV/Untamed handling, a trick pack laid over it).
 
@@ -52,7 +54,10 @@ bike is held.
 - Riding an edited bike online "unless every seat has it" is not done. The editor is held on every online
   ride, and an edit never reaches a lobby ride. A saved mod is a P318 pack, but making each seat build its
   bike from it is filed as P387a.
-- Not looked at in a live window (no screenshot of the page). It is covered by menu tests only.
+- Not looked at in a live window (no screenshot of the page). It is covered by menu tests only. Mid-ride
+  it opens through the pause's Settings › Ride. No test walks that path.
+- No test covers the switch-off swap back. It goes through the same `resim` as an edit, and the
+  bit-identical test covers the stock file it puts back.
 - Only player 1's bike is edited. Split-screen players 2–4 ride their own files.
 - Held under MX vs. ATV/Untamed handling and trick packs, because those bikes are not the disc's file.
 - The knob-to-key groups are mine, from the brief's names. MXA's own groups (MxaPhysicsKnobs.cs) were not

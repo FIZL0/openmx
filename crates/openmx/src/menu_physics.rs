@@ -135,7 +135,7 @@ impl Menu {
             // Cross puts the one knob back, as on the modifiers page.
             Key::PhyKnob(i) if p.ok => self.physics.asks.push(Ask::Stock(i)),
             Key::PhySave if p.ok => self.type_for(Typing::Physics),
-            Key::PhyLoad if p.left || p.right => {
+            Key::PhyLoad if (p.left || p.right) && !self.physics.saved.is_empty() => {
                 self.physics.at = cycle(self.physics.at, by(p), self.physics.saved.len());
             }
             Key::PhyLoad if p.ok && !self.physics.saved.is_empty() => {

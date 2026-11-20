@@ -9447,9 +9447,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The physics editor (P387) over player 1's bike, and why it can't turn anything on this ride.
     let phy_held = phy_editor::held(online.is_some(), head.is_some() || world.tape.is_some(), &stock_phys[0], &phy_bytes, &tables.ride.curve);
     let mut phy_desk = phy_editor::Editor::new(&format!("{}.phy", bike_words[0]), &phy_bytes);
-    let mut phy_fill = true;
+    let (mut phy_fill, mut phy_live) = (true, false);
     if let Some(front) = front.as_deref_mut() {
-        physics_carried(&mut front.menu, &mut phy_desk, phy_held, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve);
+        physics_carried(&mut front.menu, &mut phy_desk, phy_held, &mut phy_live, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve);
     }
     // Each seat's wreck rumble (P183): the plane's crash word last frame, to see it go up.
     let mut wreck_rumbles: Vec<pad::WreckRumble> = Vec::new();
@@ -10630,7 +10630,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // The physics editor's page (P387): what it asked, and the ride retuned to it at once.
-            physics_frame(&mut front.menu, &mut phy_desk, phy_held, &mut phy_fill, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve, &args);
+            physics_frame(&mut front.menu, &mut phy_desk, phy_held, &mut phy_fill, &mut phy_live, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve, &args);
             // Each player frozen while their own pause is open (P84), the others riding on. Online the
             // seats are the session's, frozen at the tick their pads say so (below).
             for (i, seat) in world.seats.iter_mut().enumerate() {
@@ -16377,6 +16377,7 @@ fn physics_carried(
     menu: &mut menu::Menu,
     desk: &mut phy_editor::Editor,
     held: Option<&str>,
+    live: &mut bool,
     stock: &mut [Phy],
     seats: &mut [Seat],
     mods: &game_sim::modifiers::Mods,
@@ -16392,6 +16393,7 @@ fn physics_carried(
     if menu.settings.physics_editor && held.is_none() && !desk.edits.is_stock() && !stock.is_empty() && !seats.is_empty() {
         stock[0] = desk.phy(curve);
         mods.resim(mods, 0, &stock[0], &mut seats[0].sim);
+        *live = true;
         println!("physics editor: {} knobs changed on {}, from the last ride", desk.edits.changed(), desk.file_name());
     }
 }
@@ -16407,6 +16409,8 @@ fn physics_frame(
     desk: &mut phy_editor::Editor,
     held: Option<&str>,
     fill: &mut bool,
+    // whether player 1 rides the edits now
+    live: &mut bool,
     stock: &mut [Phy],
     seats: &mut [Seat],
     mods: &game_sim::modifiers::Mods,
@@ -16414,12 +16418,10 @@ fn physics_frame(
     args: &Args,
 ) {
     use menu::physics::Ask;
-    if !menu.settings.physics_editor {
-        return;
-    }
+    let on = menu.settings.physics_editor;
     let mut turned = false;
     for ask in menu.take_physics() {
-        if held.is_some() {
+        if held.is_some() || !on {
             break;
         }
         match ask {
@@ -16453,17 +16455,26 @@ fn physics_frame(
             Ask::Load(at) => {
                 let saved = mods_dir(args).map(|dir| phy_editor::listed(&dir, &desk.file_name())).unwrap_or_default();
                 if let Some(s) = saved.get(at) {
+                    let was = desk.edits.clone();
                     desk.take(s);
-                    turned = true;
+                    turned |= desk.edits != was;
                     menu.physics.said = Some(format!("Loaded {}, handling/{} in the mods folder.", s.name, s.id));
                 }
             }
         }
     }
-    if turned && !stock.is_empty() && !seats.is_empty() {
-        stock[0] = desk.phy(curve);
+    // The switch turned off mid-ride puts the file's own bike back, and on again the edits: with it
+    // off the ride is the disc's file, as the editor never was.
+    let wanted = on && held.is_none() && !desk.edits.is_stock();
+    if (turned || wanted != *live) && !stock.is_empty() && !seats.is_empty() {
+        let mut file = desk.clone();
+        if !wanted {
+            file.edits = phy_editor::Edits::default();
+        }
+        stock[0] = file.phy(curve);
         mods.resim(mods, 0, &stock[0], &mut seats[0].sim);
-        println!("physics editor: {} knobs changed on {}", desk.edits.changed(), desk.file_name());
+        println!("physics editor: {} knobs changed on {}", if wanted { desk.edits.changed() } else { 0 }, desk.file_name());
+        *live = wanted;
         *fill = true;
     }
     if std::mem::take(fill) {
