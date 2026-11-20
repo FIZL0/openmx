@@ -3205,6 +3205,30 @@ impl Parked {
         machine.at_rest(car)
     }
 
+    /// [`Parked::frame`] in a flown plane's ride (S487, [`Machine::step_mirrored`]): the mirrors its
+    /// rays put on the car's hull this frame filed on the car's record, the plane's hull (`hull`) in
+    /// the car's own search, and the plane's body `by` the other side of both, as the car's resolve
+    /// leaves it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_mirrored(
+        &mut self,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        mirrors: &[crate::contact::Contact],
+        hull: Option<crate::flight_search::Knock<'_>>,
+        by: &mut crate::prop_contact::Pushed,
+    ) -> bool {
+        if !self.awake() {
+            return false;
+        }
+        let Parked { car, machine, collision, .. } = self;
+        let hulls: Vec<_> = hull.into_iter().collect();
+        machine.step_mirrored(car, &mut Through(world), collision, mirrors, &hulls, std::slice::from_mut(by), dt, acos, curve, &mut |_| F::ZERO);
+        machine.at_rest(car)
+    }
+
     /// The object listener's sleep (S486), after the frame in which [`Parked::frame`] found it at
     /// rest: its body disabled whatever struck it since, and its hull's place for the AI riders
     /// moved to where it now rests.
@@ -3422,6 +3446,38 @@ impl Machine {
         self.touching = collision.record.touching;
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
         physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met, props: &mut [], knocks: &[] });
+        collision.record.search_ground = self.searches_terrain(world);
+    }
+
+    /// **[`Machine::step_struck`] with mirrors on its record** (S487): `hulls` in its own search after
+    /// the world (entries naming `others[k]`, whose impulses push that body), and `mirrors` (kind 1)
+    /// filed after it, each naming `others[0]`, the body that struck it, whose resolve leaves that
+    /// body as it is (a mirror springs only its own side) but which the friction and the relative
+    /// velocity read. A parked car a flown plane struck: the plane's mirrors on its hull, and its own
+    /// rays on the plane's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_mirrored(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        mirrors: &[crate::contact::Contact],
+        hulls: &[crate::flight_search::Knock<'_>],
+        others: &mut [crate::prop_contact::Pushed],
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        let node = crate::wreck_bike::node_of(&self.body);
+        let knocks: Vec<(usize, crate::flight_search::Knock<'_>, F)> =
+            hulls.iter().enumerate().map(|(k, h)| (k, *h, crate::flight_search::knock_distance(&collision.rays, &node, h))).collect();
+        let (movers, _theirs) = collision.search_knocking(&mut self.body, &mut *world, dt, &knocks);
+        let named: Vec<crate::contact::Contact> = mirrors.iter().map(|e| crate::contact::Contact { other: Some(0), ..*e }).collect();
+        collision.file_mirrors(&named);
+        self.touching = collision.record.touching;
+        let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met: None, props: others, knocks: &[] });
         collision.record.search_ground = self.searches_terrain(world);
     }
 
