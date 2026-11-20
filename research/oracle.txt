@@ -1165,6 +1165,15 @@ score_machine_zones_end     boot 0x00264520 the pc after the zone list
 #   store just after an act+0xb8/+0xbc load finds only this one; the race load's act+0xbc -> ai+0xdc
 #   copy goes some other way and was not found. Free-ride images (C33, recording2) have +0xdc 0, so
 #   a free-ride brain likely meets a net only in a machine race; no image of one, brain mode unread.
+# C41: first_recording (and recording2) IS a free09 machine-race session: event +0x11c 4, +0x120 1 ->
+#   machine_placement's Machine%d branch takes the MachineRacer section (Machine1 on every freestyle
+#   map) and spawns its brain with ai_mx_spawn(iface, 4): mode 4, fixed. The truck's brain 0x01061340
+#   (car +0xb30): +0xd0 4, +0x354 0, +0x34c 0, +0xdc 0x0183a360 = MachineRace +0xb8 (free09MR1.tdf,
+#   1 path, 118 nodes), +0xd8 MachineRace +0x50, card 0x01c83b40 flags 0x80808 (not taking part: the
+#   race waits). Mode 4 is the gate driver, which never seeks, so the free-ride path branch never runs
+#   on a machine racer. MachineRace = activity manager +0x58 slot +0x20 in every free-ride image; its
+#   start is vt(+0x44)+0x40 0x003a3320, called by the manager's switch 0x0021c1b0 (6th arg); what
+#   in-world action raises it was not traced.
 # The .wpt files are not the path: 0x0034a660 reads a count and 0x20-byte records off one, and
 # 0x003a2e90 / 0x003a39d0 read a count list off another (unidentified; S282c).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
