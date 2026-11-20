@@ -90,6 +90,15 @@
 //! node sits on the bike at the grid. An entry on a node the bike lacks is not built (free09's left
 //! exhaust: C33's riders carry one) and is [`Kind::Quiet`]. The shell's emitters then place particles
 //! on the frames their twins here drew.
+//!
+//! S420a hangs them on the bike's model as an image does: an entry whose node is the one under
+//! `SwingArm` at [`Place::Rear`], under `Shocks` at [`Place::Front`], and the exhaust's, under the
+//! root of a part's model, at [`Place::Exhaust`], with [`RearNode`], [`FrontNode`] and
+//! [`ExhaustNode`] off the model's bind locals, the Sim's rear mount and steering axis, and the fork's
+//! slide (`+0x9e0`) as the renderer works it out (`game_render::vehicle::Geometry`'s `inv_sin`, the
+//! closed form of the original's table route). The shell hands [`Dust::view`] its camera each tick,
+//! where no other machine's picture shares the Sim. A collision entry's shell particles are placed on
+//! the contacts that drew here ([`RiderDust::hits`]).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -583,22 +592,32 @@ impl Entry {
     ///   each ball in `mask`, in a zone with particles and with contact flags `Disable` lets through,
     ///   emits from its point, its previous point the point less its bone's velocity times the frame.
     pub fn touch_update(&mut self, feed: &Feed, touches: &Touches, dt: F) -> u32 {
+        self.touch_hits(feed, touches, dt).0
+    }
+
+    /// [`Entry::touch_update`] with which contacts drew (S420a): bit `n` for the object's contact
+    /// `n` of a collision model, bit `k` for the ball `k` ([`FEED_BONES`]' order) of a bone collision
+    /// entry; contacts past 32 are left out of it.
+    pub fn touch_hits(&mut self, feed: &Feed, touches: &Touches, dt: F) -> (u32, u32) {
         let wreck = if feed.wrecking { WRECKING } else { NOT_WRECKING };
-        let mut draws = 0;
+        let (mut draws, mut hits) = (0, 0u32);
+        let bit = |n: usize| 1u32.checked_shl(u32::try_from(n).unwrap_or(u32::MAX)).unwrap_or(0);
         match self.kind {
             Kind::Collision { zones } => {
                 let none = Object::default();
                 let o = touches.object.as_ref().unwrap_or(&none);
                 if self.disable & (wreck | contact_flags(o.ground, o.object)) != 0 {
                     self.emitter.switch_off();
-                    return 0;
+                    return (0, 0);
                 }
                 self.emitter.switch_on();
                 let v = o.relative.mul_q(dt.0);
-                for &(point, surface) in &o.contacts {
+                for (n, &(point, surface)) in o.contacts.iter().enumerate() {
                     if zone_on(&zones, i64::from(surface)) {
                         let prev = point.merge(Dest::XYZ, point.sub(v));
-                        draws += u32::from(self.emitter.emit_at(point, prev, dt));
+                        let made = self.emitter.emit_at(point, prev, dt);
+                        draws += u32::from(made);
+                        hits |= if made > 0 { bit(n) } else { 0 };
                     }
                 }
             }
@@ -611,13 +630,15 @@ impl Entry {
                     }
                     if zone_on(&zones, i64::from(b.surface)) && self.disable & contact_flags(b.ground, b.object) == 0 {
                         let prev = b.point.merge(Dest::XYZ, b.point.sub(b.velocity.mul_q(dt.0)));
-                        draws += u32::from(self.emitter.emit_at(b.point, prev, dt));
+                        let made = self.emitter.emit_at(b.point, prev, dt);
+                        draws += u32::from(made);
+                        hits |= if made > 0 { bit(k) } else { 0 };
                     }
                 }
             }
             _ => {}
         }
-        draws
+        (draws, hits)
     }
 }
 
@@ -641,6 +662,9 @@ pub struct RiderDust {
     /// the snapshot's wreck word is the state pack's copy of the reason, made before the frame's
     /// verdict, so a wreck reaches the manager two frames after its verdict.
     pub wrecked: bool,
+    /// By entry, the contacts whose emits drew last frame (S420a, [`Entry::touch_hits`]): what the
+    /// shell's collision and bone collision particles are placed on. 0 for the other kinds.
+    pub hits: Vec<u32>,
 }
 
 impl RiderDust {
@@ -665,9 +689,11 @@ impl RiderDust {
         let feed = &std::mem::replace(&mut self.feed, now);
         let touches = Touches { object, balls: std::mem::replace(&mut self.balls, balls) };
         let mut made = vec![0; self.entries.len()];
+        self.hits.clear();
+        self.hits.resize(self.entries.len(), 0);
         let wreck = if feed.wrecking { WRECKING } else { NOT_WRECKING };
         let tyres = feed.tyres.map(|t| t.flags(feed.wrecking));
-        for (e, made) in self.entries.iter_mut().zip(&mut made) {
+        for ((e, made), hits) in self.entries.iter_mut().zip(&mut made).zip(&mut self.hits) {
             let tyre = e.tyre.map_or(0, |t| tyres[t]);
             if e.disable & tyre == 0 && e.disable & wreck == 0 {
                 if !e.live {
@@ -679,7 +705,7 @@ impl RiderDust {
             if e.live && !e.zone_off {
                 e.update(feed, dt);
                 // A collision entry emits in its update, in the manager's pass (S422).
-                *made = e.touch_update(feed, &touches, dt);
+                (*made, *hits) = e.touch_hits(feed, &touches, dt);
             }
         }
         let points = Points {

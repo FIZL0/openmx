@@ -1166,6 +1166,12 @@ pub struct PlaneFrame {
     /// twin drew and not on one it did not, in place of the speed gate and the switch here. `None`
     /// (a ride with no race) keeps them.
     pub sim_draws: Option<Vec<u8>>,
+    /// By entry, the contacts whose emits drew in the Sim's dust this tick (S420a,
+    /// `game_sim::dust::RiderDust::hits`): for a `CollisionModel` on the body's model bit `n` is the
+    /// collision object's contact `n`, for a `ParticleCollisionConstraint` bit `i` is
+    /// [`PlaneFrame::constraints`]' `i`. Where it is given those entries emit at the contacts their Sim
+    /// twin drew at and at no other, in place of their own speed gate and first-point skip.
+    pub sim_hits: Option<Vec<u32>>,
 }
 
 /// One further collision model's contacts this frame, as a `CollisionModel` entry with its index
@@ -1580,6 +1586,18 @@ impl PlaneFx {
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}
                         }
+                        // S420a: a race's Sim says which spheres emit.
+                        if let Some(hits) = &plane.sim_hits {
+                            if hits.get(index).is_none_or(|h| h >> i & 1 == 0) {
+                                entry.sources[0].last = Some(c.at);
+                                continue;
+                            }
+                            let from = c.at.sub(c.vel.scale(dt));
+                            let gate = std::mem::replace(&mut entry.emt.min_speed, f32::NEG_INFINITY);
+                            entry.sources[0].emit_over(index, &entry.emt, entry.frames, c.at, Some(from), None, entry.emt.velocity, c.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
+                            entry.emt.min_speed = gate;
+                            continue;
+                        }
                         // The first sphere after it went on only takes its point (P153).
                         if entry.sources[0].last.is_none() {
                             entry.sources[0].last = Some(c.at);
@@ -1619,12 +1637,26 @@ impl PlaneFx {
                     // in turn as if the point had come from the contact's velocity a frame back: its
                     // speed is the contact's, and its particles spread along that path.
                     let source = &mut entry.sources[0];
+                    // S420a: a race's Sim says which of the body's contacts emit, by the object's list.
+                    let hits = plane.sim_hits.as_ref().filter(|_| entry.model == 0).map(|h| h.get(index).copied().unwrap_or(0));
                     for (n, &at) in grounds.iter().chain(objects).enumerate() {
                         // A ground contact on a surface the zones say `none` to emits nothing (P74).
                         match zoned.get(n).and_then(|&z| entry.zones.get(usize::from(z))) {
                             Some(Zone::Off) => continue,
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}
+                        }
+                        if let Some(hits) = hits {
+                            let k = if n < grounds.len() { n } else { n - grounds.len() };
+                            if k >= 32 || hits >> k & 1 == 0 {
+                                source.last = Some(at);
+                                continue;
+                            }
+                            let from = at.sub(vel.scale(dt));
+                            let gate = std::mem::replace(&mut entry.emt.min_speed, f32::NEG_INFINITY);
+                            source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, vel, wind, dt, &mut self.rng, &mut self.particles);
+                            entry.emt.min_speed = gate;
+                            continue;
                         }
                         // The first contact after it went on only takes its point.
                         if source.last.is_none() {
@@ -1687,9 +1719,9 @@ impl PlaneFx {
 ///   draws nothing, nor does an entry on a node `world` does not find.
 /// - **Each emitter** keeps its `.emt`'s `MinimumEmissionSpeed` and view cull. Its place is fixed in
 ///   the chassis' frame: where `world` says its node is with the bike at `bike`, the Sim's transform
-///   of the same ride. The tyres' nodes ride the swing arm and the fork, which the Sim's own rigs
-///   (`dust::RearNode`, `FrontNode`) follow only off an image; held at the spawn's pose they move a
-///   few hundredths of a foot off it, against speed gates of 1 to 5 ft/s.
+///   of the same ride. The tyres' and the exhaust's nodes ride the swing arm, the fork and the pipe:
+///   [`sim_rig`] moves those entries onto the Sim's own rigs (`dust::RearNode`, `FrontNode`,
+///   `ExhaustNode`).
 pub fn sim_rider(fx: &PlaneFx, world: impl Fn(&str) -> Option<ps2_float::Vf>, bike: &game_sim::math::Mat4) -> game_sim::dust::RiderDust {
     use game_sim::dust::{self, Place};
     use ps2_float::F;
@@ -1722,6 +1754,111 @@ pub fn sim_rider(fx: &PlaneFx, world: impl Fn(&str) -> Option<ps2_float::Vf>, bi
         })
         .collect();
     dust::RiderDust { entries, ..dust::RiderDust::default() }
+}
+
+/// **A racer's emitters hung on the bike's model** (S420a): the entries [`sim_rider`] fixed in the
+/// chassis' frame moved onto the Sim's node rigs, as an image's are (`game_sim::dust`'s header).
+///
+/// - **The rear tyre's**: the first entry whose node hangs under `SwingArm` takes
+///   [`dust::Place::Rear`], its rig `Bike`'s local, `SwingArm`'s place for the pivot, the Sim's rear
+///   `mount` and the node's own local.
+/// - **The front tyre's**: the first under `Shocks` takes [`dust::Place::Front`], its rig the locals
+///   of `Bike`, `Handlebars` (also the clip's pose, held) and `Shocks`, the Sim's steering `axis`,
+///   `Shocks`' place in the `Bike` frame for the rest, and for the slide the axis' `√(y² + z²) / y`.
+/// - **The exhaust's**: the first exhaust entry whose node is in one of the bike's `parts` takes
+///   [`dust::Place::Exhaust`], its node's local below the part's root and the pipe's root at `Bike`'s
+///   world with the bike at `bike`.
+///
+/// Every other entry, and each on a second node of the same kind, keeps its fixed place. Each moved
+/// emitter starts on its node's point.
+pub fn sim_rig(
+    rider: &mut game_sim::dust::RiderDust,
+    fx: &PlaneFx,
+    chassis: &game_render::psg::Model,
+    parts: &[&game_render::psg::Model],
+    mount: ps2_float::Vf,
+    axis: ps2_float::Vf,
+    bike: &game_sim::math::Mat4,
+) {
+    use game_sim::dust::{self, Place};
+    use game_sim::math::Mat4;
+    use ps2_float::{F, Vf};
+    let mat = |m: M4| Mat4(m.0.map(Vf));
+    let find = |model: &game_render::psg::Model, name: &str| model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name));
+    let parent_is = |n: usize, name: &str| chassis.nodes[n].parent.is_some_and(|p| chassis.nodes[p].name.eq_ignore_ascii_case(name));
+    let local = |n: usize| chassis.nodes[n].local;
+    let Some(bike_node) = find(chassis, game_render::vehicle::ROOT) else { return };
+    let bike_local = chassis.world(bike_node);
+    let root = M4(bike.0.map(|r| r.0));
+    // A node's world below its model's root, the root's own local left out (the drive replaces it).
+    let below_root = |model: &game_render::psg::Model, n: usize| {
+        let mut m = M4::IDENTITY;
+        let mut at = Some(n);
+        while let Some(i) = at.filter(|&i| model.nodes[i].parent.is_some()) {
+            m = m.mul(model.nodes[i].local);
+            at = model.nodes[i].parent;
+        }
+        m
+    };
+    let mut taken: [Option<String>; 3] = Default::default();
+    for (e, sim) in fx.entries.iter().zip(&mut rider.entries) {
+        let Some(name) = e.node.as_deref() else { continue };
+        if sim.kind == dust::Kind::Quiet {
+            continue;
+        }
+        let same = |t: &Option<String>| t.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(name));
+        let at = find(chassis, name);
+        let place = if let Some(n) = at.filter(|&n| parent_is(n, game_render::vehicle::SWINGARM)) {
+            if taken[0].is_none() {
+                let arm = chassis.nodes[n].parent.unwrap_or(n);
+                let p = local(arm).0[3];
+                rider.rear = Some(dust::RearNode { bike: mat(bike_local), pivot: Vf([p[0], p[1], p[2], 1.0]), mount, node: mat(local(n)) });
+                taken[0] = Some(name.to_string());
+            }
+            same(&taken[0]).then_some(Place::Rear)
+        } else if let Some(n) = at.filter(|&n| parent_is(n, game_render::vehicle::SHOCKS)) {
+            let shocks = chassis.nodes[n].parent.unwrap_or(n);
+            let bars = chassis.nodes[shocks].parent.filter(|&b| chassis.nodes[b].name.eq_ignore_ascii_case(game_render::vehicle::BARS));
+            if let (None, Some(bars)) = (&taken[1], bars) {
+                let rest = local(shocks).mul(local(bars)).0[3];
+                let (y, z) = (axis.y(), axis.z());
+                let slide = if y != 0.0 { (y * y + z * z).sqrt() / y } else { 1.0 };
+                rider.front = Some(dust::FrontNode {
+                    bike: mat(bike_local),
+                    bars: mat(local(bars)),
+                    pose: mat(local(bars)),
+                    shocks: mat(local(shocks)),
+                    node: mat(local(n)),
+                    axis,
+                    rest: Vf([rest[0], rest[1], rest[2], 1.0]),
+                    slide: F(slide),
+                });
+                taken[1] = Some(name.to_string());
+            }
+            same(&taken[1]).then_some(Place::Front)
+        } else if matches!(sim.kind, dust::Kind::Exhaust { .. }) && at.is_none() {
+            if taken[2].is_none()
+                && let Some(node) = parts.iter().find_map(|m| find(m, name).map(|n| below_root(m, n)))
+            {
+                rider.exhaust = Some(dust::ExhaustNode { bike: mat(bike_local), pipe: mat(bike_local.mul(root)), node: mat(node) });
+                taken[2] = Some(name.to_string());
+            }
+            same(&taken[2]).then_some(Place::Exhaust)
+        } else {
+            None
+        };
+        let Some(place) = place else { continue };
+        sim.emitter.place = place;
+        let point = match place {
+            Place::Rear => rider.rear.map(|r| r.point(bike, F(0.0))),
+            Place::Front => rider.front.map(|f| f.point(bike)),
+            Place::Exhaust => rider.exhaust.map(|x| x.point()),
+            Place::Chassis(_) => None,
+        };
+        if let Some(p) = point {
+            (sim.emitter.pos, sim.emitter.prev) = (p, p);
+        }
+    }
 }
 
 /// The track's own emitters (V45): the `.toy`'s `[ParticleEmitterN]` — nat08's camp fires and
