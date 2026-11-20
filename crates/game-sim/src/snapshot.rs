@@ -933,7 +933,7 @@ wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fa
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });
 wire!(crate::ragdoll_scene::Statics { props, bike_at });
 wire!(crate::ragdoll_body::Fade { length, left });
-wire!(crate::ragdoll_riding::Riding { actor, drawn, was, rng });
+wire!(crate::ragdoll_riding::Riding { actor, drawn, was, rng, main_rest });
 wire!(crate::ragdoll_body::Actor { ragdoll, contacts, mode, prev, posed, latched, idle, look_pose, clip, touching, fade, foot_fade, foot_weight, look, pose_spring, pose_damping, pose_damping_base, stand_speed, slow_speed, gate_step, gate_clock, foot_points, hold_targets, hold_velocity, bike_box, bike_frame, placed, active, repose, cut, impact, model, gravity_scale, torques });
 wire!(crate::ragdoll_body::Look { on, fast, slow, target, at });
 wire!(crate::ragdoll_body::Model { glow, glow_level, alpha });

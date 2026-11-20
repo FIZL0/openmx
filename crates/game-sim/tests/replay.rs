@@ -11459,6 +11459,10 @@ fn b19_riding(st: &SaveState, kit: &game_sim::ragdoll_ride::Kit, m: &Mat4) -> (g
     actor.torques = ee.u32_at(a + 0x2b8) != 0;
     actor.gravity_scale = f(a + 0x2d0);
     actor.impact = quad(a + 0x6f0);
+    // B42: the main part's joint record's rest (joint at part `+0x40`), which the first step's set
+    // reads before that frame's normalise call rewrites it.
+    let main_joint = ee.u32_at(ee.u32_at(a + 0x2f4) + 0x40);
+    riding.seed_main_rest(quad(ee.u32_at(a + 0x234) + 0x60 * main_joint + 0x50));
     // The request: its frame is the drawn bike's root node under the bike, its hands and feet the
     // grips and the pegs in the world.
     let req = ee.u32_at(a + 0x488);

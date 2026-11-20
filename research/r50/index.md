@@ -83,3 +83,8 @@ Probe: an Ee from C33's image (`capture/c33/free09-ai4.ee.bin`) stepped beside t
   with that: the S490 replay's worst part through 130 goes from 0.0834 ft to 0.0069 ft. Bone 17
   stays within 0.004 ft at 120–130 (was 0.049 at 129) and no longer touches at 130, so the early
   foot dust should go too (not run). Filed as B42.
+- **Landed (B42).** `Riding` keeps `main_rest` (on the netplay wire), set after each step; a fresh
+  body's first step uses the rig's rest, and C33's seeded bodies take the main part's joint record
+  (`Riding::seed_main_rest`). The S490 run is now held to 0.01 ft through 134: worst 0.0066 ft
+  (part 15 at 35), and ai0's foot dust draws on 132 with the original's. Run on to 400, the bones
+  stay within 0.01 ft until ai0's drawn holds jump 0.09 ft at 198 (R56's partings).
