@@ -135,7 +135,9 @@ It decides where the main bone rides, and that decides whether the bike box catc
     original's does.
   - The undrawn ride gets the same wakes through a wedged rider.
   - The drawn ride with the kit pose adds +14.
-- Filed as T10. The animated body's pose (and a per-row capture of the original's skeleton) is R59.
+- Done in T10: the lined-up test now rides `r58_port_ride(R58Skeleton::Image(0.0))` and asserts
+  the head on the hull on +10 and +12, no bone behind the face, and the truck's sleep from +13 on
+  (as theirs, to +80). The animated body's pose (and a per-row capture of the original's skeleton) is R59.
 
 ## The animated body's pose was the test's, not the shell's (R59)
 

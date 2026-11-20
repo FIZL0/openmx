@@ -14361,14 +14361,20 @@ const S486C_BIKE: [f32; 3] = [S485_BIKE[0], S485_BIKE[1], S485_BIKE[2] + 0.68];
 /// original's truck at rest on rows 68 and 70 (10 and 12 frames after).
 ///
 /// F73: the thrown rider's bones do. They meet the truck's hull (`ragdoll_scene::ParkedCar`), lie
-/// against its nose, and wake it at rest on the 10th and the 12th frames, as ride1.csv's. Not
-/// matched: the port's rider stays wedged there (its main bone past the nose's face from the 4th
-/// frame), and goes on waking it every other frame until the put-back, where the original's sleeps
-/// from the 13th on.
+/// against its nose, and wake it at rest on the 10th and the 12th frames, as ride1.csv's.
+///
+/// T10: ridden as the shell rides it, with the bike drawn and the original's riding skeleton off
+/// recording2's image ([`r58_port_ride`] with [`R58Skeleton::Image`], R58). The rider enters the
+/// wreck from the riding bodies at the original's speed, no bone gets behind the nose's face, and
+/// the wakes on the 10th and 12th come from the head lying on the face, as the original's
+/// (research/s484/index.md R57, R58); the truck sleeps from the 13th on, as theirs. As the tests
+/// ride it undrawn (no riding ragdoll), the bones enter at the bike's 54 ft/s, the rider wedges
+/// behind the face and wakes the truck every other frame until the put-back: the harness's, not
+/// the game's. The image pose is a stopped rider's (R59): it gets the wakes, not the legs' fall.
 #[test]
 fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
     let Some(cap) = s485_capture() else { return };
-    let Some(port) = s485_ride_from(S486C_BIKE, 80, true, |_, _, _| {}) else { return };
+    let Some((port, bones)) = r58_port_ride(R58Skeleton::Image(0.0), |_, _| {}) else { return };
     let theirs = cap.iter().position(|r| r[1] != 0.0).expect("the original's truck wakes");
     let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
     println!("the truck wakes: port tick {}, the original's row {theirs}", ours + 1);
@@ -14392,6 +14398,23 @@ fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
     // F73: the thrown rider's bones lie against the nose and wake the truck at rest on the 10th and
     // the 12th frames, as the original's, and it sleeps again between and after.
     for k in 9..14 {
+        let (got, want) = (port[ours + k].awake, cap[theirs + k][1] != 0.0);
+        assert_eq!(got, want, "strike+{k}: the truck awake {got}, the original's {want}");
+    }
+    // T10: they come from the head (bone 3) lying on the face, as the original's, with no bone
+    // behind it, and the truck sleeps from the 13th on, as theirs.
+    let head = R57_BONES.iter().position(|&b| b == 3).unwrap();
+    for k in [10, 12] {
+        let on = bones[ours + k].as_ref().is_some_and(|(down, _, c)| *down && c[head].1);
+        assert!(on, "strike+{k}: the head is not on the truck's hull");
+    }
+    for k in 0..port.len() - ours {
+        let face = port[ours + k].truck.z() - R57_NOSE_AHEAD;
+        let behind = bones[ours + k].as_ref().map_or(0, |(_, b, _)| R57_BONES.iter().filter(|&&x| b[x].0.z() > face).count());
+        assert_eq!(behind, 0, "strike+{k}: bones behind the nose's face");
+    }
+    let n = (port.len() - ours).min(cap.len() - theirs);
+    for k in 13..n {
         let (got, want) = (port[ours + k].awake, cap[theirs + k][1] != 0.0);
         assert_eq!(got, want, "strike+{k}: the truck awake {got}, the original's {want}");
     }
