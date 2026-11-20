@@ -1703,7 +1703,8 @@ impl rider::Poser for LentBody {
 /// Lend `body` to `rider`'s next step (B43), when the rider has a riding ragdoll to pose for.
 /// Answers whether it was lent.
 fn lend_body(body: &mut Option<Body>, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
-    let (Some(doll), true, Some(_)) = (ragdolled, rider.ragdoll_kit.is_some(), body.as_ref()) else { return false };
+    // With the riding ragdoll off there is no riding step to pose for.
+    let (Some(doll), true, Some(_)) = (ragdolled, rider.ragdoll_kit.is_some() && riding_ragdoll_on(), body.as_ref()) else { return false };
     let body = body.take().expect("a body to lend");
     rider.poser.0 = Some(Box::new(LentBody { body, doll: doll.clone(), posed: false }));
     true
@@ -10680,6 +10681,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // B43: a body is lent to its rider's step on the loop, and the picture drawn during a
             // flight needs it; such ticks stay here.
             && !(ragdolled.is_some()
+                && riding_ragdoll_on()
                 && (world.seats.iter().zip(&rigs).any(|(s, r)| r.body.is_some() && s.sim.rider.ragdoll_kit.is_some())
                     || ai_rigs.iter().any(|r| r.body.is_some() && world.seats[0].sim.others.get(r.player.wrapping_sub(1)).is_some_and(|p| p.rider.ragdoll_kit.is_some()))))
             && pacer.ticks() > 0

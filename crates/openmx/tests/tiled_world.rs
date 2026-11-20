@@ -159,6 +159,11 @@ fn mods_folder(test: &str) -> PathBuf {
 }
 
 fn shell(test: &str, track: &str, args: &[&str]) -> Option<String> {
+    shell_env(test, track, args, &[])
+}
+
+/// [`shell`] with these environment variables set.
+fn shell_env(test: &str, track: &str, args: &[&str], envs: &[(&str, &str)]) -> Option<String> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
@@ -169,6 +174,7 @@ fn shell(test: &str, track: &str, args: &[&str]) -> Option<String> {
         .current_dir(&root)
         .args(["--headless", "--track", track, "--mods", mods.to_str().unwrap()])
         .args(args)
+        .envs(envs.iter().copied())
         .output()
         .expect("the shell runs");
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -592,12 +598,15 @@ fn a_worlds_spawn_is_its_start() {
 /// F25: a world's split-screen ticks go to the sim thread (N23a) while the picture reads its own copy
 /// of the tiles, and the ride is the same tick for tick: every seat's hash after every tick, the
 /// thread on and off, ten seconds on the throttle and two at rest.
+///
+/// B43: a tick whose rider borrows its body for the riding ragdoll's step stays on the loop (P382),
+/// so these rides have the riding ragdoll off (`OPENMX_RIDING_RAGDOLL=0`).
 #[test]
 fn a_worlds_ticks_on_the_sim_thread_are_the_same_ride() {
     let tape = spawn_tape("sim-thread", 300, 0);
-    let ride = |mode: &str| shell(&format!("sim-thread-{mode}"), "md8_world", &[
+    let ride = |mode: &str| shell_env(&format!("sim-thread-{mode}"), "md8_world", &[
         "--players", "2", "--play", tape.to_str().unwrap(), "--frames", "360", "--steady-clock", "--trace-hash", "--no-sound", "--sim-thread", mode,
-    ]);
+    ], &[("OPENMX_RIDING_RAGDOLL", "0")]);
     let (Some(off), Some(on)) = (ride("off"), ride("on")) else { return };
     let hashes = |said: &str| -> Vec<String> { said.lines().filter(|l| l.starts_with("tick ") && l.contains(" hash ")).map(str::to_string).collect() };
     let (off_hashes, on_hashes) = (hashes(&off), hashes(&on));
