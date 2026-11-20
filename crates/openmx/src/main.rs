@@ -14503,10 +14503,7 @@ fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::
     let (own, cycle) = (&rig.camera_presets.0, rig.camera_presets.1);
     let laid = |m: menu::Machine| -> Vec<chase::Own> {
         menu::cameras::laid(own, cycle, m)
-            .map(|o| {
-                let (fov, distance, height) = o.look.framing();
-                chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
-            })
+            .map(|o| chase::Own { base: &o.base, name: &o.name, framing: own_framing(&o.look) })
             .collect()
     };
     let mine_only = cycle == menu::cameras::Cycle::Mine;
@@ -14525,10 +14522,7 @@ fn frame_heli(rig: &mut Rig, heli: &[Preset]) {
     let Some(cam) = &mut rig.heli_camera else { return };
     let (own, cycle) = (&rig.camera_presets.0, rig.camera_presets.1);
     let laid: Vec<chase::Own> = menu::cameras::laid(own, cycle, menu::Machine::Helicopter)
-        .map(|o| {
-            let (fov, distance, height) = o.look.framing();
-            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
-        })
+        .map(|o| chase::Own { base: &o.base, name: &o.name, framing: own_framing(&o.look) })
         .collect();
     let mine_only = cycle == menu::cameras::Cycle::Mine;
     chase::reframe(cam, &chase::seat_presets(heli, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.1);
@@ -14572,10 +14566,7 @@ fn frame_cars(rig: &mut Rig, cars: &[(Kind, Vec<Preset>)]) {
         let Some((_, presets)) = cars.iter().find(|(k, _)| k == kind) else { continue };
         let car = menu::Machine::from_word(kind.name()).unwrap_or_default();
         let laid: Vec<chase::Own> = menu::cameras::laid(own, cycle, car)
-            .map(|o| {
-                let (fov, distance, height) = o.look.framing();
-                chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
-            })
+            .map(|o| chase::Own { base: &o.base, name: &o.name, framing: own_framing(&o.look) })
             .collect();
         chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.0);
         // The Untamed quad or car camera (MD256, MD257) on the same framing over its own slow/fast
@@ -14609,8 +14600,15 @@ fn set_heli_display(rigs: &mut [Rig], layout: Layout, display: Display, heli: Op
 
 /// A player's Camera page (P82) as the shell frames their bike's camera and their plane's with it.
 fn framings(v: menu::CameraView) -> (chase::Framing, chase::Framing) {
-    let f = |(fov, distance, height): (f32, f32, f32)| chase::Framing { fov, distance, height };
+    let f = |(fov, distance, height): (f32, f32, f32)| chase::Framing::of(fov, distance, height);
     (f(v.bike()), f(v.plane()))
+}
+
+/// A preset of a seat's own (P163) as the shell frames it: its sliders, the angle and lags (P388)
+/// with them.
+fn own_framing(look: &menu::cameras::Look) -> chase::Framing {
+    let ((fov, distance, height), (angle, look_lag, pos_lag)) = (look.framing(), look.tune());
+    chase::Framing { fov, distance, height, angle, look_lag, pos_lag }
 }
 
 /// The ground's height under `at` for parking the lot: a world's tiles' ([`game_sim::tiles::Tiled`],
