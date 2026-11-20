@@ -9829,6 +9829,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     }
                     // Each through its seat's layout (P40): what the port reads is the original's. A
                     // local game's player reads the pad seat its join screen gave it (P43).
+                    let assigned = seats.assigned();
                     for (i, (seat, idle)) in world.seats.iter_mut().zip(&mut idle_pads).enumerate() {
                         let from = args.pad_seat(i);
                         let report = match now.get(from) {
@@ -9857,7 +9858,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         // A bike with MX vs. ATV's tricks (MD16) reads the new layout's Cross and Square as
                         // its two extra trick buttons.
                         let tricks = seat.sim.phy.tricks.is_some();
-                        let report = seats.plane(from).fly(seats.scheme(from).ride_tricks(report, tricks), seat.inverted);
+                        let report = seats.scheme(from).ride_tricks(report, tricks);
+                        // And the player's Sticks (P386), live: under dual sticks the right stick leans
+                        // and R3 looks back, remapped onto the bytes the ride reads, so online the
+                        // remapped pad is what goes out and no peer needs the setting. Not in a flier,
+                        // whose stick is its whole flight, nor R3's look-back on a ride whose L2 and R2
+                        // are MX vs. ATV's extra tricks. Only on a game pad: the keyboard's lean keys
+                        // are the left stick's y, so a seat on the keyboard keeps the single stick.
+                        let on_pad = matches!(assigned.get(from), Some(Some(Device::Pad(_))));
+                        let sticks = match front.as_deref().is_some_and(|f| f.menu.settings.dual_sticks[i.min(menu::SEATS_MAX - 1)]) {
+                            true if on_pad && !matches!(seat.garage.up, Kind::Biplane | Kind::Kiowa) => pad::Sticks::Dual,
+                            _ => pad::Sticks::Single,
+                        };
+                        let look_back = game_sim::bindings::Table::built([seats.preset(from); 2]).control(0, game_sim::bindings::Command::LOOK_BACK).filter(|_| !tricks);
+                        let report = seats.plane(from).fly(sticks.ride(report, look_back), seat.inverted);
                         seat.reports = [report, Report::missing()];
                         // The bike's commands through the seat's controller preset (P79). Online the
                         // ride's own seats hold theirs, the room's pick (N13), and this one is drawn

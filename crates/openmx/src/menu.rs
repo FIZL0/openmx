@@ -625,6 +625,10 @@ pub struct Settings {
     /// axis a bike on Untamed's handling reads as Untamed's analogue preload, or Off — Untamed's own,
     /// which binds nothing to it. Off unless set.
     pub preload_axes: [PreloadAxis; SEATS_MAX],
+    /// Each seat's Sticks row (P386), 1P's first: on, dual sticks — the left stick steers, the right
+    /// stick leans and R3 looks back (the shell's `pad::Sticks::Dual`); off, the original's single
+    /// stick. Off unless set.
+    pub dual_sticks: [bool; SEATS_MAX],
     /// Settings → Updates (P191): what the desktop does about a newer build. Ask unless set.
     pub updates: Updates,
     /// The Graphics tab's Preset row on Auto (P223, [`video`]): the rows picked for this device and
@@ -1501,6 +1505,7 @@ impl Default for Settings {
             shadow_quality: shadow_quality_default(),
             markers: [true; SEATS_MAX],
             preload_axes: [PreloadAxis::Off; SEATS_MAX],
+            dual_sticks: [false; SEATS_MAX],
             updates: Updates::default(),
             video_auto: true,
 
@@ -1665,6 +1670,27 @@ impl PreloadAxis {
 /// Preload Axis' row's help (P367).
 pub const PRELOAD_AXIS_HELP: &str = "Untamed's analogue preload, on bikes with Untamed's handling: push this stick that way on the lip and the bike springs, harder the further it goes. Off is Untamed as it ships.";
 
+/// Sticks' row's help (P386).
+pub const STICKS_HELP: &str = "Single: the left stick steers and leans, as the original. Dual: the left stick steers, the right stick leans, and clicking the right stick looks back.";
+
+/// `sticks`' line (P386): `single` or `dual` a seat, 1P's first, the last for every seat past it, as
+/// [`markers_seats`]; `None` for a word it cannot read or more words than seats.
+pub fn dual_sticks_seats(v: &str) -> Option<[bool; SEATS_MAX]> {
+    let words: Vec<bool> = v
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "dual" => Some(true),
+            "single" => Some(false),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if words.is_empty() || words.len() > SEATS_MAX {
+        return None;
+    }
+    Some(std::array::from_fn(|i| words[i.min(words.len() - 1)]))
+}
+
 /// `markers`' line (P129): `on` or `off` a seat, 1P's first, the last for every seat past it; `None`
 /// for a line with a word it cannot read, or more words than seats.
 pub fn markers_seats(v: &str) -> Option<[bool; SEATS_MAX]> {
@@ -1819,6 +1845,7 @@ impl Settings {
                 "camera_start" | "camera_car_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "preload_axis" => s.preload_axes = PreloadAxis::parse_seats(v).unwrap_or(s.preload_axes),
+                "sticks" => s.dual_sticks = dual_sticks_seats(v).unwrap_or(s.dual_sticks),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
                 "modifiers" => s.modifiers = Mods::parse(v).unwrap_or_default(),
@@ -1938,6 +1965,7 @@ impl Settings {
             + &cameras::text(&self.camera_sets)
             + &self.markers_text()
             + &self.preload_axes_text()
+            + &self.dual_sticks_text()
             + &self.modifiers_text()
 
     }
@@ -2173,6 +2201,20 @@ impl Settings {
             None => 1,
         };
         format!("preload_axis = {}\n", self.preload_axes[..n].iter().map(|a| a.word()).collect::<Vec<_>>().join(" "))
+    }
+
+    /// Each seat's Sticks (P386), only when one rides dual sticks, so a file from before it is
+    /// written as it was: one word a seat, as `markers`' line.
+    fn dual_sticks_text(&self) -> String {
+        if !self.dual_sticks.contains(&true) {
+            return String::new();
+        }
+        let n = match self.dual_sticks.iter().rposition(|d| *d != self.dual_sticks[SEATS_MAX - 1]) {
+            Some(i) => i + 2,
+            None => 1,
+        };
+        let word = |d: bool| if d { "dual" } else { "single" };
+        format!("sticks = {}\n", self.dual_sticks[..n].iter().map(|d| word(*d)).collect::<Vec<_>>().join(" "))
     }
 
     fn cameras_text(&self) -> String {

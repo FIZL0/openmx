@@ -569,6 +569,75 @@ impl Scheme {
     }
 }
 
+/// Which stick leans the rider (P386, after MX vs. ATV Alive's two steer modes).
+///
+/// The original has one stick for the ride: its x is the steer and the side lean both, its y the lean
+/// forward and back ([`game_sim::ride::Controls::through`]). [`Sticks::Dual`] splits the hands the way
+/// modern MX games do — the left stick steers, the right stick leans — by a remap of the report
+/// *before* the ride sees it, as [`Scheme::ride`] is: the ride reads the left stick's two bytes as
+/// ever, so the simulation is unchanged, and a tape or an online peer gets the remapped report.
+///
+/// The steer and the side lean are one input field in the original, so under dual sticks that byte
+/// is whichever of the left stick's x and the right stick's x is pushed further from centre (the left
+/// on a tie): steering alone steers as the single stick does, and leaning alone leans as it does. The
+/// forward and back lean is the right stick's y alone, so steering on a stick pushed a little up or
+/// down does not lean. The right stick then turns no camera (the ride sees it centred), which frees
+/// its click: R3, the camera's reset under a single stick ([`Scheme::RESET_CAMERA`]), is dual sticks'
+/// own look-back button, beside the look-back the layout already has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sticks {
+    /// The original's: the left stick steers and leans, the right stick turns the camera.
+    #[default]
+    Single,
+    /// The left stick steers, the right stick leans; R3 looks back.
+    Dual,
+}
+
+impl Sticks {
+    pub const ALL: [Sticks; 2] = [Sticks::Single, Sticks::Dual];
+
+    /// The word `settings.txt` spells it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Sticks::Single => "single",
+            Sticks::Dual => "dual",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Sticks> {
+        Sticks::ALL.into_iter().find(|s| s.word() == w.trim())
+    }
+
+    /// The report the ride is handed for `report`, already through the seat's [`Scheme::ride`]:
+    /// `look_back` is the control the seat's table reads its look-back command off, as the ride
+    /// sees it. Under [`Sticks::Single`], or for a pad that is not there, the report as it is.
+    pub fn ride(self, report: Report, look_back: Option<Control>) -> Report {
+        if self == Sticks::Single || report.status() == 0xff {
+            return report;
+        }
+        let mut out = report;
+        // The report's own axis order: right x, right y, left x, left y.
+        let off = |b: u8| (i16::from(b) - i16::from(AXIS_CENTRE)).abs();
+        let (right_x, right_y, left_x) = (report.axis(0), report.axis(1), report.axis(2));
+        out.set_axis(2, if off(right_x) > off(left_x) { right_x } else { left_x });
+        out.set_axis(3, right_y);
+        out.set_axis(0, AXIS_CENTRE);
+        out.set_axis(1, AXIS_CENTRE);
+        let was = report.buttons();
+        let mut held = was & !Control::R3.mask();
+        if let Some(back) = look_back.filter(|_| was & Control::R3.mask() != 0) {
+            held |= back.mask();
+            if back.binding().is_analogue() {
+                out.0[back.binding().pressure as usize] = 0xff;
+            }
+        }
+        let low = !held;
+        out.0[2] = (low >> 8) as u8;
+        out.0[3] = low as u8;
+        out
+    }
+}
+
 /// Which keyboard the new layout rides on (P207). The original's layout ([`Scheme::Original`]) keeps
 /// its own whatever this says ([`KEYBOARD`]).
 ///
@@ -3654,6 +3723,78 @@ pub(crate) mod tests {
         let caps = Bindings::default().key_caps(Scheme::New);
         let cap = |c: Control| caps[c as usize].as_str();
         assert_eq!([cap(Control::Cross), cap(Control::Circle), cap(Control::L1), cap(Control::R1), cap(Control::Start)], ["Space", "F", "Q", "E", "Enter"]);
+    }
+
+    /// P386: dual sticks hand the ride the right stick's lean on the same input the single stick
+    /// gives it — each push of the right stick under dual sticks reads, through the ported poll, the
+    /// stick the ride reads exactly as the same push of the left stick does under a single stick —
+    /// while the left stick still steers, and the right stick turns no camera.
+    #[test]
+    fn dual_sticks_lean_on_the_right_stick_as_the_single_stick_does() {
+        let ride = |r: Report| {
+            let mut manager = Manager::connected();
+            manager.tick(F(1.0 / 60.0), &[r; PADS]);
+            let pad = manager.pad(0);
+            (Controls::from_pad(pad).stick, pad.axis(game_sim::input::Axis::RightX), pad.axis(game_sim::input::Axis::RightY))
+        };
+        let stick = |axis: usize, byte: u8| {
+            let mut r = Report::idle();
+            r.set_axis(axis, byte);
+            r
+        };
+        let back = Some(Control::L2);
+        for byte in [0u8, 20, 60, 100, 127, 160, 200, 240, 255] {
+            // The right stick's y and x (report axes 1 and 0) leaning under dual sticks, against the
+            // left stick's (3 and 2) under a single stick.
+            for (right, left) in [(1, 3), (0, 2)] {
+                let single = ride(Sticks::Single.ride(stick(left, byte), back));
+                let dual = ride(Sticks::Dual.ride(stick(right, byte), back));
+                assert_eq!(dual.0, single.0, "right stick axis {right} at {byte} leans as the left's {left}");
+                // And no camera turns on it.
+                assert_eq!((dual.1, dual.2), (ride(Report::idle()).1, ride(Report::idle()).2), "the camera's axes stay centred");
+            }
+            // The left stick's x still steers as it did, and its y no longer leans.
+            assert_eq!(ride(Sticks::Dual.ride(stick(2, byte), back)).0, ride(stick(2, byte)).0, "left x at {byte} steers");
+            assert_eq!(ride(Sticks::Dual.ride(stick(3, byte), back)).0, ride(Report::idle()).0, "left y at {byte} leans nothing");
+        }
+        // Steer and side lean are one field: the stick pushed further wins, the left on a tie.
+        let mut both = Report::idle();
+        both.set_axis(2, 200);
+        both.set_axis(0, 30);
+        assert_eq!(Sticks::Dual.ride(both, back).axis(2), 30, "the right stick further out");
+        both.set_axis(0, 54);
+        assert_eq!(Sticks::Dual.ride(both, back).axis(2), 200, "a tie keeps the steer");
+        // A single stick, or no pad, is left as it is.
+        let mut any = stick(1, 9);
+        any.set_axis(0, 250);
+        assert_eq!(Sticks::Single.ride(any, back), any);
+        assert_eq!(Sticks::Dual.ride(Report::missing(), back), Report::missing());
+    }
+
+    /// P386: dual sticks' own look-back button is R3, the right stick's click, put on the control the
+    /// seat's table reads look-back off (L2 on the ride's side of the shipped table, Square's place
+    /// under the new layout); it is let go itself, and nothing else on the pad moves. And the remap
+    /// touches nothing past the report's pressures, the bytes online play writes its own words into
+    /// before a pad goes out (`net::SWITCH` and on), so the handshake and the wire are unaffected.
+    #[test]
+    fn dual_sticks_look_back_on_r3_and_leave_the_online_bytes_alone() {
+        let back = Table::SHIPPED.control(0, Command::LOOK_BACK);
+        assert_eq!(back, Some(Control::L2));
+        let mut r = Report::from_buttons(game_sim::input::mask_of(&[Control::R3, Control::Cross]));
+        for (i, b) in r.0.iter_mut().enumerate().skip(20) {
+            *b = i as u8;
+        }
+        let out = Sticks::Dual.ride(r, back);
+        assert_eq!(out.buttons(), game_sim::input::mask_of(&[Control::L2, Control::Cross]));
+        assert_eq!(out.pressure(Control::L2.binding().pressure), 0xff);
+        let mut manager = Manager::connected();
+        manager.tick(F(1.0 / 60.0), &[out; PADS]);
+        assert!(Table::SHIPPED.held(manager.pad(0), Command::LOOK_BACK), "R3 holds look-back");
+        assert_eq!(out.0[20..], r.0[20..], "online's bytes untouched");
+        // With no look-back to give (a ride whose L2 is a trick), R3 is let go and gives nothing.
+        assert_eq!(Sticks::Dual.ride(r, None).buttons(), Control::Cross.mask());
+        assert_eq!(Sticks::from_word("dual"), Some(Sticks::Dual));
+        assert_eq!(Sticks::from_word(Sticks::Single.word()), Some(Sticks::Single));
     }
 
     #[test]
