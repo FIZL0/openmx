@@ -1,0 +1,231 @@
+# c43.toml — C43: the Kiowa flown from C14's state into one of free09's knockable props. watch/c14-kiowa.toml
+# (C14's columns, unchanged) with the struck prop's body, physics object and f.col appended at the end.
+# The prop's addresses are fixed: C14's state is one heap, and the prop never moves in memory.
+#
+#   ./kit pcsx2 with -- research/c43/fly.sh PID NAME ROWS SEGMENT...   (research/c43/README.md)
+#
+# From c14-kiowa.toml's header: the state (research/c14's journal entry: S148's boot.py, the cheat flag, the pause menu's Switch To
+# Machine played from a tape) has MXHelicopter as the first entry of the manager's actor list, owned by
+# the local human's player record (src 1), its body at +0x160. If `heli_class` is not 0x0045c980 or
+# `heli_ctl_src` is not 1, the list moved.
+#
+# Offsets: research/oracle.txt, the S148 and S220 blocks. Two raw blocks carry the controller's whole
+# field run so a replay can read any word: +0x330..+0x3e0 (pad +0x334..+0x348, outputs +0x34c..+0x35c,
+# +0x33c height/MaxAltitude, last stick +0x360, flown +0x364, file +0x368..+0x3d0 with the hold delay
+# +0x380, hold height/timer +0x378/+0x37c, integral +0x394, speed command +0x3b0, wreck word +0x3d4),
+# and +0x460..+0x4d0 (the collective filter +0x46c, the measure's speed/alpha/beta +0x470..+0x478,
+# airspeed +0x498, pitch +0x4c0, roll +0x4c8).
+
+[watch]
+name        = "c43-kiowa-prop"
+description = "the Kiowa on free09 striking a knockable prop: C14's columns, the prop's body and f.col"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0               # research/c14/capture.sh loads the state through PCSX2's Play, not the kit
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+# Both halves of port 0's buffer and their stamps (biplane.toml has why): bytes [2..3] the buttons,
+# active low, [4..7] RX RY LX LY, [8..] the pressures.
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- which actor this is ------------------------------------------------------------------------------
+[[field]]
+name = "heli_type"             # +0x00: 1, a machine
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "heli_class"            # +0x48: MXHelicopter's vtable, 0x0045c980
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "heli_ctl_src"          # +0x20 -> +0x34: 1 = the local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+required = true
+
+[[field]]
+name = "pilot_flag"            # *(+0x170)+0x40: with climb 0, zeroes the collective
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x40"
+type = "u32"
+
+# --- the flight controller --------------------------------------------------------------------------
+[[field]]
+name = "climb"                 # +0x334, the pad's climb (Cross)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x334"
+type = "f32"
+
+[[field]]
+name = "descend"               # +0x338 (Square)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x338"
+type = "f32"
+
+[[field]]
+name = "stick"                 # +0x340 lateral, +0x344 longitudinal, +0x348 pedal (+0x34c collective)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x340"
+type = "f32x4"
+
+[[field]]
+name = "commands"              # +0x34c collective, +0x350 lat cyclic, +0x354 long cyclic, +0x358 pedal
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x34c"
+type = "f32x4"
+
+[[field]]
+name = "heli_a"                # +0x330..+0x3e0, raw
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x330"
+type = "bytes:176"
+
+[[field]]
+name = "heli_b"                # +0x460..+0x4d0, raw
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x460"
+type = "bytes:112"
+
+# --- the rotor (+0x450) and aero (+0x454) models' states ----------------------------------------------
+[[field]]
+name = "rotor_state"           # +0xd0 collective pitch .. +0x120: tilt Euler +0xe0, thrust +0x100, tilted +0x110
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x450 -> 0xd0"
+type = "bytes:80"
+
+[[field]]
+name = "aero_state"            # +0x128 fade, +0x12c lift, drag, side, roll, pitch, +0x140 yaw
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x454 -> 0x128"
+type = "bytes:28"
+
+# --- the body (+0x160) ----------------------------------------------------------------------------------
+[[field]]
+name = "body_pos"              # body +0x60: the centre of gravity, world
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"              # body +0x70: world velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"             # body +0x170: orientation, x y z w
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_rate"             # body +0x1b0: angular velocity
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "body_raw"              # body +0x0..+0x200, raw: the accumulators and the rest a replay may need
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x0"
+type = "bytes:512"
+
+# --- the helicopter's collision record *(heli+0x170): count +0x100, capacity +0x104 (22), entries at
+# *(+0x108), 0x80 apart: +0 kind (0 its own probe's hit, 1 a mirror), +0x74 the other's collision object.
+# All 22.
+[[field]]
+name = "rec_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "rec_entries"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x108 -> 0x0"
+type = "bytes:2816"
+
+# --- the struck prop: free09's "egg" (collection 0x00e2fd40, physics object 0x00e325a0, body 0x00e301a0,
+# collision object 0x00e3cdd0, f.col 0x00e3a3d0), asleep at (3244.70, 143.67, 3977.15) in C14's state.
+# Body as the helicopter's: +0 enabled, +0x60 position, +0x70 velocity, +0x170 quat, +0x1b0 rates.
+[[field]]
+name = "prop_enabled"
+addr = "0x00e301a0"
+type = "u32"
+
+[[field]]
+name = "prop_pos"
+addr = "0x00e30200"
+type = "f32x4"
+
+[[field]]
+name = "prop_vel"
+addr = "0x00e30210"
+type = "f32x4"
+
+[[field]]
+name = "prop_quat"
+addr = "0x00e30310"
+type = "f32x4"
+
+[[field]]
+name = "prop_rate"
+addr = "0x00e30350"
+type = "f32x4"
+
+[[field]]
+name = "prop_body_raw"
+addr = "0x00e301a0"
+type = "bytes:512"
+
+[[field]]
+name = "prop_coll_flags"       # the collection's +0x20: bit 1 active
+addr = "0x00e2fd60"
+type = "u32"
+
+[[field]]
+name = "prop_rec_count"        # the prop's collision object (+0x100 count, *(+0x108) entries, as the heli's)
+addr = "0x00e3ced0"
+type = "u32"
+
+[[field]]
+name = "prop_rec_entries"      # the first 32 (capacity 191; the strike's rows hold up to 24)
+addr = "0x00e3ced8 -> 0x0"
+type = "bytes:4096"
+
+[[field]]
+name = "prop_fcol"             # the f.col's +0x100..+0x140 (+0x116 the flag byte)
+addr = "0x00e3a4d0"
+type = "bytes:64"
