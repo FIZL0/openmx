@@ -14404,6 +14404,182 @@ fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
     }
 }
 
+/// R57's capture of S484's ride (research/s484/truck.sh with `bones`): ride1.csv's columns, then per
+/// bone collision (the rider file's order) its bone's body awake, place and velocity and the
+/// collision's touched and scene words. Its column names and rows; `None` where it is not here.
+fn r57_capture() -> Option<(Vec<String>, Vec<Vec<f32>>)> {
+    let path = private_dir("capture").join("s484").join("ride2_bones.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {}: R57's bones are unchecked", path.display());
+        return None;
+    };
+    let mut lines = text.lines();
+    let head = lines.next()?.split(',').map(str::to_string).collect();
+    Some((head, lines.map(|l| l.split(',').map(|c| c.parse().unwrap()).collect()).collect()))
+}
+
+/// The bones the nine collisions are for, in the rider file's order (S476).
+const R57_BONES: [usize; 9] = [14, 17, 0, 2, 3, 6, 10, 13, 16];
+
+/// How far the parked truck's nose face (its hull's `-z` face) stands ahead of its body: R55's face
+/// at z 3831.2 with the port's truck at rest at 3838.008. The hull is not a box: bones also meet it
+/// up to ~0.6 ft further out (the bumper, the hood).
+const R57_NOSE_AHEAD: f32 = 6.81;
+
+/// **R57: the original's thrown rider never gets inside the parked truck's nose; its head leans on
+/// the face from strike+1 to strike+12 and then every bone falls back off it** (S484's ride re-recorded
+/// with the bones, context/capture/s484/ride2_bones.csv: its truck and bike columns are ride1.csv's to
+/// the bit).
+///
+/// The original's, from row 58 (the strike): no bone's centre passes the face; the nearest is the
+/// head (bone 3), 0.18 ft short of it on strike+5. Bone 3 touches the hull (touched and scene) on
+/// strike+1, bones 14, 17, 13 and 16 on +2, 0 and 2 on +3..+5; from +6 only the head, which lies on
+/// the face through +12 (the truck's wakes on +10 and +12) and leaves it on +13, when the truck sleeps
+/// for good. The bones come in at 24-30 ft/s on the strike row (the riding bodies, held to the
+/// stopped bike), 31-39 on +1, not the bike's 54.
+///
+/// The port's, on S486c's lined-up ride (S486C_BIKE), printed beside them:
+/// * As the tests ride it (no drawn bike, so no riding ragdoll): the bones enter on the strike at
+///   the bike's 54 ft/s, and five end behind the face (R55's tunnel on strike+1/+2). The original's
+///   do not: this is the harness, not the game.
+/// * With the bike drawn as the shell draws it: the bones enter a tick late from the riding bodies
+///   (B19) at 19-22 ft/s, 29-34 on +1, and none gets behind the face (held here). Not matched: the
+///   head lies on the face +2..+14 and leaves on +15 (theirs +1..+12, +13), the truck wakes on +14,
+///   +19 and +21 too, and the legs slide back off the nose slower (1.4-2.4 ft out on +20, theirs
+///   4.2-4.9).
+#[test]
+fn r57_the_original_s_thrown_rider_leaves_the_truck_s_nose_on_strike_13() {
+    let Some((head, rows)) = r57_capture() else { return };
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let theirs = rows.iter().position(|r| r[1] != 0.0).expect("the original's truck wakes");
+    assert_eq!(theirs, 58, "the strike's row, ride1.csv's");
+    // Per row and bone: the centre's z, touched, scene.
+    let bone = |r: &[f32], b: usize| (r[col(&format!("b{b}_z"))], r[col(&format!("b{b}_touched"))] != 0.0, r[col(&format!("b{b}_scene"))] != 0.0);
+    let face = |r: &[f32]| r[col("z")] - R57_NOSE_AHEAD;
+    for (k, r) in rows[theirs..theirs + 40].iter().enumerate() {
+        for b in R57_BONES {
+            let (z, _, _) = bone(r, b);
+            assert!(z < face(r), "strike+{k}: the original's bone {b} at z {z}, past the face at {}", face(r));
+        }
+    }
+    let scene = |r: &[f32]| R57_BONES.iter().filter(|&&b| bone(r, b).2).copied().collect::<Vec<_>>();
+    assert_eq!(scene(&rows[theirs + 1]), vec![3], "strike+1: only the head meets the hull");
+    for k in 6..=12 {
+        assert_eq!(scene(&rows[theirs + k]), vec![3], "strike+{k}: the head on the face");
+    }
+    assert!(rows[theirs + 13..].iter().all(|r| scene(r).is_empty()), "a bone meets the hull after strike+12");
+    let last = rows[theirs..].iter().rposition(|r| !scene(r).is_empty()).unwrap();
+    println!("the original's bones last meet the hull on strike+{last}");
+
+    // The port's, from its strike: as the tests ride it (no drawn bike: no riding ragdoll), and with
+    // the bike drawn as the shell draws it (the riding ragdoll held to the drawn holds, S110).
+    for drawn in [false, true] {
+        let Some((port, bones, radii)) = r57_port_ride(drawn) else { return };
+        let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+        println!("\nthe port's ride, bike drawn: {drawn}; truck wakes on tick {}", ours + 1);
+        println!("the port's truck at rest at z {:.3}; radii {:?}", port[0].truck.z(), R57_BONES.map(|b| radii[b]));
+        println!("strike+k  per bone (14 17 0 2 3 6 10 13 16): face - z, port / original, t = touched, s = scene, r = riding");
+        let flags = |t: bool, s: bool| format!("{}{}", if t { 't' } else { '.' }, if s { 's' } else { '.' });
+        let mut port_last = None;
+        for k in 0..port.len() - ours {
+            let (p, r) = (&port[ours + k], &rows[theirs + k]);
+            let Some((down, b)) = &bones[ours + k] else { continue };
+            let face_p = p.truck.z() - R57_NOSE_AHEAD;
+            let cells: Vec<String> = R57_BONES
+                .iter()
+                .zip(b)
+                .map(|(&n, &(at, _, t, s))| {
+                    let (z, tt, ss) = bone(r, n);
+                    format!("{:6.2}{} /{:5.2}{}", face_p - at.z(), flags(t, s), face(r) - z, flags(tt, ss))
+                })
+                .collect();
+            println!("+{k:2}{} truck {}/{} | {}", if *down { ' ' } else { 'r' }, p.awake as u8, r[1] as u8, cells.join(" "));
+            if b.iter().any(|x| x.3) {
+                port_last = Some(k);
+            }
+        }
+        for k in 0..4 {
+            let Some((_, b)) = &bones[ours + k] else { continue };
+            let vz: Vec<String> = R57_BONES.iter().zip(b).map(|(&n, x)| format!("{:5.1} /{:5.1}", x.1.z(), rows[theirs + k][col(&format!("b{n}_vz"))])).collect();
+            println!("+{k} vz, port / original: {}", vz.join("  "));
+        }
+        let behind = |k: usize| bones[ours + k].as_ref().map_or(0, |(_, b)| b.iter().filter(|x| x.0.z() > port[ours + k].truck.z() - R57_NOSE_AHEAD).count());
+        println!("port: bones behind the face on +4 {}, +20 {}; last scene touch: strike+{port_last:?}", behind(4), behind(20));
+        // Entered from the riding bodies, as in the shell, no bone gets behind the face either.
+        if drawn {
+            for k in 0..port.len() - ours {
+                assert_eq!(behind(k), 0, "strike+{k}: the drawn ride's bones behind the nose's face");
+            }
+        }
+    }
+}
+
+/// Per tick of R57's port ride: whether the rider is down, and per bone collision (the rider file's
+/// order) its bone's place and velocity, touched and scene (the riding ragdoll's bones, untouched,
+/// while the rider is on the bike).
+type R57Bones = Vec<Option<(bool, Vec<(Vf, Vf, bool, bool)>)>>;
+
+/// S486c's lined-up ride (`S486C_BIKE`) with the bones logged, and the bones' radii. With `drawn`,
+/// the bike is drawn after each tick as the shell draws it ([`s474_ride_drawn`]'s frame) and its
+/// "Bike" node and grips are handed to the next tick as the rider's holds, so the riding ragdoll
+/// runs and the wreck enters from its bodies; the riding skeleton is the kit's fixed pose.
+fn r57_port_ride(drawn: bool) -> Option<(Vec<S485Tick>, R57Bones, [f32; 18])> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes.into_iter().find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix(FREERIDE_PHY).is_ok()))?;
+    let bike = disc.res(&bike).ok()?;
+    let sub = bike.find_suffix(".sub")?.name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
+    let mut chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let root = chassis.nodes.root.expect("a chassis root");
+    let dt = F(1.0 / 30.0);
+    let mut draw = |r: &game_sim::rider::Rider| {
+        let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = chassis.riding_under(r, want);
+        chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
+        let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(&chassis) else { panic!("the chassis lacks a hold") };
+        let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+        game_sim::ragdoll_riding::Holds { root: Mat4(chassis.world[root].0.map(Vf)), hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] }
+    };
+    let mut bones: R57Bones = Vec::new();
+    let mut radii = [0f32; 18];
+    let port = s485_ride_from(S486C_BIKE, 80, true, |_, sim, _| {
+        if drawn {
+            let h = draw(&sim.rider);
+            sim.rider.holds = Some(Arc::new(h));
+        }
+        let r = &sim.rider;
+        if let Some(kit) = &r.ragdoll_kit {
+            for s in &kit.spheres {
+                radii[s.bone] = s.radius.0;
+            }
+        }
+        let of = |doll: &game_sim::ragdoll::Ragdoll, contacts: Option<&[game_sim::ragdoll_contact::Contact]>| {
+            R57_BONES
+                .iter()
+                .map(|&b| {
+                    let k = doll.collisions.iter().position(|c| c.bone == b).expect("a collision for the bone");
+                    let body = &doll.bones[b].body;
+                    let c = contacts.map(|c| &c[k]);
+                    (body.position, body.velocity, c.is_some_and(|c| c.touched), c.is_some_and(|c| c.scene))
+                })
+                .collect()
+        };
+        bones.push(match (&r.ragdoll, &r.riding) {
+            (Some(d), _) => Some((true, of(&d.ragdoll, Some(&d.contacts)))),
+            (None, Some(rd)) => Some((false, of(&rd.actor.ragdoll, None))),
+            (None, None) => None,
+        });
+    })?;
+    Some((port, bones, radii))
+}
+
 /// S485's control: without the parked truck the same ride goes on through its spot.
 #[test]
 fn without_the_parked_truck_the_bike_rides_through_its_spot() {

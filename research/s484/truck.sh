@@ -3,7 +3,8 @@
 # pad here, so a held-gas from-savestate tape (research/c15/tape.py) plays on recording2's state over
 # AT-SPI (C6's recipe), and ride.py moves the bike in front of the truck while the tape's start holds
 # the VM paused, then logs the truck's body a row a frame.
-#   KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh PID X Z FRAMES OUT.csv
+#   KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh PID X Z FRAMES OUT.csv [bones]
+# R57: `bones` adds the rider's nine bone collisions' bodies to each row (ride.py).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -21,7 +22,7 @@ python3 -B "$C6/open_only.py" "$PID" "$WORK/play.p2m2" > /dev/null
 sleep 4
 mkdir -p "$(dirname "$OUT")"
 cd "$ROOT"
-python3 -B "$HERE/ride.py" "$PID" "$X" "$Z" "$N" "$OUT" || status=$?
+python3 -B "$HERE/ride.py" "$PID" "$X" "$Z" "$N" "$OUT" ${6:+"$6"} || status=$?
 python3 -B "$C6/press.py" "$PID" 'Tools/Input Recording/Stop' > /dev/null
 echo "work files: $WORK"
 exit ${status:-0}
