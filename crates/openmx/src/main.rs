@@ -2433,11 +2433,7 @@ impl<P: sim_world::World> Game for World<P> {
         // their joint frame (N28, as c16_fly.rs's MEETS holds), then the bikes last seat first.
         // A driven car steps after the planes and before every bike, whichever seat it is (F76: R22's
         // node steps the cars in its dynamics world before the player updates).
-        let order: Vec<usize> = (0..n)
-            .filter(|&i| flying[i])
-            .chain(driven.iter().copied())
-            .chain((0..n).rev().filter(|&i| !flying[i] && !driven.contains(&i)))
-            .collect();
+        let order = pass_order(&flying, &driven);
         // The seats' one prop set for the pass (S197c): every seat's bike strikes it, it steps once
         // after them all, and seat 0's, which is drawn, is every seat's.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>());
@@ -2558,6 +2554,19 @@ impl<P: sim_world::World> Game for World<P> {
         }
         true
     }
+}
+
+/// The order split screen's seats pass in ([`World::simulate`]): the flying seats in seat order
+/// (N28), then the driving seats `driven` holds in seat order, then the rest last seat first. A car
+/// steps before every rider whatever its seat (F76, F77: R22's level node steps the cars in its
+/// dynamics world before any player's update), so a seat-0 car steps before a seat-1 bike.
+fn pass_order(flying: &[bool], driven: &[usize]) -> Vec<usize> {
+    let n = flying.len();
+    (0..n)
+        .filter(|&i| flying[i])
+        .chain(driven.iter().copied())
+        .chain((0..n).rev().filter(|&i| !flying[i] && !driven.contains(&i)))
+        .collect()
 }
 
 /// Seat `me`'s flown plane and the riders of the other seats `on` holds in the ride (S276,
@@ -2943,6 +2952,19 @@ mod split_contact {
         let (away, struck) = fly(false);
         assert_eq!(struck[0], None, "nothing was struck");
         assert!(away[0] > z[0] + 30.0, "seat 1's plane stopped at z {} with no plane in its way (held at {})", away[0], z[0]);
+    }
+
+    /// F77: a seat's car steps before every rider whatever its seat, as R22's node steps its cars
+    /// before the player updates: seat 0's car ahead of seat 1's bike, which the bikes' last-first
+    /// walk alone would have passed first; the planes still lead in seat order.
+    #[test]
+    fn a_car_steps_before_every_bike_whatever_its_seat() {
+        assert_eq!(super::pass_order(&[false, false], &[0]), [0, 1]);
+        assert_eq!(super::pass_order(&[false, false], &[1]), [1, 0]);
+        assert_eq!(super::pass_order(&[false, false], &[]), [1, 0]);
+        assert_eq!(super::pass_order(&[false, false, false], &[0, 2]), [0, 2, 1]);
+        assert_eq!(super::pass_order(&[false, true, false], &[0]), [1, 0, 2]);
+        assert_eq!(super::pass_order(&[true, false, true, false], &[3]), [0, 2, 3, 1]);
     }
 
     /// F26: a split-screen bike meets the other seat's car as it meets a flown plane (N22a). Seat 1
