@@ -73,7 +73,14 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// its parts' drawn matrices, and tick 4's foot is within 0.01 ft of the original's across the ground
 /// (0.09 ft high, from ~0.7 ft off). The marks do not move: from tick 14 on both skeletons agree to
 /// 0.005 ft, yet ai0's bones sit ~0.14 ft further along z than the original's from 15 through 133,
-/// seeded or not. That steady gap, not the first pose, is what parts the foot dust at 134.
+/// seeded or not. That steady gap, not the first pose, is what parts the foot dust at 134. R50: the
+/// S347b1 seed put the parts' drawn matrices (at their centres of mass) where the riding entry reads
+/// node places; seeded with the node matrices, tick 4's bones and velocities match to 1 ulp. Holds
+/// are not the gap: handing the Sim the original's holds each tick leaves bone 17 0.15 ft off at
+/// 133. The gap is the pose spring's target, the skeleton the render Body hands `rider.skeleton`:
+/// its clip machine starts fresh, not from the image's, and is 0.3-0.5 ft off from tick 5. Fed the
+/// original's skeleton instead (the actor's joint records after frame t, under the bike node from
+/// before it), ai0's bones stay within 0.04 ft and are 0.004 ft off at 120. The marks do not move.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -694,8 +701,17 @@ fn c33_riding_seed(
         let (mut riding, holds) = super::wreck_dust::s483_riding_of(ee, kit, &m, a);
         let parts = ee.u32_at(a + 0x2f4);
         let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|o| ee.u32_at(at + o)));
-        let drawn = (0..kit.rig.parts.len() as u32).map(|i| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| quad(parts + 0xb0 * i + 0x60 + o)))).collect();
-        riding.seed_drawn(drawn);
+        // The riding entry reads Riding.drawn as node places, so seed it from each part's node
+        // world matrix (node+0x80), not the drawn matrix at part+0x60, which already sits at the
+        // part's centre of mass and would add that offset twice (R50: the main bone sat 0.19 ft
+        // low on tick 4 and its velocity 1.6 ft/s off).
+        let nodes: Vec<_> = (0..kit.rig.parts.len() as u32)
+            .map(|i| {
+                let world = ee.u32_at(parts + 0xb0 * i + 0xa0) + 0x80;
+                game_sim::ragdoll_pose::Bone { at: quad(world + 0x30), forward: quad(world + 0x20), up: quad(world + 0x10) }
+            })
+            .collect();
+        riding.seed_drawn(game_sim::ragdoll_ride::drawn(&nodes));
         rider.body.veh.state = riding.actor.clip;
         rider.riding = Some(Box::new(riding));
         rider.holds = Some(Arc::new(holds));
