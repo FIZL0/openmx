@@ -278,7 +278,7 @@ fn a_car_or_kiowa_already_out_takes_the_worlds_gravity_at_once() {
         let r = &heli.flown.as_ref().unwrap().ride;
         (car.driven.unwrap().gravity, r.gravity, r.gravity_scale)
     };
-    let mut garage = vehicle::Garage { up: vehicle::Kind::Buggy, plane: None, taken: false, cars: vec![car.clone()], heli: Some(heli.clone()), atv: None, mxvatv_car: None };
+    let mut garage = vehicle::Garage { up: vehicle::Kind::Buggy, plane: None, taken: false, cars: vec![car.clone()], heli: Some(heli.clone()), atv: None, mxvatv_car: None, in_play: vehicle::InPlay::default() };
     garage.cars[0].take(&spot(), &mut floor).unwrap();
     garage.heli.as_mut().unwrap().take(&spot(), &mut floor).unwrap();
     let out = |g: &vehicle::Garage| {
