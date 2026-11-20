@@ -58,8 +58,11 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// S482a: an AI rider's note reads its brain's clutch, and the generator agrees through 131 (it parts
 /// at 132 on ai0's foot dust, which needs the riding ragdoll this replay does not seed). The human
 /// went from 1802 to 944: ai1, off the original's since 304, now rides into it there, where before
-/// its own fiction of a path happened to miss it.
-const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 944, 278, 131];
+/// its own fiction of a path happened to miss it. S482b: each rider rides its riding body off the
+/// image, posed each tick by the shell's body machine, and ai0's foot ball touches at 131 as the
+/// original's: the generator agrees through 133 (it parts at 134), the human through 1802 again and
+/// ai2 through 279.
+const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -413,6 +416,15 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new(), edge: None }));
     // S328b: the four engine notes, as the image holds them, on the lane's generator.
     sim.notes = Some(Box::new(c33_notes(&ee)));
+    // S482b: the riding bodies, as the image holds them, whose bone collisions the foot dust reads.
+    // Each rider's body machine poses its skeleton after the step as the shell's does (ai_ride).
+    let Some(loaded) = C33_RIDERS.iter().map(|_| super::wreck_dust::s483_ragdoll_body()).collect::<Option<Vec<_>>>() else { return };
+    let mut kits = Vec::new();
+    let mut bodies: Vec<_> = loaded.into_iter().map(|(body, doll, kit, _, _)| {
+        kits.push(kit);
+        (body, doll)
+    }).collect();
+    c33_riding_seed(&ee, &mut sim, &Arc::new(kits.swap_remove(0)));
     // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
     sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
     // S448: the tyre tracks, as the image holds them, and each one's entry in its rider's manager.
@@ -455,6 +467,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(&ee, k)).body.look).collect();
         let gen_was = sim.ai.as_ref().unwrap().rng.state();
         sim.step_all(last.dt, &controls, &mut world);
+        c33_pose(&ee, &mut sim, &mut bodies, &controls, last.dt);
         // S328b: the notes switch on and pick as the original's do (draws.rs's C33_NOTES_ON and
         // C33_NOTE_PICKS), through 16.
         if row.frame <= 16 {
@@ -647,9 +660,42 @@ fn c33_notes(ee: &Ee) -> engine_note::Notes {
     engine_note::Notes { riders: riders.into_iter().map(|r| r.1).collect() }
 }
 
-/// The last tick [`C33_DUST`] is held to here: it covers 132, where ai0's foot dust (entry 4) draws
-/// in the original and not in the Sim, whose riders have no riding ragdoll here (S482b).
-const C33_DUST_THROUGH: u64 = 131;
+/// S482b: each rider's riding body off the image (wreck_dust.rs's [`s483_riding_of`] on the rider's
+/// own body actor), on the ragdoll's kit, with the holds of its last request and the clip it read.
+///
+/// [`s483_riding_of`]: super::wreck_dust::s483_riding_of
+fn c33_riding_seed(ee: &Ee, sim: &mut Sim, kit: &Arc<game_sim::ragdoll_ride::Kit>) {
+    for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
+        let p = c33_player(ee, k);
+        let rider = if p == 0 { &mut sim.rider } else { &mut sim.others[p - 1].rider };
+        rider.carries_ragdoll(Arc::clone(kit));
+        let (riding, holds) = super::wreck_dust::s483_riding_of(ee, kit, &rider.ride.transform(), super::wreck_dust::rider_actor(ee, r));
+        rider.body.veh.state = riding.actor.clip;
+        rider.riding = Some(Box::new(riding));
+        rider.holds = Some(Arc::new(holds));
+    }
+}
+
+/// S482b: each rider's body machine after the step, as the shell's frame runs an AI rider's
+/// (openmx's `ai_ride`) and a seat's: the vehicle animation picks the clip on the levers the brain
+/// holds now (the human on its pad's), and the skeleton it poses is what the riding body follows on
+/// the next step. The clip is what lifts a slow rider's foot off its peg (the look-around clip).
+fn c33_pose(ee: &Ee, sim: &mut Sim, bodies: &mut [(game_render::rider::Body, game_render::rider::Ragdolled)], controls: &[Controls], dt: F) {
+    for (k, (body, doll)) in bodies.iter_mut().enumerate() {
+        let p = c33_player(ee, k);
+        let hands = match sim.ai.as_deref().and_then(|lane| lane.pilots.iter().find(|(q, _)| *q == p)) {
+            Some((_, pilot)) => ai::ride_controls(&pilot.levers, pilot.racer.habits.clutch),
+            None => controls[p],
+        };
+        let rider = if p == 0 { &mut sim.rider } else { &mut sim.others[p - 1].rider };
+        body.ride(dt, rider, &hands, game_sim::rider::Gate::default());
+        rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+    }
+}
+
+/// The last tick [`C33_DUST`] is held to here: the table's window, whose end (132) has ai0's foot
+/// dust (entry 4) drawing in both since S482b seeded the riding bodies.
+const C33_DUST_THROUGH: u64 = 132;
 
 /// S328c: the image's emitters as the Sim's, by Sim player: each rider's manager (`+0x1490`) entries
 /// in its list's order. An entry: its tyre record `+4` (records of `0x2c` from the feed's `+4`, the
@@ -662,6 +708,8 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
     const EXHAUST: u32 = 0x0045_e780;
     const GENERIC: u32 = 0x0045_e6f0;
     const SPRAY: u32 = 0x0045_e720;
+    const COLLISION: u32 = 0x0045_e690;
+    const SPHERES: u32 = 0x0045_e660;
     let vf = |a: u32| Vf([0, 4, 8, 12].map(|o| ee.f32_at(a + o)));
     let mut riders: Vec<(usize, RiderDust)> = C33_RIDERS
         .iter()
@@ -676,6 +724,11 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
             let entries: Vec<Entry> = (0..ee.u32_at(m + 0x34))
                 .map(|i| {
                     let e = ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i);
+                    // S482b: the collision models and the bone collision entries (the foot dust),
+                    // as S422 seeds them.
+                    if matches!(ee.u32_at(e + 0x10), COLLISION | SPHERES) {
+                        return super::wreck_dust::seed(ee, e).0;
+                    }
                     let em = ee.u32_at(e + 0x14);
                     let kind = match ee.u32_at(e + 0x10) {
                         EXHAUST => Kind::Exhaust { max_speed: F(ee.f32_at(e + 0x18)) },
@@ -752,7 +805,10 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
             // nodes' now: the drive moved the nodes after the image's last emit (tests/ai/draws.rs).
             let places = |p: Place| entries.iter().filter(|e| e.emitter.place == p).count();
             assert_eq!((places(Place::Front), places(Place::Exhaust)), (2, 1), "{}'s front and exhaust emitters", C33_NAMES[k]);
-            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls: Vec::new(), wrecked: false })
+            // S482b: the bone collisions the foot dust reads next, as the image's body left them.
+            let spheres = (0..ee.u32_at(m + 0x34)).map(|i| ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i)).find(|&e| ee.u32_at(e + 0x10) == SPHERES);
+            let balls = spheres.map(|e| super::wreck_dust::seed(ee, e).2.balls).unwrap_or_default();
+            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls, wrecked: false })
         })
         .collect();
     riders.sort_by_key(|r| r.0);

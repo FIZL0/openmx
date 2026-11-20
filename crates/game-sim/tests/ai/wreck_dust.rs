@@ -24,7 +24,7 @@ fn vf(ee: &Ee, a: u32) -> Vf {
 /// relative velocity `+0x1e0`, contacts `+0x100` from `+0x108` (`0x80` each: point `+0x40`, surface
 /// `+0x70`). The bone collisions are the feed's, `+0x10` from `+0x14`: ground `+0x18`, scene `+0x1c`,
 /// surface `+0x3c`, point `+0x40`, the bone's body `+0x80` (velocity `+0x70`).
-fn seed(ee: &Ee, e: u32) -> (Entry, Feed, Touches) {
+pub(crate) fn seed(ee: &Ee, e: u32) -> (Entry, Feed, Touches) {
     let vt = ee.u32_at(e + 0x10);
     let zones = |at: u32| core::array::from_fn(|i| ee.u8_at(at + i as u32));
     let kind = if vt == CM { Kind::Collision { zones: zones(e + 0x18) } } else { Kind::Spheres { mask: ee.u32_at(e + 0x18), zones: zones(e + 0x1c) } };
@@ -312,7 +312,15 @@ fn s476_feed_spheres_in_slot_order() {
 /// The ragdoll's kit as the shell builds it (tests/replay.rs's `the_ragdoll_kit`): the rider's body
 /// and model off the disc, the rider file's parts and pins, the wreck bike's sphere and mesh; with
 /// them the wreck bike's part and the rider's wreck set.
-fn s483_ragdoll_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, game_sim::phy::Wrecks)> {
+pub(crate) fn s483_ragdoll_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, game_sim::phy::Wrecks)> {
+    s483_ragdoll_body().map(|(_, _, kit, part, wrecks)| (kit, part, wrecks))
+}
+
+/// [`s483_ragdoll_kit`] with the rider's body it was built from and the body's rig (S482b): what
+/// the shell poses the riding skeleton with ([`game_render::rider::Body::ride`],
+/// [`game_render::rider::Body::ragdoll_posed`]).
+pub(crate) fn s483_ragdoll_body()
+-> Option<(game_render::rider::Body, game_render::rider::Ragdolled, game_sim::ragdoll_ride::Kit, game_sim::phy::Part, game_sim::phy::Wrecks)> {
     use game_render::disc::Disc;
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
     let names: Vec<String> = disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
@@ -331,11 +339,11 @@ fn s483_ragdoll_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Par
     let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model")).expect("the model parses");
     let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
     let wreck_bike = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok())).expect("an archive carries wreckbike.phy");
-    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
+    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig.clone());
     let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
     kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
     kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(std::sync::Arc::new);
-    Some((kit, game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&rider_file)))
+    Some((body, doll, kit, game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&rider_file)))
 }
 
 /// A rigid body as an image holds it (tests/replay.rs's `s252a_body`).
@@ -372,11 +380,7 @@ fn s483_body(ee: &Ee, b: u32) -> game_sim::biplane::Body {
 /// request carried into the frame of `m`, the bike's transform now: tests/replay.rs's `b19_riding`
 /// (B19), word for word, on an [`Ee`] rather than a save state.
 fn s483_riding(ee: &Ee, kit: &game_sim::ragdoll_ride::Kit, m: &game_sim::math::Mat4) -> (game_sim::ragdoll_riding::Riding, game_sim::ragdoll_riding::Holds) {
-    use game_sim::math::{self, Mat4};
-    use game_sim::rider_anim::Mode;
-    let f = |at: u32| F(ee.f32_at(at));
     let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
-    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(at + k)));
     let body_of = |a: u32, i: usize| ee.u32_at(ee.u32_at(a + 0x2f4) + 0xb0 * i as u32 + 0xa4);
     let bike = m.0[3];
     let near = |a: u32| {
@@ -385,6 +389,26 @@ fn s483_riding(ee: &Ee, kit: &game_sim::ragdoll_ride::Kit, m: &game_sim::math::M
     };
     let a = actors(ee).into_iter().min_by(|&x, &y| near(x).total_cmp(&near(y))).expect("a rider body actor");
     assert!(near(a) < 100.0, "the nearest body actor's main bone is {} ft from the bike", near(a).sqrt());
+    s483_riding_of(ee, kit, m, a)
+}
+
+/// **Rider `r`'s body actor** in `ee` (S482b): the one whose bones its manager's (`+0x1490`) feed
+/// (`+0x30`) hands the bone collisions of. On a start line every rider's bike is beside every
+/// other's body, so the nearest actor ([`s483_riding`]) is not always the rider's own.
+pub(crate) fn rider_actor(ee: &Ee, r: u32) -> u32 {
+    let fed = ee.u32_at(ee.u32_at(r + 0x1490) + 0x30);
+    let foot = ee.u32_at(ee.u32_at(ee.u32_at(fed + 0x14)) + 0x80);
+    actors(ee).into_iter().find(|&a| bone_of(ee, a, foot).is_some()).expect("the actor of the feed's bones")
+}
+
+/// [`s483_riding`] on the body actor `a`.
+pub(crate) fn s483_riding_of(ee: &Ee, kit: &game_sim::ragdoll_ride::Kit, m: &game_sim::math::Mat4, a: u32) -> (game_sim::ragdoll_riding::Riding, game_sim::ragdoll_riding::Holds) {
+    use game_sim::math::{self, Mat4};
+    use game_sim::rider_anim::Mode;
+    let f = |at: u32| F(ee.f32_at(at));
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
+    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(at + k)));
+    let body_of = |a: u32, i: usize| ee.u32_at(ee.u32_at(a + 0x2f4) + 0xb0 * i as u32 + 0xa4);
     let mut riding = game_sim::ragdoll_riding::Riding::new(kit);
     let actor = &mut riding.actor;
     let n = actor.ragdoll.bones.len();
