@@ -8211,6 +8211,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // was asked on.
     let mut flare_sky: std::collections::HashMap<(usize, usize), (u64, f32)> = std::collections::HashMap::new();
     let mut tire_marks: Vec<tire_tracks::Tracks> = Vec::new();
+    // A race's AI riders' (V135), laid by the Sim.
+    let mut bot_marks: Vec<tire_tracks::Tracks> = Vec::new();
     // The GPU's copy of its pictures, uploaded with the first frame's glows.
     let mut glow_textures = (!glow_list.is_empty()).then(|| glow_list.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
@@ -8298,6 +8300,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             s.hand_to(&mut race);
         }
         sim.race = Some(Box::new(race));
+        // V135: the bikes' tyre tracks lay their rows on the race's generator, every player's off the
+        // track's list (the AI's own file holds the same entries); the shell draws what they lay.
+        if let Some((list, _)) = &tread {
+            let riders: Vec<_> = (0..sim.players()).map(|i| tire_tracks::sim_rider(list, tire_tracks::sim_snapshot(sim.rider_of(i)))).collect();
+            println!("tire tracks: the race lays {} players' rows", riders.len());
+            sim.tracks = Some(Box::new(game_sim::tire_track::Tracks { riders }));
+        }
     }
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -10676,7 +10685,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The bike's tire tracks (V40): a tick of each seat's that rode its bike this frame. They read
         // the ride and write nothing back. None under `--overview` (P166).
         if simulated && !args.overview && let Some((list, _)) = &tread {
-            step_tire_marks(&mut tire_marks, list, &world.seats);
+            step_tire_marks(&mut tire_marks, &mut bot_marks, list, &world.seats);
             step_car_tire_marks(&mut car_marks, &car_tread, &world.seats);
         }
         if simulated {
@@ -11805,6 +11814,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The tire tracks (V40), every seat's in every view, laid under the portals.
         if let Some(texture) = tread_texture {
             let mut marks = tire_mark_glow(&tire_marks, texture);
+            marks.tris.extend(tire_mark_glow(&bot_marks, texture).tris);
             marks.tris.extend(car_marks.iter().flat_map(|m| tire_mark_glow(m, texture).tris));
             glows.resize_with(world.seats.len(), Vec::new);
             for view in &mut glows {
@@ -16218,12 +16228,28 @@ fn tire_bike(seat: &Seat) -> tire_tracks::Bike {
 
 /// A tick of every seat's tracks whose bike rode it: on its bike, not frozen, paused or waiting. A seat
 /// that joined gets its own strips; one in a machine keeps the marks it left.
-fn step_tire_marks(marks: &mut Vec<tire_tracks::Tracks>, list: &[tire_tracks::Params], seats: &[Seat]) {
+/// A seat whose Sim lays its own rows (a race's, V135) has them laid instead, its first player's into
+/// its strips and its other players' (the AI riders) into `bots`'.
+fn step_tire_marks(marks: &mut Vec<tire_tracks::Tracks>, bots: &mut Vec<tire_tracks::Tracks>, list: &[tire_tracks::Params], seats: &[Seat]) {
     while marks.len() < seats.len() {
         marks.push(tire_tracks::Tracks::new(list, marks.len() as u32 + 1));
     }
+    let mut bot = 0;
     for (seat, m) in seats.iter().zip(marks.iter_mut()) {
-        if seat.riding && !seat.paused && !seat.waiting && seat.garage.up == Kind::Bike {
+        if let Some(sim) = seat.sim.tracks.as_deref() {
+            let tick = seat.sim.ticks;
+            for (i, rider) in sim.riders.iter().enumerate() {
+                if i == 0 {
+                    m.lay_sim(rider, tick);
+                    continue;
+                }
+                if bots.len() <= bot {
+                    bots.push(tire_tracks::Tracks::new(list, 0));
+                }
+                bots[bot].lay_sim(rider, tick);
+                bot += 1;
+            }
+        } else if seat.riding && !seat.paused && !seat.waiting && seat.garage.up == Kind::Bike {
             m.step(&tire_bike(seat));
         }
     }

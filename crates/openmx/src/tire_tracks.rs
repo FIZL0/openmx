@@ -46,11 +46,17 @@
 //!
 //! The noise is drawn from the strips' own generator, never the simulation's: the original's calls
 //! the C library's `rand`, which would put the picture in the simulation's sequence.
+//!
+//! **A race's Sim lays the rows itself** (V135): a Sim with tracks ([`game_sim::tire_track`], S448)
+//! makes the row decision on the game's generator, as the original does, every player's. The shell
+//! then only writes each frame's rows into its rings ([`Tracks::lay_sim`]), edges, `u`, alpha and
+//! restart as the Sim laid them; the steps above are for rides without a race generator.
 
 use game_render::biplane::Emitter;
 use game_render::glow::{Glow, Vertex};
 use game_render::ini;
 use game_render::mat::V3;
+use ps2_float::{F, Vf};
 
 /// The player's vehicle effects list, beside each off-road track's other files.
 pub const LIST: &str = "mxparticles.dat";
@@ -187,6 +193,60 @@ impl Params {
         }
         p
     }
+
+    /// The entry as the Sim's tracks take it (V135): its zones off as [`game_sim::tire_track::ZONE_NONE`],
+    /// on as group 0 (the Sim reads no more of a group), the strip's segment 8 and `u` scale 1.
+    pub fn sim(&self) -> game_sim::tire_track::Params {
+        use game_sim::tire_track::ZONE_NONE;
+        game_sim::tire_track::Params {
+            tyre: self.tire,
+            disable: self.disable as u8,
+            zones: self.zones.map(|on| if on { 0 } else { ZONE_NONE }),
+            width: F(self.width),
+            break_angle: F(self.break_angle),
+            min_speed: F(self.min_speed),
+            min_compression: F(self.min_compression),
+            max_compression: F(self.max_compression),
+            base_alpha: F(self.base_alpha),
+            fade_in: F(self.fade_in),
+            fade_out: F(self.fade_out),
+            height: F(self.height),
+            segment: F(SEGMENT),
+            u_scale: F(U_SCALE),
+        }
+    }
+}
+
+/// A rider's tracks for the Sim (V135): `list`'s entries, each as its constructor leaves it, on the
+/// bike's snapshot `snap` as it stands. No tyre's zone is known yet (0xff), so the manager's first
+/// pass sets each track's from its tyre's. The manager's first pass reads `snap`, and a tyre with no
+/// contact there would switch its tracks off, which a track never fades back in from (the port's
+/// fade-in needs the tyre to move while its strip is ended, which it never sees). A bike set down on
+/// the grid has not swept its wheels yet, so a tyre with neither contact is taken as on the ground.
+pub fn sim_rider(list: &[Params], mut snap: game_sim::tire_track::Snapshot) -> game_sim::tire_track::RiderTracks {
+    for t in &mut snap.tyres {
+        t.ground |= !t.object;
+    }
+    game_sim::tire_track::RiderTracks {
+        tracks: list.iter().map(|p| game_sim::tire_track::Track::new(p.sim())).collect(),
+        snap,
+        zones: [game_sim::tire_track::ZONE_NONE; 2],
+    }
+}
+
+/// A rider's bike as the Sim's tracks read it (V135): what `game_sim::tire_track` snaps each frame.
+pub fn sim_snapshot(rider: &game_sim::rider::Rider) -> game_sim::tire_track::Snapshot {
+    let r = &rider.ride;
+    let tyre = |w: &game_sim::ride::Wheel| game_sim::tire_track::Tyre {
+        at: w.w.load_point,
+        normal: w.w.contact_normal,
+        ground: w.w.ray_hit != 0,
+        object: w.w.swept_contact != 0,
+        compression: w.w.compression,
+        spinning: w.slip.spinning,
+        zone: w.surface,
+    };
+    game_sim::tire_track::Snapshot { tyres: [tyre(&r.front), tyre(&r.rear)], speed: r.chassis.speed, wrecking: rider.crash.is_some() }
 }
 
 /// The list's `TireTrack` entries, in its order.
@@ -416,6 +476,15 @@ impl Strip {
         self.alpha = a8;
     }
 
+    /// A row the Sim laid (V135) into the ring: its edges, `u` and alpha, a restart or one carrying on.
+    pub fn lay(&mut self, row: &game_sim::tire_track::Row) {
+        let v = |v: Vf| V3 { x: v.x(), y: v.y(), z: v.z() };
+        self.edges = row.edges.map(v);
+        self.u = row.u.0;
+        self.alpha = row.alpha;
+        self.emit(row.restart);
+    }
+
     /// The row at the edges into the ring: a restart, or one carrying on from the last.
     fn emit(&mut self, restart: bool) {
         let carry = !restart && self.ring.at == 0 && self.emits != 0;
@@ -554,13 +623,29 @@ impl Track {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tracks {
     pub tracks: Vec<Track>,
+    /// The Sim tick whose rows were last laid ([`Tracks::lay_sim`]), so a frame's are laid once.
+    pub laid: Option<u64>,
 }
 
 impl Tracks {
     /// `list`'s entries, their noise seeded from `seed` (a rider's own, so two riders differ).
     pub fn new(list: &[Params], seed: u32) -> Tracks {
         let tracks = list.iter().enumerate().map(|(k, p)| Track::new(p.clone(), seed.wrapping_mul(31).wrapping_add(k as u32 + 1))).collect();
-        Tracks { tracks }
+        Tracks { tracks, laid: None }
+    }
+
+    /// The rows rider `sim`'s tracks laid on Sim tick `tick` (V135), each into its own strip's ring,
+    /// once a tick. The rows of ticks between two calls are the Sim's last frame's only.
+    pub fn lay_sim(&mut self, sim: &game_sim::tire_track::RiderTracks, tick: u64) {
+        if self.laid == Some(tick) {
+            return;
+        }
+        self.laid = Some(tick);
+        for (t, k) in self.tracks.iter_mut().zip(&sim.tracks) {
+            for row in &k.rows {
+                t.strip.lay(row);
+            }
+        }
     }
 
     /// A tick of the bike.
