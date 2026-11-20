@@ -2994,6 +2994,13 @@ impl InPlay {
         self.parked.get(k).map(|(kind, p)| (*kind, p.rest.0[3]))
     }
 
+    /// The machines [`InPlay::hand_to`] last parked in the Sim, in [`Sim::parked_cars`]' order (F72):
+    /// what the shell draws each of them as. Empty before it has handed any.
+    pub fn handed(&self) -> Vec<Machine> {
+        let Some(on) = &self.handed else { return Vec::new() };
+        (self.parked.iter().zip(on)).filter(|(_, on)| **on).filter_map(|((kind, _), _)| kind.car()).collect()
+    }
+
     /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
     pub fn fresh(&self) -> InPlay {
         InPlay { parked: std::sync::Arc::clone(&self.parked), kept: Vec::new(), handed: None }
