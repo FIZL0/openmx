@@ -2038,14 +2038,15 @@ impl crate::contact_search::Search for SolidSweep<'_> {
 /// record: a contact on one names the prop as its owner, and the props struck are woken. In a world that answers only [`World::solid`] they are searched on a record
 /// of their own and merged a segment at a time. The woken trucks lent with them (S208,
 /// [`crate::truck_wheel`]) are searched after the props, on the same record, their path meshes stood
-/// down for the scene's search; a contact on one names the truck as its owner.
+/// down for the scene's search; a contact on one names the truck as its owner, and a truck struck
+/// lying at rest is woken again (R19).
 fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
               lent: Option<&mut crate::prop_wheel::Lent>) -> (Vec<WheelHit>, F) {
     let (props, trucks) = match lent {
-        Some(crate::prop_wheel::Lent(set, trucks)) => (Some(set), Some(&*trucks)),
+        Some(crate::prop_wheel::Lent(set, trucks)) => (Some(set), Some(trucks)),
         None => (None, None),
     };
-    let stood_down = trucks.map(|t| t.stand_down(world)).unwrap_or_default();
+    let stood_down = trucks.as_deref().map(|t| t.stand_down(world)).unwrap_or_default();
     let (hits, near) = wheel_hits_in(rays, m, nearby, world, props, trucks);
     for h in stood_down {
         crate::traffic::show(world, h);
@@ -2055,7 +2056,7 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
 
 /// [`wheel_hits`], with the trucks' path meshes out of `world`.
 fn wheel_hits_in(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
-                 props: Option<&mut crate::prop_set::PropSet>, trucks: Option<&crate::truck_wheel::Trucks>) -> (Vec<WheelHit>, F) {
+                 props: Option<&mut crate::prop_set::PropSet>, trucks: Option<&mut crate::truck_wheel::Trucks>) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
     // The knockable props are in the bike's list (F8): the probe meets each where the list names it,
     // interleaved with the scene's, a contact on one naming the prop as its owner.
@@ -3010,6 +3011,10 @@ fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touchin
             owner,
             vehicle: on.map_or(0, |(k, _)| k),
             vehicle_kind: if on.is_some() { 2 } else { 0 },
+            // The owner's listeners (`*(owner+0x1f8)` → `+0xf4`) are its `f.col`'s struck listeners,
+            // which the search ran already: a prop's wake and its collection's activate (R15), a
+            // woken truck's one wake (R19, [`crate::truck_wheel::search`]). Run again they change
+            // nothing, so none is counted here.
             listeners: 0,
         })
         .collect();

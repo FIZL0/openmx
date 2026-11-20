@@ -8566,6 +8566,24 @@ atv_record_apply            atv 0x00207240 = collision_apply
 #   wheel_suspension/wheel_tire_forces/wheel_integrate change no word of any prop's object, body,
 #   collision object, f.col or collection; the wheels' owner is a prop's collision object on all
 #   304 wheels, and the chassis' +0x130/+0x140 move on 282.
+# R19 — a woken truck's wheel-owner listeners (test crates/game-sim/tests/ride.rs
+#   r19_a_wheel_on_a_woken_truck_wakes_it_at_rest). bike_wheel_contacts 0x002578b4..0x0025790c: contact
+#   object = record +0x9c[i], owner = its +0x80; if owner: l = *(owner+0x1f8), for i < l+0xf4,
+#   collidable_listener_at(l+0xf4, i) gets vt +0xc with (a1 0, a2 0). On s89-along's two trucks after
+#   physics_car_wake: owner = the physics object's collision object (+0x120), owner+0x1f8 = the f.col
+#   (object +0x128), its list is 1 long: the object's listener (object +0x48, +0xc 0x0015c280 ->
+#   physics_object_struck 0x0015ad40), object +0x58 = 1 (NOT off, as truck_wheel's doc had it), so it
+#   calls vt +0x124 = enable 0x0015b790 (bodies +0x50, forces +0x68, preforce +0x98, posts +0xb0 lists,
+#   the record filed, +0x1b0 fresh = 1, +0x28 |= 2), which returns at once while the body is on.
+#   Woken: the call changes no word of car (0x6a0), object, body, collision object or f.col. Run the
+#   world node (0x0026f800) to rest (body +0 = 0, car +0x588 still 1, f.col +0x31 bit 0 still set):
+#   the call turns the body back on (body +0 1, object +0x1b0 1, +0x28 bit 2, f.col +0x1e0..+0x218
+#   re-seated, countdown +0x1bc left); a second call changes nothing. Nothing beyond the wake. The same
+#   list is what collide_against_search tells the struck f.col (S210's prop path), so a wheel on a woken
+#   truck lying out its ResetTime wakes it again: ported as truck_wheel::search's heard_struck ->
+#   Collection::enable(0) after the search; the distributor's second call stays uncounted
+#   (chassis::Contact::listeners 0 in ride.rs). The truck's world steps before the bike in the port's
+#   frame, so the woken body moves from the next tick (tests/truck_wheel.rs point 5).
 # S149e — a fresh car (test crates/game-sim/tests/car_spawn.rs; journal
 #   research/journal/2026-11-02-s149e-car-machines-app). Car ctor 0x00393cc0 builds the part through
 #   0x00159430 (inertia from the model bounds, full extents); per tire it looks the tire node up by name

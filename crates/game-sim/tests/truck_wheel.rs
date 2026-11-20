@@ -14,7 +14,8 @@
 //!    otherwise than onto it still;
 //! 3. asleep (not struck), a wheel on the truck is on its path mesh: a vehicle and no owner, and the
 //!    mesh hears the wheel's search, so the truck wakes (S252);
-//! 4. the physics objects and the path mesh are back where they were after the bike's frame.
+//! 4. the physics objects and the path mesh are back where they were after the bike's frame;
+//! 5. a wheel on the truck lying at rest turns its body back on (R19, the `f.col`'s struck listener).
 //!
 //! Skipped with a line where the disc is not there.
 
@@ -170,6 +171,9 @@ fn a_wheel_stands_on_a_woken_truck() {
     eprintln!("the truck at {top:?}, the bike dropped at {at:?}");
 
     let on = drop(&base, at, &mut world, &moved);
+    // The f.col's listener is the physics object's struck listener, its switch on (R19): the wheel's
+    // hit turns the resting truck's body back on.
+    assert!(truck(&on).body().enabled, "a wheel on the truck lying at rest wakes its body");
     for (o, v) in words(&on.rider) {
         assert!(o == 0 || o == handle, "a wheel's owner is the truck's or nothing: {o:#x}");
         if o == handle {
@@ -181,8 +185,9 @@ fn a_wheel_stands_on_a_woken_truck() {
     let mesh = &world.props.props[on.traffic.span().expect("attached")[0]];
     assert!(!mesh.mesh.triangles.is_empty() && mesh.radius > F::ZERO, "the path mesh is stood back up after the frame");
 
-    // What the wheel stands on is the body (S169's owner branch): the body lies off, so the world's
-    // step leaves it where it is whatever its velocity, and only what the wheel reads of it moves.
+    // What the wheel stands on is the body (S169's owner branch): the body lies off until the wheel's
+    // hit wakes it (R19), and the truck's world steps before the bike in the frame, so through the
+    // drop the step leaves it where it is whatever its velocity, and only what the wheel reads of it moves.
     assert!(!truck(&base).body().enabled, "the truck lies at rest, its body off");
     let mut read = |v: Vf| {
         let mut s = base.clone();
