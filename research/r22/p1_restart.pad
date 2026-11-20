@@ -1,0 +1,19 @@
+# R22: pause, down once to "Restart", Cross; Cross again for a confirm if one comes; then wait out the load
+release
+sleep 30t
+down start
+sleep 9t
+up start
+sleep 45t
+down down
+sleep 9t
+up down
+sleep 36t
+down cross
+sleep 9t
+up cross
+sleep 90t
+down cross
+sleep 9t
+up cross
+sleep 1200t

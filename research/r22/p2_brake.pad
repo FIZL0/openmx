@@ -1,0 +1,3 @@
+# R22: player 2 sits in the parked buggy holding the brake (Square) so it does not roll off the slope.
+down square
+sleep 600t

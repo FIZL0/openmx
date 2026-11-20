@@ -1,0 +1,7 @@
+# R22: player 1 holds the gas (Cross) straight on for two seconds, then lets go.
+release
+sleep 15t
+down cross
+sleep 60t
+up cross
+sleep 300t

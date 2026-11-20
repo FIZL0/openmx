@@ -125,6 +125,7 @@ mod keeper; // S364: the habits' keeper word, the score keeper's mode
 mod career_roster; // S12f: the career rounds' rosters
 mod wreck_dust; // S422: the collision models and the foot dust on a wreck
 mod flown; // S479: the AI riders while player 1 flies
+mod split_car; // R22: a split-screen bike into the other player's parked buggy
 
 use avoidance::*;
 use path_nets::*;
