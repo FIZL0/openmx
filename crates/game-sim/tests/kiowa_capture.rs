@@ -2017,3 +2017,316 @@ fn a_fast_wreck_records_bit_exact() {
     assert_eq!(refilled, want, "the rows read in the next frame's collide pass");
     println!("the fast wreck again: 1205..={} bit-exact, records bit-exact on {} rows, {} read in the next frame's collide pass; blades offered on {} frames, none met", seen.last, seen.records.len(), refilled.len(), seen.offered);
 }
+
+// --- the Kiowa strikes a knockable prop (C43, S471) --------------------------------------------------
+
+/// C43's capture: C14's state, then a climb, R1 for 9 ticks and stick back (`research/c43/README.md`);
+/// flying backwards at about 30 ft/s the tail strikes free09's "egg" (prop 5 of its `.toy`, asleep)
+/// on 1579. Rows 1204..=1663, each read after its tick, with the egg's body and both records.
+const PROP_STRIKE: &str = "capture/c43/strike.csv";
+
+/// The frame C43's tail strikes the egg.
+const PROP_STRUCK: u32 = 1579;
+
+/// free09's knockable props as the shell loads them (`free09.toy`), in the image's area.
+fn free09_knockables(area: Option<Area>) -> Option<game_sim::prop_set::PropSet> {
+    use game_sim::archive::Res;
+    let mut disc = Disc::open()?;
+    let parts: Vec<(Vec<u8>, Res)> = ["Tracks\\free09.res", "Tracks\\free09_2.res"]
+        .iter()
+        .filter_map(|n| disc.member(n))
+        .filter_map(|b| Res::parse(&b).ok().map(|r| (b, r)))
+        .collect();
+    let read = |p: &str| -> Option<Vec<u8>> {
+        let want = p.to_ascii_lowercase();
+        parts.iter().find_map(|(b, r)| {
+            let e = r.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.strip_suffix(&want).is_some_and(|head| head.ends_with('\\') || head.ends_with('/'))
+            })?;
+            r.read(b, e).ok()
+        })
+    };
+    let toy = game_sim::phy::Ini::parse_bytes(&read("free09.toy").expect("free09.toy"));
+    let scene = track::Scene::parse(&read("free09.scn").expect("free09.scn")).expect("free09.scn parses");
+    let (set, said) = game_sim::prop_set::PropSet::load(&toy, "Tracks\\Free09\\", &scene.models, &mut |p| read(p), &mut |p| read(p), area);
+    assert!(said.is_empty(), "free09 loads whole: {said:?}");
+    Some(set)
+}
+
+/// The helicopter's surroundings among the props it struck (S471): C14a's [`Grounded`], its resolve
+/// pushing the struck props' bodies ([`game_sim::kiowa::Collision::strike_props`]) as other sides.
+struct AmongProps<'a> {
+    ground: Grounded<'a>,
+    props: &'a mut [game_sim::prop_contact::Pushed],
+}
+
+impl Surroundings for AmongProps<'_> {
+    fn post(&mut self, body: &Body) {
+        self.ground.post(body);
+    }
+    fn wrap_round(&mut self, body: &mut Body) -> [i8; 2] {
+        self.ground.wrap_round(body)
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.ground.wrap()
+    }
+    fn resolve(&mut self, body: &mut Body) {
+        let mut bodies: Vec<_> = self.props.iter_mut().map(|p| p.weighed()).collect();
+        let mut others: Vec<game_sim::contact::Other<'_>> = bodies
+            .iter_mut()
+            .map(|(collider, body)| game_sim::contact::Other { collider: &mut **collider, side: game_sim::contact::Side::Body(body) })
+            .collect();
+        self.ground.resolve_among(body, &mut others);
+    }
+    fn touching(&self) -> bool {
+        self.ground.touching()
+    }
+    fn ignored(&self) -> bool {
+        self.ground.ignored()
+    }
+    fn entries(&self) -> Vec<Touch> {
+        self.ground.entries()
+    }
+    fn strike(&mut self, matrix: &game_sim::math::Mat4) -> Strike {
+        self.ground.strike(matrix)
+    }
+    fn crashed(&mut self, asked: &Crashed, ride: &mut Ride, rng: &mut Rng) {
+        self.ground.crashed(asked, ride, rng);
+    }
+}
+
+/// The first word of two bodies that differs, said by name.
+fn body_mismatch(got: &Body, want: &Body) -> Option<String> {
+    if got.enabled != want.enabled {
+        return Some(format!("enabled is {} in the game, {} in the port", want.enabled, got.enabled));
+    }
+    for ((name, _, lanes), (g, w)) in QUADS.iter().zip(body_quads(got).into_iter().zip(body_quads(want))) {
+        for k in 0..*lanes {
+            if g.0[k].to_bits() != w.0[k].to_bits() {
+                return Some(format!("{name}[{k}] is {:e} in the game, {:e} in the port", w.0[k], g.0[k]));
+            }
+        }
+    }
+    None
+}
+
+/// The helicopter's collision record and the egg's collision object in C43's heap (C43's note in
+/// `research/oracle.txt`): the other side its entries name.
+const C43_HELI_RECORD: u32 = 0x0149_0870;
+const C43_EGG_OBJECT: u32 = 0x00e3_cdd0;
+
+/// A record's entries on `row` (`count` and `entries` its columns) against the port's, bit for bit as
+/// [`entry_differences`] reads them: each entry names `other` (the struck side) or nothing (the ground).
+fn prop_record_differences(cap: &Capture, row: usize, (count, entries): (&str, &str), other: u32, port: &[game_sim::contact::Contact]) -> Vec<String> {
+    let n = cap.u32(row, count) as usize;
+    let raw = cap.bytes(row, entries);
+    let mut out = Vec::new();
+    if n != port.len() {
+        out.push(format!("{entries}: {n} entries in the game, {} in the port", port.len()));
+    }
+    for (k, c) in port.iter().enumerate().take(n.min(raw.len() / 0x80)) {
+        let w: [u32; 32] = std::array::from_fn(|i| u32::from_le_bytes(raw[k * 0x80 + i * 4..k * 0x80 + i * 4 + 4].try_into().unwrap()));
+        let quad = |off: usize| [w[off / 4], w[off / 4 + 1], w[off / 4 + 2]];
+        let xyz = |v: Vf| { let b = v.to_bits(); [b[0], b[1], b[2]] };
+        for (what, game, ported) in [
+            ("from", quad(0x10), xyz(c.from)),
+            ("on body", quad(0x20), xyz(c.on_body)),
+            ("normal", quad(0x30), xyz(c.normal)),
+            ("point", quad(0x40), xyz(c.point)),
+            ("arm", quad(0x50), xyz(c.arm)),
+            ("other arm", quad(0x60), xyz(c.other_arm)),
+            ("kind, surface", [w[0], w[0x70 / 4], 0], [c.kind, c.surface as u32, 0]),
+        ] {
+            if game != ported {
+                out.push(format!("{entries} entry {k} {what}: game {game:08x?}, port {ported:08x?}"));
+            }
+        }
+        let named = w[0x74 / 4];
+        if named != 0 && named != other {
+            out.push(format!("{entries} entry {k} names {named:08x}, not the struck side"));
+        }
+        if (named != 0) != c.other.is_some() {
+            out.push(format!("{entries} entry {k}: other {named:08x} in the game, {:?} in the port", c.other));
+        }
+    }
+    out
+}
+
+/// What [`replay_prop_strike`] saw.
+struct PropReplay {
+    /// The last frame replayed, and the first that parted from the capture with what parted.
+    last: u32,
+    parted: Option<(u32, String)>,
+    /// The frames the port's helicopter record named the egg, and the egg's first awake frame.
+    named: Vec<u32>,
+    woke: Option<u32>,
+    /// On the strike: the helicopter's entries (kind, other) and the egg's.
+    heli_entries: Vec<(u32, Option<usize>)>,
+    /// The rows that repeat the row before whole: stale reads, not compared.
+    stale: Vec<u32>,
+    /// The rows on which either record held entries (all compared bit for bit).
+    contact_rows: Vec<u32>,
+    egg_entries: Vec<(u32, Option<usize>)>,
+}
+
+/// **C43 replayed from C14's image** (S471): the helicopter's frame among free09's knockable props as
+/// the shell runs it — the props' collide pass held ([`game_sim::traffic::Traffic::frame_held`]), the
+/// helicopter's search with the props in it after the world
+/// ([`game_sim::kiowa::Collision::search_among`]), the struck prop woken and searched in the pass and
+/// the props' rays on its hull ([`game_sim::kiowa::Collision::strike_props`]), its world's step with
+/// its resolve pushing the struck bodies, the bodies written back, then the props' step with the
+/// helicopter as their striker and the traffic's late half. Each row's helicopter (as
+/// [`compare`] reads it) and the egg's body against the port's.
+fn replay_prop_strike() -> Option<PropReplay> {
+    use game_sim::kiowa::{KIOWA_HULL, KiowaProps};
+    let (cap_path, image) = (ctx(PROP_STRIKE)?, ctx(STATE)?);
+    let mut disc = the_disc()?;
+    let [hull] = machine_files([KIOWA_HULL])?;
+    let hull = track::Mesh::parse(&hull).expect("kiowaf.col");
+    let cap = Capture::load(&cap_path);
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(cap.u32(0, "frame_counter"), 1204, "the capture does not start on the image's tick");
+    let props = std::mem::take(&mut disc.props);
+    let terrain = Terrain::parse(&disc.terrain).expect("free09's terrain");
+    let mut s = c14_start(&ee, &disc, props, &terrain);
+    let mut sim = game_sim::Sim::new(0xc43);
+    sim.traffic.props = free09_knockables(s.ride.area)?;
+    // The egg: the body asleep where the capture's first row has it.
+    let egg_of = |row: usize| body_of(&cap.block(row, "prop_body_raw", 0));
+    let want = egg_of(0);
+    let egg = sim
+        .traffic
+        .props
+        .collections
+        .iter()
+        .enumerate()
+        .flat_map(|(c, coll)| coll.bones.iter().enumerate().map(move |(o, b)| (c, o, b.body.position)))
+        .find(|&(_, _, p)| p.to_bits() == want.position.to_bits())
+        .map(|(c, o, _)| (c, o))
+        .expect("no prop of free09's set stands where the capture's egg does");
+    let egg_body = |sim: &game_sim::Sim| sim.traffic.props.collections[egg.0].bones[egg.1].body;
+    if let Some(d) = body_mismatch(&egg_body(&sim), &want) {
+        panic!("the egg as the disc puts it: {d}");
+    }
+    compare(&cap, 0, &s.kiowa, &s.ride, s.filter);
+
+    let acos = AcosTable::build();
+    let world_step = World { iterations: 1, rate: F(115.0) };
+    let mut pad = game_sim::input::Pad::new(0);
+    pad.connected = true;
+    let mut events = EventQueue::new();
+    let mut rng = Rng::from_state(0x0c43_0c43_0c43_0c43);
+    let start_rng = rng.state();
+    let mut seen = PropReplay { last: 1204, parted: None, named: Vec::new(), woke: None, heli_entries: Vec::new(), egg_entries: Vec::new(), stale: Vec::new(), contact_rows: Vec::new() };
+    // The rows' phase: from row 1 on each row was read a tick late (row 1 holds C14's 1206, two ticks
+    // from the image), so a row's tick from the image is its index plus one, and the tick after `t`
+    // ticks reads row `t - 1`'s pad. A row that repeats the row before whole (but its stamps and newer
+    // buffer) is a stale read: its tick ran, and it is not compared.
+    let mut ticks = 0usize;
+    for row in 1..cap.rows.len() {
+        let frame = cap.u32(row, "frame_counter");
+        let dt = F(cap.f32(row, "dt"));
+        let stale = row > 1 && cap.text(row, "body_raw") == cap.text(row - 1, "body_raw");
+        if stale {
+            seen.stale.push(frame);
+        }
+        while ticks < row + 1 {
+            ticks += 1;
+            let mut movers = sim.traffic.frame_held(dt, &mut s.place);
+            let mut set = std::mem::take(&mut sim.traffic.props);
+            let (heli_movers, _, knocked) = s.collision.search_among(&mut s.ride.body, &mut s.place, dt, &[], Some(&set));
+            let mut bodies = {
+                let mut props = KiowaProps { set: &mut set, me: 0, hull: Some(&hull) };
+                s.collision.strike_props(&mut props, 0, knocked, Some((dt, &mut s.place, &mut movers)))
+            };
+            if bodies.iter().any(|b| (b.collection, b.object) == egg) {
+                seen.named.push(frame);
+            }
+            if frame == PROP_STRUCK {
+                seen.heli_entries = s.collision.record.contacts.iter().map(|c| (c.kind, c.other)).collect();
+            }
+            let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &heli_movers, rotor: &s.rotor, asked: Vec::new() };
+            let mut around = AmongProps { ground, props: &mut bodies };
+            let out = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
+            assert_eq!(out, Crashed::default(), "tick {frame}: the port's crash test asked for something");
+            set.pushed(&bodies);
+            {
+                let mut weighed = game_sim::contact::Weighed { body: &mut s.ride.body, mass: s.collision.mass };
+                let mut strikers = [game_sim::contact::Other { collider: &mut s.collision.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+                set.step_with(dt, &movers, &mut strikers);
+            }
+            sim.traffic.props = set;
+            sim.traffic.frame_late(dt, &mut s.place);
+            events.clear();
+            pad.poll(dt, &report_of(&cap, ticks - 1), &mut events);
+            s.kiowa.pad = Pad::from_pad(&pad);
+        }
+        if stale {
+            continue;
+        }
+        if frame == PROP_STRUCK {
+            let col = sim.traffic.props.collections[egg.0].objects[egg.1].collision.as_ref().expect("the egg's collision object");
+            seen.egg_entries = col.record.contacts.iter().map(|c| (c.kind, c.other)).collect();
+        }
+        let got = egg_body(&sim);
+        if got.enabled && seen.woke.is_none() {
+            seen.woke = Some(frame);
+        }
+        seen.last = frame;
+        let parted = flight_mismatch(&cap, row, &s.kiowa, s.filter)
+            .map(|d| format!("the helicopter's {d}"))
+            .or_else(|| body_mismatch(&s.ride.body, &body_of(&cap.block(row, "body_raw", 0))).map(|d| format!("the helicopter's {d}")))
+            .or_else(|| body_mismatch(&got, &egg_of(row)).map(|d| format!("the egg's {d}")))
+            .or_else(|| {
+                let col = sim.traffic.props.collections[egg.0].objects[egg.1].collision.as_ref().expect("the egg's collision object");
+                let heli = &s.collision.record.contacts;
+                if !heli.is_empty() || !col.record.contacts.is_empty() {
+                    seen.contact_rows.push(frame);
+                }
+                prop_record_differences(&cap, row, ("rec_count", "rec_entries"), C43_EGG_OBJECT, heli)
+                    .into_iter()
+                    .chain(prop_record_differences(&cap, row, ("prop_rec_count", "prop_rec_entries"), C43_HELI_RECORD, &col.record.contacts))
+                    .next()
+            });
+        if let Some(d) = parted {
+            seen.parted = Some((frame, d));
+            break;
+        }
+        compare(&cap, row, &s.kiowa, &s.ride, s.filter);
+    }
+    assert_eq!(rng.state(), start_rng, "the port's frame drew from the generator");
+    Some(seen)
+}
+
+/// **C43: the Kiowa's tail strikes free09's egg, bit-exact** (S471). From C14's image the port flies
+/// C43's tape among free09's knockable props as the shell flies it (see [`replay_prop_strike`]): its
+/// rays strike the egg on 1579 as the original's do, the egg wakes on that frame, and every row's
+/// helicopter and egg match the capture to its end, both records with them entry by entry. The
+/// capture's rows are read a tick late from 1205; 1613 is a stale read of 1612 (its tick ran).
+#[test]
+fn a_tail_strike_on_a_prop_replays_bit_exact() {
+    let Some(seen) = replay_prop_strike() else { return };
+    println!(
+        "C43: replayed to {}, parted {:?}; the egg named on {:?}, awake from {:?}; records held entries on {} rows; stale rows {:?}",
+        seen.last,
+        seen.parted,
+        seen.named,
+        seen.woke,
+        seen.contact_rows.len(),
+        seen.stale
+    );
+    assert_eq!(seen.parted, None, "the replay parted from the capture");
+    assert_eq!(seen.last, 1663, "the replay did not reach the capture's end");
+    assert_eq!(seen.stale, vec![1613], "the stale rows");
+    assert_eq!(seen.woke, Some(PROP_STRUCK), "the egg woke on another frame");
+    assert_eq!(seen.named, (PROP_STRUCK..=1592).collect::<Vec<_>>(), "the frames the helicopter struck the egg");
+    // On the strike: the helicopter's own entry on the egg and the egg's rays' mirrors on its hull;
+    // the egg's: the mirror, its two on the ground, then its rays on the hull.
+    let mut heli = vec![(0, Some(0))];
+    heli.extend([(1, Some(0)); 16]);
+    assert_eq!(seen.heli_entries, heli, "the helicopter's record on {PROP_STRUCK}");
+    let mut egg = vec![(1, Some(0)), (0, None), (0, None)];
+    egg.extend([(0, Some(0)); 16]);
+    assert_eq!(seen.egg_entries, egg, "the egg's record on {PROP_STRUCK}");
+}

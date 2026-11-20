@@ -3129,14 +3129,16 @@ impl Garage {
     /// With a car up, `met` is the riders' bikes that struck its hull this tick (F26,
     /// [`CarRide::step_met`]).
     fn drive_met(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) -> rider::Frame {
+        // The helicopter strikes the knockable props in the traffic's frame too (S471).
+        if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
+            heli.step_traffic(sim, dt, world);
+            return rider::Frame::default();
+        }
         let m = self.up.car();
         match self.cars.iter_mut().find(|c| Some(c.machine) == m) {
             // The car strikes the knockable props in the traffic's frame (S335).
             Some(car) => car.step_traffic(sim, dt, world, met),
             None => sim.traffic.frame(dt, world),
-        }
-        if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
-            heli.step_through(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world);
         }
         rider::Frame::default()
     }
@@ -3184,6 +3186,9 @@ struct KiowaAround<'a> {
     curve: &'a game_sim::camera::CurveTable,
     /// The movers the thrown blades' contacts name, for their share of its world's step (C21).
     blade_movers: &'a [game_sim::contact::Mover],
+    /// The knockable props it struck this frame (S471, [`game_sim::kiowa::Collision::strike_props`]):
+    /// its resolve pushes their bodies, after the blades'.
+    props: &'a mut [game_sim::prop_contact::Pushed],
 }
 
 /// Where the blades are thrown from: the blade nodes' rows as the original's nodes have them on the
@@ -3223,7 +3228,7 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
     }
     fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
         let ground = &mut self.ground;
-        self.wreckage.blades.with_others(|others| ground.resolve_among(body, others));
+        self.wreckage.blades.with_others_among(self.props, |others| ground.resolve_among(body, others));
     }
     fn among(&mut self) -> Option<game_sim::kiowa::Among<'_>> {
         Some(self.wreckage.blades.among(blade_tables(), self.blade_movers, &mut *self.ground.collision))
@@ -3602,6 +3607,50 @@ impl KiowaRide {
         dt: F,
         world: &mut dyn World,
     ) {
+        self.step_among(pad, stick, table, tables, dt, world, None);
+    }
+
+    /// **The helicopter's frame among the track's knockable props** (S471), as the car's
+    /// ([`CarRide::step_traffic`]): the props held out of the traffic's frame
+    /// ([`game_sim::traffic::Traffic::frame_held`]) while its search meets them after the world and
+    /// the struck are woken and searched in the pass, their rays on its hull
+    /// ([`game_sim::kiowa::Collision::search_among`], [`game_sim::kiowa::Collision::strike_props`]),
+    /// its resolve pushing their bodies; then their own step with its body as their one striker, then
+    /// the traffic's late half. Bit-exact on C43's capture (`kiowa_capture.rs`). A track with no props,
+    /// a helicopter not flown, or one on MX vs. ATV's record is the traffic's frame and
+    /// [`KiowaRide::step_through`].
+    pub fn step_traffic(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) {
+        let on_record = self.flown.as_ref().is_some_and(|h| h.record.is_some() && h.mxvatv.is_some()) && takes_mxvatv_record(world);
+        if sim.traffic.props.is_empty() || self.flown.is_none() || on_record {
+            sim.traffic.frame(dt, world);
+            self.step_through(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world);
+            return;
+        }
+        let mut movers = sim.traffic.frame_held(dt, world);
+        let mut set = std::mem::take(&mut sim.traffic.props);
+        self.step_among(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, Some((&mut set, &mut movers)));
+        let h = self.flown.as_mut().expect("checked");
+        let mut weighed = game_sim::contact::Weighed { body: &mut h.ride.body, mass: h.collision.mass };
+        let mut strikers = [game_sim::contact::Other { collider: &mut h.collision.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+        set.step_with(dt, &movers, &mut strikers);
+        sim.traffic.props = set;
+        sim.traffic.frame_late(dt, world);
+    }
+
+    /// [`KiowaRide::step_through`]'s frame, with `props` the knockable props held out of the
+    /// traffic's frame and their movers ([`KiowaRide::step_traffic`]); their bodies are written back
+    /// as its resolve pushed them, their step left to the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn step_among(
+        &mut self,
+        pad: &game_sim::input::Pad,
+        stick: &game_sim::input::AxisRange,
+        table: &game_sim::bindings::Table,
+        tables: &game_sim::ride::Tables,
+        dt: F,
+        world: &mut dyn World,
+        props: Option<(&mut game_sim::prop_set::PropSet, &mut game_sim::prop_set::PropMovers)>,
+    ) {
         use game_sim::input::Axis;
         let Some(h) = self.flown.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
@@ -3609,8 +3658,13 @@ impl KiowaRide {
         if h.record.is_some() && h.mxvatv.is_some() && takes_mxvatv_record(world) {
             return self.step_on_record(input, tables, dt, world);
         }
-        // Its rays meet the blades its nearby list holds (C24).
-        let (movers, struck) = h.collision.search_knocking(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered());
+        // Its rays meet the blades its nearby list holds (C24), and the knockable props after the
+        // world (S471).
+        let (mut set, prop_movers) = match props {
+            Some((s, m)) => (Some(s), Some(m)),
+            None => (None, None),
+        };
+        let (movers, struck, knocked) = h.collision.search_among(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered(), set.as_deref());
         let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
         let mut blade_movers = Vec::new();
         if blades_out {
@@ -3619,15 +3673,32 @@ impl KiowaRide {
             h.wreckage.blades.file_struck(struck);
             blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
         }
+        // The struck props woken and searched in the pass, their rays on its hull, after the blades'.
+        let mut pushed = Vec::new();
+        if let (Some(set), Some(prop_movers)) = (set.as_deref_mut(), prop_movers) {
+            let hull = h.wreckage.blades.hull.clone();
+            let mut props = game_sim::kiowa::KiowaProps { set, me: 0, hull: hull.as_deref() };
+            pushed = h.collision.strike_props(&mut props, h.wreckage.blades.others(), knocked, Some((dt, &mut *world, prop_movers)));
+        }
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
-        let mut around =
-            KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None, tree: self.tree.as_ref(), curve: &tables.curve, blade_movers: &blade_movers };
+        let mut around = KiowaAround {
+            ground,
+            wreckage: &mut h.wreckage,
+            put_back: None,
+            tree: self.tree.as_ref(),
+            curve: &tables.curve,
+            blade_movers: &blade_movers,
+            props: &mut pushed,
+        };
         let asked = match h.mxvatv.as_mut() {
             Some(m) => h.kiowa.tick_mxvatv(m, &mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around),
             None => h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around),
         };
         self.wrecks += u32::from(asked.wreck.is_some());
         let put_back = around.put_back;
+        if let Some(set) = set {
+            set.pushed(&pushed);
+        }
         if blades_out || h.wreckage.blades.started.iter().any(|s| s.out) {
             h.wreckage.blades.post(dt);
         }
