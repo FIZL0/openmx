@@ -160,6 +160,47 @@ pub fn seat(model: &Model) -> Option<V3> {
     Some(sum.scale(0.25).add(SEAT_FROM_LIMBS))
 }
 
+/// The buggy's driver's clip (S265): the rider build hands a kind 3 machine's record `buggy_steer`
+/// alone (rider_machine_clips, the second name empty).
+pub const BUGGY_STEER: &str = "buggy_steer";
+/// The monster truck's and the baja's (kinds 4 and 5): `baja_steer` alone.
+pub const BAJA_STEER: &str = "baja_steer";
+
+/// The steer clip the driver of the car drawn by `model_name` plays: [`BUGGY_STEER`] for the buggy's
+/// two liveries, [`BAJA_STEER`] for the truck's and the baja's.
+pub fn steer_clip(model_name: &str) -> &'static str {
+    if model_name.to_ascii_lowercase().starts_with("buggy") { BUGGY_STEER } else { BAJA_STEER }
+}
+
+/// The driver's node matrices (S265), as [`crate::biplane::pilot_palette`] the pilot's: the body
+/// posed by the car's one steer clip (`clip`, [`steer_clip`]) sampled at `phase` of its length — the
+/// selection's single-clip arm, the mix axis unread — held on to the seat's `anchors` at full
+/// strength with both feet on, and the body's own pose, hold and feet put back. `phase` is the
+/// body's phase axis, which the car's driver request eases towards `0.5 * (1 + steer)`, so a
+/// centred wheel sits half-way through the clip. `None` if the rider's archive lacks the clip.
+///
+/// No steering wheel is turned: only the buggy's model has one (`steeringWheel`), and the original
+/// looks it up nowhere (the name is not in the program), so it stays at its bind.
+pub fn driver_palette(body: &mut crate::rider::Body, anchors: &crate::rider::Anchors, clip: &str, phase: f32) -> Option<Vec<M4>> {
+    use game_sim::motion::Animations;
+    let set = &mut body.rig.set;
+    set.load(clip);
+    let id = set.id(clip)?;
+    let (pose, hold, feet) = (set.pose.clone(), body.hold, body.feet);
+    {
+        let set = &mut body.rig.set;
+        let b = &set.clips[id.0 as usize];
+        b.clip.pose(phase.clamp(0.0, 1.0) * b.clip.duration(), &b.joints, &mut set.pose);
+    }
+    body.hold = 1.0;
+    body.feet = Default::default();
+    let palette = body.palette(Some(anchors)).0;
+    body.rig.set.pose = pose;
+    body.hold = hold;
+    body.feet = feet;
+    Some(palette)
+}
+
 /// Where a node of the model sits in the model's own space, by name.
 pub fn node_at(model: &Model, name: &str) -> Option<V3> {
     let i = find(model, name)?;

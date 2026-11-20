@@ -164,3 +164,69 @@ fn each_car_parks_on_its_own_track_and_is_drawn_driven() {
     assert!(said.contains("none parked here"), "free06 parks a car:\n{said}");
     assert!(!said.lines().any(|l| l.starts_with("picture bay: car:")), "free06 draws a car's bay:\n{said}");
 }
+
+/// S265: [`tape`] with the left stick's x held at `x` from tick 30 beside the gas: `00` full left,
+/// `ff` full right, `7f` centred.
+fn steer_tape(frames: usize, machine: &str, x: &str) -> String {
+    let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape the {machine} steered {x}\n");
+    for f in 0..frames {
+        let (gas, x) = if f >= 30 { ("ff", x) } else { ("00", "7f") };
+        text += &format!("frame 0x3d08850a 0x0079ffbf7f7f{x}7f000000000000{gas}{} -\n", "00".repeat(17));
+    }
+    text + &format!("switch 10 {machine}\n")
+}
+
+/// S265: a driven car's driver leans with its steer. The original hands a car's driver one clip
+/// (`buggy_steer` for the buggy, `baja_steer` for the truck and the baja), played at the body's
+/// phase axis, which the car's driver request eases towards `0.5 * (1 + steer)`. Each car is driven
+/// on the gas with the stick held left, then right: its driver plays its car's clip, the phase
+/// follows the steer to the other side of a half, and the body drawn leans across (its head, the
+/// topmost node, moves across the cab). A shot of each turn is written for the eye. Skips without a disc.
+#[test]
+fn a_driven_cars_driver_leans_with_its_steer() {
+    if let Err(e) = game_render::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let frames = 70;
+    for (track, machine, model) in CARS {
+        let clip = car::steer_clip(model);
+        let mut heads = Vec::new();
+        for (side, x) in [("left", "00"), ("right", "ff")] {
+            let play = scratch().join(format!("s265-{machine}-{side}.tape"));
+            std::fs::write(&play, steer_tape(frames + 5, machine, x)).expect("the tape is written");
+            let shot = scratch().join(format!("s265-{machine}-{side}.png"));
+            let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+                .current_dir(&root)
+                .args(["--headless", "--track", track, "--size", "640x448", "--overlay", "none", "--steady-clock"])
+                .args(["--renderer", "gpu", "--trace-picture", "--frames", &frames.to_string(), "--play"])
+                .arg(&play)
+                .arg("--shot")
+                .arg(&shot)
+                .args(["--shot-frame", &(frames - 2).to_string()])
+                .output()
+                .expect("the shell runs");
+            let said = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(png_size(&shot), (640, 448), "{}", shot.display());
+            let drivers: Vec<&str> = said.lines().filter(|l| l.starts_with("picture driver: seat 0 ")).collect();
+            let last = drivers.last().unwrap_or_else(|| panic!("{machine} {side}: no driver drawn:\n{said}"));
+            assert_eq!(word(last, "clip"), clip, "{machine} {side}: not posed by its car's clip: {last}");
+            let [phase] = after::<1>(last, "phase");
+            let [steer] = after::<1>(last, "steer");
+            assert!(steer.abs() > 0.5, "{machine} {side}: the stick never steered: {last}");
+            // The lag has caught the target up by the end: the phase on the steer's side of a half.
+            let want = 0.5 * (1.0 + steer);
+            assert!((phase - want).abs() < 0.05, "{machine} {side}: phase {phase}, the steer's {want}: {last}");
+            heads.push((steer, after::<3>(last, "top")));
+        }
+        let ((s_left, h_left), (s_right, h_right)) = (heads[0], heads[1]);
+        assert!(s_left.signum() != s_right.signum(), "{machine}: left and right steered the same way: {s_left} {s_right}");
+        // Held to the wheel and the seat, the head swings ~0.13 ft across the monster's cab from
+        // full lock to full lock; under the plane pilot's default lean it never moved at all.
+        let lean = (h_left[0] - h_right[0]).hypot(h_left[2] - h_right[2]);
+        eprintln!("{machine}: steer {s_left:.3}/{s_right:.3}, the head at {h_left:?}/{h_right:?}, {lean:.3} ft apart");
+        assert!(lean > 0.05, "{machine}: the driver does not lean across: head {h_left:?} vs {h_right:?}");
+    }
+}
