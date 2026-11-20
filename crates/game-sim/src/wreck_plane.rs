@@ -179,6 +179,9 @@ pub struct InWorld {
     /// The planes on its resolve, after the props, by their place among the planes its search had
     /// (the fleet's planes with a met, in order; a lone plane's frame has only `0`).
     pub planes: Vec<usize>,
+    /// The parked cars on its resolve after the planes (S486a, [`search_downed_parked`]): where each
+    /// one's body is, as [`InWorld::place`] is.
+    pub cars: Vec<usize>,
     /// Its frame ran in the plane's world. A plane whose frame never ran leaves it to
     /// [`step_downed_by`], which steps it after as before F32 ([`WreckBike::step_flown`]).
     pub stepped: bool,
@@ -229,6 +232,21 @@ impl InWorld {
 pub struct Downed {
     searched: Vec<(usize, Vec<contact::Mover>, Vec<(usize, usize)>, Option<(usize, usize)>)>,
     planes: Vec<usize>,
+    /// The parked cars' places in the first plane's [`Met::wrecks`] (S486a), its first entries.
+    cars: Vec<usize>,
+}
+
+/// **A parked car in a flown plane's lane** (S486a, [`search_downed_parked`]): its hull where its
+/// body's node stands and its body, each the copy nearest the plane.
+#[derive(Clone, Debug)]
+pub struct ParkedIn {
+    pub hull: Hull,
+    pub body: Pushed,
+}
+
+/// A body of the plane's world as a wreck bike's resolve pushes it.
+pub fn flown_of(p: &Pushed) -> Flown {
+    Flown { seat: p.object, collider: p.collider, body: p.body, mass: p.mass, quad: None }
 }
 
 impl Downed {
@@ -260,13 +278,57 @@ pub fn search_downed(riders: &mut [&mut Rider], plane: &Flight, dt: F, world: &m
 /// [`Met::wrecks`] under one `object` (its place among the searched), which the joint frame pushes as
 /// one body. `riders` leaves out the flyers' own.
 pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, world: &mut dyn World, mets: &mut [&mut Met]) -> Downed {
+    search_downed_in(riders, planes, &[], &mut [], dt, world, mets)
+}
+
+/// **[`search_downed`] among the parked cars** (S486a): the Sim's plane lane, where the flown plane
+/// meets the parked cars as it meets a downed rider's wreck bike. Each car's hull and body go first
+/// in `met`'s [`Met::hulls`] and [`Met::wrecks`] (`met` holding none yet), so the plane's rays strike
+/// the hull (their mirrors left in [`Met::hit`]) and its resolve pushes the body; and every downed
+/// rider's wreck bike is searched with the cars' hulls after the plane's (each the copy nearest the
+/// bike), stepped in the plane's world with their bodies after the plane's on its resolve
+/// ([`InWorld::cars`]). After [`step_downed`] `met`'s wrecks are the cars' bodies, in order, as the
+/// plane's resolve and the wreck bikes' left them. The answer's second list: the cars a wreck bike's
+/// rays struck, whose struck listeners wake them. A plane with no hull searches no wreck bike, which
+/// is left to its rider's own frame as before ([`crate::Sim::wreck_meets_parked`] then meets the cars).
+pub fn search_downed_parked(
+    riders: &mut [&mut Rider],
+    plane: &Flight,
+    cars: &[ParkedIn],
+    dt: F,
+    world: &mut dyn World,
+    met: &mut Met,
+) -> (Downed, Vec<bool>) {
+    for c in cars {
+        let j = met.wrecks.len();
+        met.hulls.resize(j, None);
+        met.hulls.push(Some(c.hull.clone()));
+        met.wrecks.push(c.body.clone());
+    }
+    let mut struck = vec![false; cars.len()];
+    let mut out = search_downed_in(riders, &[plane], cars, &mut struck, dt, world, &mut [met]);
+    out.cars = (0..cars.len()).collect();
+    (out, struck)
+}
+
+/// [`search_downed_by`] with `cars` (S486a, [`search_downed_parked`]) in every wreck bike's world
+/// after the planes' hulls; `struck` says which a wreck bike's rays struck.
+fn search_downed_in(
+    riders: &mut [&mut Rider],
+    planes: &[&Flight],
+    cars: &[ParkedIn],
+    struck: &mut [bool],
+    dt: F,
+    world: &mut dyn World,
+    mets: &mut [&mut Met],
+) -> Downed {
     let mut out = Downed::default();
     let hulls: Vec<(usize, crate::rider_contact::Hull<'_>)> = planes.iter().enumerate().filter_map(|(k, p)| Some((k, p.hull(0)?))).collect();
     if hulls.is_empty() {
         return out;
     }
     out.planes = hulls.iter().map(|&(k, _)| k).collect();
-    let capacity = hulls.iter().map(|(_, h)| h.capacity).max().unwrap_or(0);
+    let capacity = hulls.iter().map(|(_, h)| h.capacity).chain(cars.iter().map(|c| c.hull.capacity)).max().unwrap_or(0);
     for (i, r) in riders.iter_mut().enumerate().filter(|(_, r)| down(r)) {
         let meshes: Vec<_> = hulls.iter().map(|&(k, _)| hull_mesh(r, planes[k])).collect();
         let Some(c) = r.crash.as_mut() else { continue };
@@ -278,10 +340,20 @@ pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, wo
                 at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
                 Plane { mesh: h.mesh, at, velocity: planes[k].body.velocity }
             })
+            .chain(cars.iter().map(|car| {
+                let mut at = car.hull.at;
+                at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
+                Plane { mesh: &car.hull.mesh, at, velocity: car.hull.velocity }
+            }))
             .collect();
         let (ground, props, trees) = world.wooded_near(from);
-        let (movers, mirrors) = c.bike.search_flown(dt, ground.as_deref(), props, trees, &them, capacity);
+        let (movers, mut mirrors) = c.bike.search_flown(dt, ground.as_deref(), props, trees, &them, capacity);
         drop(ground);
+        // Its strikes on the cars wake them (S486a); its entries on them stay for its resolve.
+        let on_cars = mirrors.split_off(hulls.len().min(mirrors.len()));
+        for (s, m) in struck.iter_mut().zip(&on_cars) {
+            *s |= !m.is_empty();
+        }
         let w = out.searched.len();
         let b = &c.bike;
         let mut placed = Vec::with_capacity(hulls.len());
@@ -314,7 +386,8 @@ pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, wo
                 }
             }
             bike.struck.struck = struck.struck;
-            met.downed.push(InWorld { bike, movers: movers.clone(), place: j, planes: out.planes.clone(), stepped: false });
+            let cars = if k == 0 { (0..cars.len()).collect() } else { Vec::new() };
+            met.downed.push(InWorld { bike, movers: movers.clone(), place: j, planes: out.planes.clone(), cars, stepped: false });
             Some((k, met.downed.len() - 1))
         });
         out.searched.push((i, movers, placed, held));
@@ -347,7 +420,7 @@ pub fn step_downed_by(
     world: &dyn World,
     own_step: bool,
 ) {
-    let wrecks: Vec<Vec<Pushed>> = mets.iter_mut().map(|m| std::mem::take(&mut m.wrecks)).collect();
+    let mut wrecks: Vec<Vec<Pushed>> = mets.iter_mut().map(|m| std::mem::take(&mut m.wrecks)).collect();
     let mut held: Vec<Vec<InWorld>> = mets.iter_mut().map(|m| std::mem::take(&mut m.downed)).collect();
     for (i, movers, placed, at) in downed.searched {
         let r = &mut *riders[i];
@@ -363,9 +436,19 @@ pub fn step_downed_by(
         if !in_world {
             let from = c.bike.origin();
             let mut flown: Vec<Flown> = downed.planes.iter().map(|&k| planes[k].flown(k, from, world)).collect();
+            // The parked cars' bodies after the planes' (S486a).
+            let cars = wrecks.first().map_or(Vec::new(), |w| downed.cars.iter().filter_map(|&p| w.get(p)).map(flown_of).collect());
+            flown.extend(cars);
             c.bike.step_flown(dt, &movers, &mut flown);
             for (&k, f) in downed.planes.iter().zip(&flown) {
                 planes[k].pushed(f);
+            }
+            if let Some(w) = wrecks.first_mut() {
+                for (&p, f) in downed.cars.iter().zip(&flown[downed.planes.len()..]) {
+                    if let Some(b) = w.get_mut(p) {
+                        (b.collider, b.body) = (f.collider, f.body);
+                    }
+                }
             }
         }
         c.bike.flown = own_step;
@@ -374,6 +457,10 @@ pub fn step_downed_by(
             c.resting = length(c.bike.body.velocity) <= w.part.speed_threshold
                 && length(c.bike.body.rates) <= w.part.angular_rate_threshold;
         }
+    }
+    // The parked cars' bodies stay in the first met's wrecks for the caller (S486a).
+    if let (Some(m), Some(w)) = (mets.first_mut(), wrecks.first()) {
+        m.wrecks = downed.cars.iter().filter_map(|&p| w.get(p).cloned()).collect();
     }
 }
 
