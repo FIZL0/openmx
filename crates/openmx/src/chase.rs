@@ -253,7 +253,7 @@ pub fn untamed_follow(
     race: &mut game_sim::camera::Race,
     dt: F,
     rider: &Ridden,
-    scene: &mut impl game_sim::camera::Surface,
+    scene: &mut (impl game_sim::camera::Surface + game_sim::camera::Obstacles),
 ) -> game_sim::camera::View {
     cam.set_preset(race.cam.preset);
     (cam.user_yaw, cam.user_pitch) = (race.cam.user_yaw, race.cam.user_pitch);

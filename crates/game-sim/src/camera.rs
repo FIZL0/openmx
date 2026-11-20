@@ -2499,6 +2499,28 @@ fn untamed_floor(point: &mut Vf, scene: &mut impl Surface) {
     }
 }
 
+/// `a · b` over `xyz`, in the original's order: `z`, then `y`, then `x`.
+fn untamed_dot(a: Vf, b: Vf) -> F {
+    F(a.z()) * F(b.z()) + F(a.y()) * F(b.y()) + F(a.x()) * F(b.x())
+}
+
+/// Does a hit carry a normal (`FUN_0022b730`): any of its `xyz` not zero.
+fn untamed_has_normal(n: Vf) -> bool {
+    n.x() != 0.0 || n.y() != 0.0 || n.z() != 0.0
+}
+
+/// `point` moved along the hit's normal until it is at least `clearance` in front of the hit's plane
+/// (`FUN_0022b650`, `FUN_001080c0`, `FUN_0022b630`); a hit with no normal leaves it.
+fn untamed_keep_off(point: &mut Vf, hit: Obstacle, clearance: F) {
+    if !untamed_has_normal(hit.normal) {
+        return;
+    }
+    let short = clearance - untamed_dot(point.sub(hit.point), hit.normal);
+    if short > 0.0 {
+        *point = add3(*point, scale(hit.normal, short));
+    }
+}
+
 /// Where one frame of the Untamed camera wants the eye and the look-at, before the springs, and how
 /// the springs are to run (`FUN_004b52b0`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2529,12 +2551,12 @@ pub struct UntamedGoal {
 /// ahead` along its forward row. On the ground the pitch is scaled by how upright the quad is. Two
 /// springs then chase those goals: past 3 ft of follow distance the eye on the orbit spring round
 /// the target point and the look-at on the straight one, with the preset's ground or air
-/// tightnesses.
+/// tightnesses. Before the springs, two sweeps keep the eye's goal out of walls and props and over
+/// the ground (MD255, [`UntamedFollow::sweep_goal`], [`UntamedFollow::sweep_from_eye`]).
 ///
-/// What is not here: the filter's two world sweeps (`FUN_003ab3a0`, `FUN_003ab800`), which push
-/// the eye out of walls and props; only the eye's floor over the ground is kept. The two boost bits
-/// that stiffen the springs (filter bytes `+0x28`/`+0x29`) are clear in every image read and are left
-/// out, and so is the pad's field-of-view zoom (`+0xa4`, zero).
+/// What is not here: the look-at's boost bit (filter `+0x28`, which stiffens its straight spring
+/// 1.5 times) has no setter in the filter and is left out, and so is the pad's field-of-view zoom
+/// (`+0xa4`, zero).
 #[derive(Clone, Debug, Default)]
 pub struct UntamedFollow {
     pub presets: Vec<UntamedPreset>,
@@ -2632,30 +2654,104 @@ impl UntamedFollow {
         goal
     }
 
-    /// One frame (`FUN_004b52b0` then the filter, `FUN_003aae40`): the goals, the eye's goal kept
-    /// over the ground, the springs (or a snap), and the eye kept over the ground again.
-    pub fn update(&mut self, dt: F, rider: &Ridden, scene: &mut impl Surface) -> View {
+    /// One frame (`FUN_004b52b0` then the filter, `FUN_003aae40`).
+    ///
+    /// A snap (a preset that does not filter, or the first frame) puts both springs on their goals,
+    /// then sweeps the eye's goal ([`UntamedFollow::sweep_goal`]); the frame draws the goals as
+    /// handed in, unswept, as the filter's output words are not written again on that path.
+    /// Otherwise the eye's goal is swept, then swept again from where the eye is
+    /// ([`UntamedFollow::sweep_from_eye`]), the springs run, and the frame draws where they are.
+    /// Either sweep finding a prop runs the eye on the straight spring this frame, at 0.8 of its
+    /// tightness, so it slides along the prop rather than swinging round through it.
+    pub fn update(&mut self, dt: F, rider: &Ridden, scene: &mut (impl Surface + Obstacles)) -> View {
         let goal = self.goal(rider);
         self.look.goal = goal.look;
         self.eye.goal = goal.eye;
-        untamed_floor(&mut self.eye.goal, scene);
         let origin = goal.target;
         if !goal.filter || self.snap {
             self.look.snap(origin);
             self.eye.snap(origin);
             self.snap = false;
+            self.sweep_goal(origin, scene);
+            return View { position: goal.eye, look_at: goal.look, fov: goal.fov };
+        }
+        let mut pressed = self.sweep_goal(origin, scene);
+        pressed |= self.sweep_from_eye(scene);
+        let carried = Vf::new(rider.target.vel.x(), rider.target.vel.y(), rider.target.vel.z(), 0.0);
+        if goal.eye_orbits && !pressed {
+            self.eye.orbit(goal.follow_tightness, dt, origin, carried);
         } else {
-            let carried = Vf::new(rider.target.vel.x(), rider.target.vel.y(), rider.target.vel.z(), 0.0);
-            if goal.eye_orbits {
-                self.eye.orbit(goal.follow_tightness, dt, origin, carried);
-                self.look.straight(goal.look_tightness, dt, origin);
-            } else {
-                self.eye.straight(goal.follow_tightness, dt, origin);
-                self.look.orbit(goal.look_tightness, dt, origin, carried);
+            let k = if pressed { goal.follow_tightness * 0.8 } else { goal.follow_tightness };
+            self.eye.straight(k, dt, origin);
+        }
+        if goal.eye_orbits {
+            self.look.straight(goal.look_tightness, dt, origin);
+        } else {
+            self.look.orbit(goal.look_tightness, dt, origin, carried);
+        }
+        View { position: self.eye.pos, look_at: self.look.pos, fov: goal.fov }
+    }
+
+    /// The filter's first sweep (`FUN_003ab3a0`), on the eye's goal: the line from the target point
+    /// out to it, up to three times against the world, then once against the props, then the floor.
+    ///
+    /// Each world hit whose face looks back at the target point moves the line's end 2 ft out in
+    /// front of the face, along its normal, so the eye slides along a wall rather than being pulled
+    /// in; a face that looks away (the line leaving from behind it) moves the start 0.5 ft past it.
+    /// The original asks the world's triangles for those, and the props through its collision
+    /// object; here [`Obstacles::nearest`] answers both, and since it culls back faces only the
+    /// first kind reaches this. A prop on the line from the target point to the moved end moves the
+    /// end 2.5 ft out from it, and says so (the filter's `+0x29`). The goal is then the moved end
+    /// (the original also blends it with the old goal by how long the eye has been pressed, and
+    /// drops the blend), and both the eye and its goal are kept [`UNTAMED_EYE_FLOOR`] over the
+    /// ground (`FUN_003a9e80`).
+    pub fn sweep_goal(&mut self, origin: Vf, scene: &mut (impl Surface + Obstacles)) -> bool {
+        let mut pressed = false;
+        let d = self.eye.goal.sub(origin);
+        if untamed_dot(d, d).sqrt() > 0.0 {
+            let mut start = origin;
+            let mut end = self.eye.goal;
+            for _ in 0..3 {
+                let Some(hit) = scene.nearest(start, end) else { break };
+                if untamed_dot(d, hit.normal) > 0.0 {
+                    untamed_keep_off(&mut start, hit, F(0.5));
+                } else {
+                    untamed_keep_off(&mut end, hit, F(2.0));
+                }
             }
+            if let Some(hit) = scene.nearest(origin, end) {
+                if untamed_has_normal(hit.normal) {
+                    untamed_keep_off(&mut end, hit, F(2.5));
+                    pressed = true;
+                }
+            }
+            self.eye.goal = end;
         }
         untamed_floor(&mut self.eye.pos, scene);
-        View { position: self.eye.pos, look_at: self.look.pos, fov: goal.fov }
+        untamed_floor(&mut self.eye.goal, scene);
+        pressed
+    }
+
+    /// The filter's second sweep (`FUN_003ab800`), once the eye's goal is swept: from where the eye
+    /// is to as far past the goal again, when the eye is more than 0.1 ft off it. A prop on that
+    /// line with the goal less than 1 ft in front of it puts the goal 2 ft in front, and says so.
+    /// The original also keeps the last ten props it met and the last goal clear of one; nothing in
+    /// the camera reads either.
+    pub fn sweep_from_eye(&mut self, scene: &mut impl Obstacles) -> bool {
+        let d = self.eye.goal.sub(self.eye.pos);
+        if untamed_dot(d, d).sqrt() <= 0.1 {
+            return false;
+        }
+        let Some(hit) = scene.nearest(self.eye.pos, add3(self.eye.goal, d)) else { return false };
+        if !untamed_has_normal(hit.normal) {
+            return false;
+        }
+        let into = untamed_dot(self.eye.goal.sub(add3(hit.point, hit.normal)), hit.normal);
+        if into < 0.0 {
+            self.eye.goal = add3(self.eye.goal, scale(hit.normal, F::ONE - into));
+            return true;
+        }
+        false
     }
 }
 
