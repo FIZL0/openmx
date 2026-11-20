@@ -4180,6 +4180,17 @@ machine_placement boot 0x0020f6e0 "%s%s\machine.txt" [Machines] NumberOfMachines
 #                                 11 is on flat ground (normal 0, 0.99999994, 0) and none sets
 #                                 SetGroundHeight; free06's [Machine1] is the one section with it
 #                                 (FALSE). Journal 2026-11-02-s205-biplane-spawn-up.
+#                                 R52: the slots walked are the event's machine slots, not the
+#                                 players: count = (+0x11c != 6) + (+0x128 != 6) (kind 6 none).
+#                                 +0x120 (byte) clear: the slot kind's own "<Kind>%d" (1 Biplane,
+#                                 2 Helicopter, 3 Buggy, 4 Monster, 5 Baja); set: the
+#                                 MachineRacer = TRUE "Machine%d" of 1..NumberOfMachines.
+#                                 recording2/first_recording hold (4, 1): free09's truck. S133's
+#                                 free10/free11 images (6): nothing; C34's free06 (3, 0): [Buggy1].
+#                                 Booted with (2|1|5, 1) (research/r52/boot.py) free06's
+#                                 helicopter, free10's biplane and free07's baja are parked,
+#                                 their hull at machine +0x178 as the car's; the fliers' bodies
+#                                 never sleep (research/r52/index.md).
 freeride_near_machine boot 0x003a8330 the switch trigger, each frame for the HUD's player: for kinds
 #                                     0..5 ("MotocrossVehicle", "Biplane", "Helicopter", "MXBuggy",
 #                                     "MXMonsterTruck", "MXBaja"), unless the kind is locked in the
