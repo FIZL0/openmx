@@ -10954,6 +10954,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 match change {
                     race_start::Change::Lap { player, lap } => println!("race: player {} on lap {lap}", player + 1),
                     race_start::Change::Place { player, place } => println!("race: player {} in place {place}", player + 1),
+                    // C36: the crowd's cheer or boo on a place change, where the track has a crowd.
+                    race_start::Change::Passed(n) => {
+                        if let (Some(sound), Some(call)) = (&mut sound, audio::crowd_call(&n, |p| laps.card(p))) {
+                            sound.crowd(call);
+                        }
+                    }
                     race_start::Change::Finished { player, place } => {
                         let Some(card) = laps.card(player) else { continue };
                         // P354: the human's finish heard as the original hears a player's — seat 0,

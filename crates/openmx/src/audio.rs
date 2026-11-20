@@ -2607,6 +2607,9 @@ pub struct WorldSounds {
     pub crowd_bed: List,
     pub cheer: List,
     pub oh: List,
+    /// `event.aud`'s `[CrowdPlayerCheer]` and `[CrowdBoo]` (C36), read as the others with the crowd.
+    pub player_cheer: List,
+    pub boo: List,
 }
 
 impl WorldSounds {
@@ -2644,7 +2647,12 @@ impl WorldSounds {
         } else {
             Default::default()
         };
-        WorldSounds { fixed, random, crowd, crowd_bed, cheer, oh }
+        let (player_cheer, boo) = if crowd {
+            (List::read(section(&e, "CrowdPlayerCheer"), lib), List::read(section(&e, "CrowdBoo"), lib))
+        } else {
+            Default::default()
+        };
+        WorldSounds { fixed, random, crowd, crowd_bed, cheer, oh, player_cheer, boo }
     }
 }
 
@@ -3504,6 +3512,44 @@ impl HitTable {
     }
 }
 
+/// C36: what the crowd plays on a race place change ([`crowd_call`], [`Sound::crowd`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CrowdCall {
+    /// An AI rider gained a place: the Cheer, panned at its bike.
+    Cheer([f32; 3]),
+    /// A local human gained a place: the PlayerCheer stream, unplaced.
+    PlayerCheer,
+    /// A human lost a place to an AI rider who is now first: the Boo, unplaced.
+    Boo,
+}
+
+/// C36: the crowd's answer to the ranking's place change `n` (oracle `bike_place_change_crowd`,
+/// which `race_ranking` calls), `card` naming the cards as `n` does. On a gain, once the gainer's
+/// race clock has run 5 s: the PlayerCheer for a player's card, else the Cheer where its card saw its
+/// rider. On a loss: the Boo when the loser is a player's card, the passer is not, and the passer is
+/// in first place.
+pub fn crowd_call<'a>(n: &game_sim::race::FinishNotice, card: impl Fn(usize) -> Option<&'a game_sim::race::LapCard>) -> Option<CrowdCall> {
+    use game_sim::race::{FinishNotice, card_flags::PLAYER};
+    match *n {
+        FinishNotice::PlaceGained { card: k, .. } => {
+            let c = card(k)?;
+            if !(c.race_time.0 >= 5.0) {
+                None
+            } else if c.flags & PLAYER != 0 {
+                Some(CrowdCall::PlayerCheer)
+            } else {
+                let at = c.seen.now;
+                Some(CrowdCall::Cheer([at.x(), at.y(), at.z()]))
+            }
+        }
+        FinishNotice::PlaceLost { card: k, ahead: Some(by) } => {
+            let (c, b) = (card(k)?, card(by)?);
+            (c.flags & PLAYER != 0 && b.flags & PLAYER == 0 && b.place == 1).then_some(CrowdCall::Boo)
+        }
+        _ => None,
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -3689,6 +3735,9 @@ pub struct Sound {
     toys_started: bool,
     dice: Dice,
     last: [i32; 3],
+    /// C36: the crowd's last Cheer, PlayerCheer and Boo, and each list's no-repeat pick.
+    crowd_voices: [Option<VoiceId>; 3],
+    crowd_last: [i32; 3],
 }
 
 impl Sound {
@@ -3714,6 +3763,8 @@ impl Sound {
             toys_started: false,
             dice: Dice::new(0x5eed),
             last: [-1; 3],
+            crowd_voices: [None; 3],
+            crowd_last: [-1; 3],
         }
     }
 
@@ -3944,6 +3995,27 @@ impl Sound {
         }
     }
 
+    /// **The crowd's place-change call** (C36, oracle `crowd_play`): on a track with a crowd, the
+    /// call's list picked and played, but only once that kind's last sound has stopped.
+    pub fn crowd(&mut self, call: CrowdCall) {
+        if !self.world.crowd {
+            return;
+        }
+        let Ok(mut m) = self.mixer.lock() else { return };
+        let (k, list, at) = match call {
+            CrowdCall::Cheer(at) => (0, &self.world.cheer, Some(at)),
+            CrowdCall::PlayerCheer => (1, &self.world.player_cheer, None),
+            CrowdCall::Boo => (2, &self.world.boo, None),
+        };
+        if self.crowd_voices[k].is_some_and(|v| m.playing(v)) {
+            return;
+        }
+        let Some((clip, _)) = list.pick(&mut self.dice, &mut self.crowd_last[k]) else { return };
+        // The original pans the Cheer by its angle and does not fade it with distance.
+        let play = Play { at, near: f32::MAX, far: f32::MAX, bus: Bus::Crowd, ..Play::default() };
+        self.crowd_voices[k] = Some(m.play(clip, play));
+    }
+
     /// The path cars' loops (V74) where the cars are this tick, `at[k]` car `k`'s place in the order
     /// [`Sound::toys`] has them. The first call after the load (or after [`Sound::quiet`]) starts
     /// every enabled one, as the original's are started when the track loads; each later call moves
@@ -4006,6 +4078,7 @@ impl Sound {
         }
         self.started = false;
         self.world_voices.clear();
+        self.crowd_voices = [None; 3];
         self.toys_started = false;
         self.toy_voices.clear();
         for s in &mut self.seats {

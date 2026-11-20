@@ -2881,3 +2881,41 @@ fn a_landed_trick_queues_no_cheer() {
     };
     assert_eq!(voices(true), voices(false), "a landed trick played a crowd sound");
 }
+
+/// **C36: the crowd on a race place change.** The ranking passes the human with an AI rider: the
+/// AI's gain cheers (the Cheer, at its bike), the human's loss to the now-leading AI boos, and a gain
+/// before 5 s on the race clock, or a loss to a passer not first, says nothing. Played on a track with
+/// a crowd, a scripted overtake queues one cheer; a second while it sounds queues none.
+#[test]
+fn a_place_change_cheers_and_boos_as_the_original() {
+    use game_sim::race::{FinishNotice, LapCard, LapRules, card_flags::PLAYER};
+    let card = |flags, place, progress: f32| LapCard { flags, place, progress: F(progress), race_time: F(6.0), ..LapCard::default() };
+    // The AI has gone further now, so the ranking moves it up.
+    let mut cards = vec![card(PLAYER | 2, 1, 100.0), card(2, 2, 120.0)];
+    cards[1].seen.now = Vf::new(1.0, 2.0, 3.0, 0.0);
+    let said = LapRules::rank(&mut cards);
+    let calls: Vec<audio::CrowdCall> = said.iter().filter_map(|n| audio::crowd_call(n, |k| cards.get(k))).collect();
+    assert_eq!(calls, vec![audio::CrowdCall::Cheer([1.0, 2.0, 3.0]), audio::CrowdCall::Boo], "{said:?}");
+    // Before 5 s ridden no cheer; a human passed by an AI not first, no boo.
+    cards[0].race_time = F(4.9);
+    assert_eq!(audio::crowd_call(&FinishNotice::PlaceGained { card: 0, behind: Some(1) }, |k| cards.get(k)), None);
+    cards[0].place = 3;
+    assert_eq!(audio::crowd_call(&FinishNotice::PlaceLost { card: 1, ahead: Some(0) }, |k| cards.get(k)), None);
+    // A human's gain is the PlayerCheer.
+    cards[1].race_time = F(5.0);
+    assert_eq!(audio::crowd_call(&FinishNotice::PlaceGained { card: 1, behind: None }, |k| cards.get(k)), Some(audio::CrowdCall::PlayerCheer));
+
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut s = audio::Sound::new(mixer.clone());
+    s.crowd(audio::CrowdCall::Cheer([0.0; 3]));
+    assert_eq!(mixer.lock().unwrap().voices(), 0, "no crowd on the track, no cheer");
+    s.world.crowd = true;
+    s.world.cheer = audio::List { sounds: vec![(tone(0.5, 2.0), false)] };
+    s.world.boo = audio::List { sounds: vec![(tone(0.5, 2.0), false)] };
+    s.crowd(audio::CrowdCall::Cheer([0.0; 3]));
+    assert_eq!(mixer.lock().unwrap().voices(), 1, "the overtake's cheer");
+    s.crowd(audio::CrowdCall::Cheer([0.0; 3]));
+    assert_eq!(mixer.lock().unwrap().voices(), 1, "a cheer while the last sounds");
+    s.crowd(audio::CrowdCall::Boo);
+    assert_eq!(mixer.lock().unwrap().voices(), 2, "the boo");
+}

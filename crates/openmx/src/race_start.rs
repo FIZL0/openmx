@@ -304,6 +304,10 @@ pub enum Change {
     Lap { player: usize, lap: i32 },
     /// Player `player` is now in place `place`.
     Place { player: usize, place: i32 },
+    /// C36: the ranking's place change as its listeners hear it, a
+    /// [`PlaceGained`](race::FinishNotice::PlaceGained) or [`PlaceLost`](race::FinishNotice::PlaceLost)
+    /// naming players, not list places: who passed whom, for the crowd ([`crate::audio::crowd_call`]).
+    Passed(race::FinishNotice),
     /// Player `player`'s card ran its laps: done at the line, in its place.
     Finished { player: usize, place: i32 },
     /// The race is over (the lap line told the Over).
@@ -330,7 +334,9 @@ impl Watch {
     /// What changed on `laps` since the last look, in the cards' list order, the Over last.
     pub fn look(&mut self, laps: &race::Laps) -> Vec<Change> {
         let mut out = Vec::new();
-        for e in &laps.cards {
+        let n = laps.cards.len();
+        let player = |k: usize| laps.cards[k].player;
+        for (k, e) in laps.cards.iter().enumerate() {
             let c = &e.card.lap;
             let now = (e.player, c.laps, c.place, c.flags & race::card_flags::OUT != 0);
             let was = self.seen.iter_mut().find(|s| s.0 == e.player);
@@ -343,6 +349,13 @@ impl Watch {
             }
             if now.2 != was.2 && now.2 > 0 {
                 out.push(Change::Place { player: e.player, place: now.2 });
+            }
+            // C36: the ranking's own notices, told again from the ranked list as the ranking tells
+            // them: a loss to the card now ahead, a gain on the card now behind.
+            if was.2 != 0 && now.2 > was.2 {
+                out.push(Change::Passed(race::FinishNotice::PlaceLost { card: e.player, ahead: k.checked_sub(1).map(player) }));
+            } else if now.2 < was.2 && now.2 > 0 {
+                out.push(Change::Passed(race::FinishNotice::PlaceGained { card: e.player, behind: (k + 1 < n).then(|| player(k + 1)) }));
             }
             if now.3 && !was.3 && now.1 >= laps.rules.lap.laps {
                 out.push(Change::Finished { player: e.player, place: now.2 });
@@ -721,6 +734,25 @@ mod tests {
             cards: vec![card(0, race::HUMAN_CARD), card(1, race::COMPUTER_CARD)],
             track: std::sync::Arc::new(race::TrackPaths::default()),
         }
+    }
+
+    /// C36: an overtake is told as the ranking tells it, by players: the passer's gain on the card now
+    /// behind it, the passed card's loss to the card now ahead of it.
+    #[test]
+    fn the_watch_tells_who_passed_whom() {
+        use race::FinishNotice::{PlaceGained, PlaceLost};
+        let mut laps = two_cards();
+        let mut w = Watch::default();
+        laps.cards[0].card.lap.place = 1;
+        laps.cards[1].card.lap.place = 2;
+        w.look(&laps);
+        assert!(w.look(&laps).is_empty());
+        // The computer's card goes by: the ranking moves it up the list and writes the places.
+        laps.cards.swap(0, 1);
+        laps.cards[0].card.lap.place = 1;
+        laps.cards[1].card.lap.place = 2;
+        let passed: Vec<Change> = w.look(&laps).into_iter().filter(|c| matches!(c, Change::Passed(_))).collect();
+        assert_eq!(passed, vec![Change::Passed(PlaceGained { card: 1, behind: Some(0) }), Change::Passed(PlaceLost { card: 0, ahead: Some(1) })]);
     }
 
     /// P313: the watch says each lap, place and finish once, the Over once, and the outro's wait
