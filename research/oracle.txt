@@ -14281,3 +14281,17 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   0x003ab800.
 #   Spawn image: camera 0x00f96e60 (user yaw +0x9c, pitch +0xa0, filter switch +0x5c, fov zoom +0xa4),
 #   its filter 0x00f96b50 (boost bytes +0x28/+0x29 clear), target block 0x01be5110.
+# MD255 — the Untamed follow camera's two world sweeps, ported as UntamedFollow::sweep_goal / sweep_from_eye and
+# checked by game-sim tests/untamed_camera.rs against made-up walls (no Untamed image has the eye by a wall).
+# Journal: research/journal/2026-11-19-md255-untamed-camera-sweeps.
+#   goal sweep 0x003ab3a0: world ray 0x004af7b0 (world filter +0x258) up to 3 hits, face normal 0x004a8c50;
+#   a face towards the target point puts the end 2 ft in front, one facing away the start 0.5 ft past it;
+#   then the props (collision object +0x250 on scene +0x254: 0x001b13a0, 0x00113780, 0x001ce150, 0x00114680,
+#   contact point +0x230 / normal +0x240) put it 2.5 ft off and set the eye boost +0x29; then the floor on
+#   the eye and its goal. The 0x003abd50 blend by the boost time +0xb4 goes to a stack slot nobody reads.
+#   eye sweep 0x003ab800: eye pos to goal + (goal - pos), past 0.1 ft; a prop with the goal under 1 ft in
+#   front puts it 2 ft in front, sets +0x29. Ring of 10 contacts +0xe0..+0x200 (index +0x220), last clear
+#   goal +0xd0: write-only. Boost +0x29: eye on the straight spring at 0.8 tightness that frame.
+#   Snap path (filter byte clear): output words +0x260/+0x270 keep the goal as handed in, unswept.
+#   Plane helpers: 0x0022b730 has-normal, 0x0022b650 signed distance, 0x001080c0 scale, 0x0022b630 add.
+#   Debug flags 0x0048ea20..22 all 0 in the spawn image.
