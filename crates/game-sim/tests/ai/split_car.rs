@@ -214,3 +214,304 @@ fn r22_a_split_bike_strikes_the_other_players_parked_buggy() {
         }
     }
 }
+
+// --- F76: the port's car among the bikes, set against R22's strike ---------------------------------
+
+use game_sim::biplane::Body;
+use game_sim::contact::{Collider, Contact, Node, Response, Vehicle};
+
+fn quad(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| ee.f32_at(a + k)))
+}
+
+/// A dynamics body in RAM (`tests/biplane.rs`'s field offsets).
+fn body_of(ee: &Ee, b: u32) -> Body {
+    Body {
+        enabled: ee.u32_at(b) != 0,
+        inv_mass: F(ee.f32_at(b + 0x10)),
+        damping: quad(ee, b + 0x20),
+        last_position: quad(ee, b + 0x50),
+        position: quad(ee, b + 0x60),
+        velocity: quad(ee, b + 0x70),
+        last_force: quad(ee, b + 0x80),
+        force: quad(ee, b + 0x90),
+        accel: quad(ee, b + 0xa0),
+        shock_peak: quad(ee, b + 0xb0),
+        shock: quad(ee, b + 0xc0),
+        step: quad(ee, b + 0xf0),
+        inv_inertia: quad(ee, b + 0x120),
+        ang_damping: quad(ee, b + 0x130),
+        last_quat: quad(ee, b + 0x150),
+        quat: quad(ee, b + 0x170),
+        cofg: quad(ee, b + 0x180),
+        moment: quad(ee, b + 0x190),
+        last_moment: quad(ee, b + 0x1a0),
+        rates: quad(ee, b + 0x1b0),
+        ang_accel: quad(ee, b + 0x1c0),
+        twist_peak: quad(ee, b + 0x1d0),
+        twist: quad(ee, b + 0x1e0),
+    }
+}
+
+fn node_at(ee: &Ee, n: u32) -> Node {
+    Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) }
+}
+
+/// A record's chassis as the other side of a contact (`tests/plane_contact_capture.rs`'s).
+fn vehicle_at(ee: &Ee, rec: u32) -> Vehicle {
+    let v = ee.u32_at(rec + 0xf0);
+    Vehicle {
+        node: node_at(ee, ee.u32_at(rec + 0xf8)),
+        cofg: quad(ee, v + 0x190),
+        mass: F(ee.f32_at(v + 0x210)),
+        inv_mass: F(ee.f32_at(v + 0x214)),
+        inv_inertia: [0xf0, 0x104, 0x118].map(|at| F(ee.f32_at(v + at))),
+        velocity: quad(ee, v + 0x260),
+        rates: quad(ee, v + 0x290),
+        shock: quad(ee, v + 0x170),
+        twist: quad(ee, v + 0x180),
+    }
+}
+
+fn response(ee: &Ee, r: u32, at: u32, angular: u32, spring: u32, friction_mask: u32, friction: u32) -> Response {
+    Response {
+        stiffness: F(ee.f32_at(r + at)),
+        damping: F(ee.f32_at(r + at + 4)),
+        restitution: F(ee.f32_at(r + at + 8)),
+        angular: ee.u32_at(r + angular) != 0,
+        friction: F(ee.f32_at(r + friction)),
+        spring_mask: quad(ee, r + spring),
+        friction_mask: quad(ee, r + friction_mask),
+    }
+}
+
+/// A collision object's tuning in RAM (`tests/contact.rs`'s offsets).
+fn collider_of(ee: &Ee, r: u32) -> Collider {
+    let c = ee.u32_at(r + 0x1f8);
+    Collider {
+        damp: ee.u32_at(r + 0x50) != 0,
+        damp_linear: F(ee.f32_at(r + 0x58)),
+        damp_angular: F(ee.f32_at(r + 0x60)),
+        mass: F(ee.f32_at(r + 0x64)),
+        inv_mass: F(ee.f32_at(r + 0x68)),
+        inv_inertia: quad(ee, r + 0x80),
+        cofg: quad(ee, r + 0x90),
+        cofg_world: quad(ee, r + 0xa0),
+        actors: ee.u32_at(r + 0x110),
+        collides_with: ee.u32_at(r + 0x114),
+        collidable: (c != 0).then(|| ee.u32_at(c + 0x84)),
+        max_depth: F(ee.f32_at(r + 0x118)),
+        scenery: response(ee, r, 0x124, 0x148, 0x150, 0x160, 0x190),
+        actor: response(ee, r, 0x13c, 0x14c, 0x170, 0x180, 0x194),
+        surfaces: std::array::from_fn(|k| F(ee.f32_at(r + 0x198 + 4 * k as u32))),
+        normal_speed: F(ee.f32_at(r + 0x1d8)),
+        relative: quad(ee, r + 0x1e0),
+    }
+}
+
+/// The records the port names by index: player 1's bike and player 2's parked one (its players),
+/// then the car, after them (`2 + 0`, the bikes' others' first after the players).
+const NAMES: [u32; 3] = [BIKE_REC, PARKED_BIKE_REC, CAR_REC];
+
+fn contact_at(ee: &Ee, e: u32) -> Contact {
+    let other = ee.u32_at(e + 0x74);
+    Contact {
+        kind: ee.u32_at(e),
+        from: quad(ee, e + 0x10),
+        on_body: quad(ee, e + 0x20),
+        normal: quad(ee, e + 0x30),
+        point: quad(ee, e + 0x40),
+        arm: quad(ee, e + 0x50),
+        other_arm: quad(ee, e + 0x60),
+        surface: ee.u32_at(e + 0x70) as i32,
+        other: (other != 0).then(|| NAMES.iter().position(|&o| o == other).unwrap_or(99)),
+        mover: (ee.u32_at(e + 0x78) != 0).then_some(99),
+    }
+}
+
+fn list_at(ee: &Ee, r: u32) -> Vec<Contact> {
+    let (n, at) = (ee.u32_at(r + 0x100), ee.u32_at(r + 0x108));
+    (0..n).map(|k| contact_at(ee, at + 0x80 * k)).collect()
+}
+
+/// The fields of two entries that differ, bit for bit.
+fn differ(port: &Contact, orig: &Contact) -> Vec<&'static str> {
+    let quads = [
+        ("from", port.from, orig.from),
+        ("on_body", port.on_body, orig.on_body),
+        ("normal", port.normal, orig.normal),
+        ("point", port.point, orig.point),
+        ("arm", port.arm, orig.arm),
+        ("other_arm", port.other_arm, orig.other_arm),
+    ];
+    let mut bad: Vec<&'static str> = quads.iter().filter(|(_, p, o)| p.to_bits() != o.to_bits()).map(|(n, _, _)| *n).collect();
+    if (port.kind, port.surface, port.other, port.mover) != (orig.kind, orig.surface, orig.other, orig.mover) {
+        bad.push("kind, surface, other or mover");
+    }
+    bad
+}
+
+/// What the strike's frame hands the port, read off the interpreter as each call finds it.
+#[derive(Default)]
+struct Strike {
+    /// At the car's collide: its body, the bike's frame collidable's transform, both bikes' chassis.
+    body: Option<Body>,
+    frame: Option<game_sim::math::Mat4>,
+    vehicles: Vec<Vehicle>,
+    /// After the bike's collide: both lists.
+    car_list: Vec<Contact>,
+    bike_list: Vec<Contact>,
+    /// The car's first resolve: what it finds (its body, its collider, the bikes' colliders and
+    /// chassis, its list), and what it leaves (its body, the bikes' chassis).
+    resolve_in: Option<(Body, Collider, Vec<Collider>, Vec<Vehicle>, Vec<Contact>)>,
+    resolve_out: Option<(Body, Vec<Vehicle>)>,
+}
+
+/// **F76: the port's car meets the bike as R22's buggy does.** R22's image run whole in the
+/// interpreter to the strike (frame 12012), each call's inputs read off RAM as the call finds them:
+///
+/// - the car's search ([`game_sim::car::search_met`]) from its body as its collide finds it, the
+///   bike's frame where its collidable stands, the bike named player 0 and the car `2`: its own
+///   entries (kind 0, naming the bike) and their mirrors on the bike's list (kind 1, naming the
+///   car) are the original's, field for field, bit for bit;
+/// - the car's first resolve ([`game_sim::contact::resolve`] on its list against both players'
+///   chassis, as the car's step resolves it with a met): the car's body and the bike's chassis it
+///   leaves are the original's, bit for bit — the bike stopped from 46.2 ft/s, the car pushed on.
+#[test]
+fn f76_the_ports_car_strikes_and_stops_the_bike_as_r22s() {
+    use game_render::disc::Disc;
+    use game_sim::bike_col::{self, BikeCol};
+    use game_sim::car::{Car, CarModel, Kind};
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let state = kit.ctx(STATE);
+    if !state.exists() {
+        return skip(&format!("{} is not there: research/r22/capture.sh and `./kit state ram` of its save", state.display()));
+    }
+    let Ok(mut disc) = Disc::open_configured() else { return skip("no disc configured") };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL))).expect("the bike's collision files");
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+    let machines = disc.res(&name).expect("machine.res");
+    let file = |n: &str| machines.read_suffix(n).unwrap_or_else(|e| panic!("{n}: {e}"));
+    let car = Car::read_bytes(&file(Kind::Buggy.phy()), Kind::Buggy);
+    let model = CarModel::read(&file("buggy\\anim\\buggy.psg")).expect("the buggy's model");
+    let rays = game_sim::flight_search::Rays::of(&game_sim::track::Rays::parse(&file(Kind::Buggy.rays())).expect("the buggy's rays"));
+
+    let mut ee = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    assert_eq!((ee.u32_at(CAR_REC + 0xf4), ee.u32_at(BIKE_REC + 0xf0)), (CAR_BODY, CHASSIS), "the car's body and the bike's chassis");
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let dt = F(ee.f32_at(app + 0x344));
+    let tick: Rc<std::cell::Cell<u32>> = Rc::default();
+    let seen: Rc<RefCell<Strike>> = Rc::default();
+    for at in [0x0027_08a0u32, 0x0027_0dc0] {
+        let (tick, seen) = (Rc::clone(&tick), Rc::clone(&seen));
+        ee.hooks.insert(
+            at,
+            Box::new(move |ee: &mut Ee| {
+                let a0 = ee.r(4) as u32;
+                let strike = tick.get() == STRIKE - 12007;
+                let resolve = at == 0x0027_0dc0;
+                let first = strike && resolve && a0 == CAR_REC && seen.borrow().resolve_in.is_none();
+                if strike && !resolve && a0 == CAR_REC {
+                    let mut s = seen.borrow_mut();
+                    s.body = Some(body_of(ee, CAR_BODY));
+                    let c = ee.u32_at(BIKE_REC + 0x1f8);
+                    s.frame = Some(game_sim::math::Mat4([0, 1, 2, 3].map(|r| quad(ee, c + 0x120 + 16 * r))));
+                    s.vehicles = [BIKE_REC, PARKED_BIKE_REC].map(|r| vehicle_at(ee, r)).into();
+                }
+                if first {
+                    let colliders = [BIKE_REC, PARKED_BIKE_REC].map(|r| collider_of(ee, r)).into();
+                    let vehicles = [BIKE_REC, PARKED_BIKE_REC].map(|r| vehicle_at(ee, r)).into();
+                    seen.borrow_mut().resolve_in = Some((body_of(ee, CAR_BODY), collider_of(ee, CAR_REC), colliders, vehicles, list_at(ee, CAR_REC)));
+                }
+                through(ee);
+                if strike && !resolve && a0 == BIKE_REC {
+                    let mut s = seen.borrow_mut();
+                    (s.car_list, s.bike_list) = (list_at(ee, CAR_REC), list_at(ee, BIKE_REC));
+                }
+                if first {
+                    seen.borrow_mut().resolve_out = Some((body_of(ee, CAR_BODY), [BIKE_REC, PARKED_BIKE_REC].map(|r| vehicle_at(ee, r)).into()));
+                }
+            }),
+        );
+    }
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    for t in 0..=STRIKE - 12007 {
+        tick.set(t);
+        held_pad(&mut ee);
+        whole_frame(&mut ee, dt, &mut clock);
+    }
+    let s = seen.borrow();
+
+    // The search: the car's own entries on the bike, and their mirrors at the head of its list.
+    let mut body = s.body.expect("the car's collide on the strike");
+    let mut collision = game_sim::car::collision_of_model(&car, &model, &body, rays);
+    let mut met = game_sim::flight::Met {
+        colliders: [BIKE_REC, PARKED_BIKE_REC].map(|r| collider_of(&ee, r)).into(),
+        vehicles: s.vehicles.clone(),
+        bikes: vec![0],
+        named: Some(2),
+        rides: vec![game_sim::flight_search::Bike { transform: s.frame.expect("the bike's frame"), in_world: true }],
+        bike_col: Some(std::sync::Arc::new(col)),
+        ..game_sim::flight::Met::default()
+    };
+    assert!(game_sim::car::strikes_bikes(&met));
+    let mut ground = game_sim::world::Flat { y: F(-1.0e6), ..Default::default() };
+    game_sim::car::search_met(&mut collision, &mut body, &mut ground, dt, &[], &mut met);
+    let own: Vec<Contact> = s.car_list.iter().filter(|c| c.kind == 0).copied().collect();
+    assert_eq!(s.car_list.iter().map(|c| (c.kind, c.other)).collect::<Vec<_>>(), [(0, Some(0)), (0, Some(0)), (0, Some(0)), (1, Some(0))], "the car's list");
+    let port = &collision.record.contacts;
+    assert_eq!(port.len(), own.len(), "the car's own entries\nport {port:?}\noriginal {own:?}");
+    for (k, (a, b)) in port.iter().zip(&own).enumerate() {
+        assert_eq!(differ(a, b), Vec::<&str>::new(), "car entry {k}\nport {a:?}\noriginal {b:?}");
+    }
+    assert_eq!(met.pushed, [true, false], "the players the car's entries name");
+    assert!(met.struck[1].is_empty());
+    let mirrors = &met.struck[0];
+    assert_eq!(mirrors.len(), 3, "the mirrors on the bike {mirrors:?}");
+    for (k, (a, b)) in mirrors.iter().zip(&s.bike_list).enumerate() {
+        assert_eq!(differ(a, b), Vec::<&str>::new(), "bike entry {k}\nport {a:?}\noriginal {b:?}");
+    }
+
+    // The car's first resolve: its body and the bike's chassis as it leaves them.
+    let (mut body, mut collider, mut colliders, mut vehicles, mut list) = s.resolve_in.clone().expect("the car's first resolve");
+    assert!(list.iter().all(|c| c.mover.is_none() && c.other != Some(99)), "the car's list names nothing but the bike {list:?}");
+    let was = vehicles[0].velocity;
+    // The car's step weighs its resolve by its collision's mass (the body wrapper's), not +0x64.
+    let mass = collision.mass;
+    println!("the car's collision mass {:?}, its record's +0x64 {:?}", mass, collider.mass);
+    let mut others: Vec<game_sim::contact::Other<'_>> = colliders
+        .iter_mut()
+        .zip(vehicles.iter_mut())
+        .map(|(collider, v)| game_sim::contact::Other { collider, side: game_sim::contact::Side::Vehicle(v) })
+        .collect();
+    game_sim::contact::resolve(&mut collider, &mut game_sim::contact::Weighed { body: &mut body, mass }, &mut list, &mut others, &[], true);
+    drop(others);
+    let (want_body, want) = s.resolve_out.clone().expect("the car's first resolve");
+    let speed = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    println!("the bike at {} ft/s; after the car's first resolve {} ft/s (original {}), the car at {} ft/s", speed(was), speed(vehicles[0].velocity), speed(want[0].velocity), speed(body.velocity));
+    for (name, a, b) in [
+        ("velocity", body.velocity, want_body.velocity),
+        ("shock", body.shock, want_body.shock),
+        ("rates", body.rates, want_body.rates),
+        ("twist", body.twist, want_body.twist),
+        ("force", body.force, want_body.force),
+        ("moment", body.moment, want_body.moment),
+    ] {
+        assert_eq!(a.to_bits(), b.to_bits(), "the car's {name}: port {a:?}, original {b:?}");
+    }
+    for (name, a, b) in [
+        ("velocity", vehicles[0].velocity, want[0].velocity),
+        ("rates", vehicles[0].rates, want[0].rates),
+        ("shock", vehicles[0].shock, want[0].shock),
+        ("twist", vehicles[0].twist, want[0].twist),
+    ] {
+        assert_eq!(a.to_bits(), b.to_bits(), "the bike's {name}: port {a:?}, original {b:?}");
+    }
+    assert!(speed(was) > 46.0 && speed(vehicles[0].velocity) < 5.0, "the car's resolve did not stop the bike");
+}

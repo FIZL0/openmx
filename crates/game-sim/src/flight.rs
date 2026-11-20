@@ -468,6 +468,11 @@ pub struct Met {
     /// [`Met::wrecks`]: a woken one (or one its rays wake this tick) searches after it, and steps in
     /// its world, its listeners after the plane's and the wreck bikes'.
     pub cars: Vec<crate::car::InPlane>,
+    /// A driven car's own rays on the bikes (F76, [`crate::car::Machine::step_met`]): each of
+    /// [`Met::bikes`]' chassis where it stands, in their order, and the collision files they share
+    /// (the frame mesh). With both and [`Met::named`], the car's search strikes them as a plane's does.
+    pub rides: Vec<flight_search::Bike>,
+    pub bike_col: Option<Arc<crate::bike_col::BikeCol>>,
 }
 
 impl Flight {

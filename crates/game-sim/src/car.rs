@@ -3529,19 +3529,28 @@ impl Machine {
     /// resolved every substep against the bikes' chassis ([`crate::flight::Met`]'s colliders and
     /// vehicles, by player), which a mirror's spring and friction read and never move. Without one,
     /// [`Machine::step_struck`] exactly.
+    ///
+    /// F76: a `met` that names the car among the bikes' others and holds their chassis
+    /// ([`crate::flight::Met::rides`], [`crate::flight::Met::bike_mesh`]) has the car's own rays strike
+    /// them too ([`search_met`]), as R22's split-screen buggy does: its entries name each struck
+    /// player, whose chassis its resolve pushes ([`crate::flight::Met::pushed`]), and the mirrors go
+    /// to the bikes' lists ([`crate::flight::Met::struck`]).
     #[allow(clippy::too_many_arguments)]
     pub fn step_met(
         &mut self,
         car: &Car,
         world: &mut impl crate::world::World,
         collision: &mut Collision,
-        met: Option<&mut crate::flight::Met>,
+        mut met: Option<&mut crate::flight::Met>,
         dt: F,
         acos: &AcosTable,
         curve: &CurveTable,
         noise: &mut impl FnMut(F) -> F,
     ) {
-        let movers = collision.search(&mut self.body, &mut *world, dt);
+        let movers = match met.as_deref_mut().filter(|m| strikes_bikes(m)) {
+            Some(m) => search_met(collision, &mut self.body, &mut *world, dt, &[], m).0,
+            None => collision.search(&mut self.body, &mut *world, dt),
+        };
         if let Some(m) = met.as_deref() {
             collision.file_mirrors(&m.mirrors);
         }
@@ -3611,7 +3620,7 @@ impl Machine {
         car: &Car,
         world: &mut impl crate::world::World,
         collision: &mut Collision,
-        met: Option<&mut crate::flight::Met>,
+        mut met: Option<&mut crate::flight::Met>,
         props: Option<CarProps<'_>>,
         pass: Option<&mut crate::prop_set::PropMovers>,
         dt: F,
@@ -3623,7 +3632,10 @@ impl Machine {
         let shapes = std::sync::Arc::clone(&props.set.shapes);
         let posed = crate::flight::knocks(props.set, &shapes);
         let knocks: Vec<crate::flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
-        let (movers, knocked) = collision.search_props(&mut self.body, &mut *world, dt, &knocks);
+        let (movers, knocked) = match met.as_deref_mut().filter(|m| strikes_bikes(m)) {
+            Some(m) => search_met(collision, &mut self.body, &mut *world, dt, &knocks, m),
+            None => collision.search_props(&mut self.body, &mut *world, dt, &knocks),
+        };
         if let Some(m) = met.as_deref() {
             collision.file_mirrors(&m.mirrors);
         }
@@ -3759,6 +3771,83 @@ impl Machine {
         let u = self.up;
         Acc::mula(u.x(), n.x()).madda(u.y(), n.y()).madd(u.z(), n.z()) <= F(0.707)
     }
+}
+
+/// Whether `met` has the car's rays strike the bikes (F76): it names the car among their others,
+/// and holds every named bike's chassis and their frame mesh.
+pub fn strikes_bikes(met: &crate::flight::Met) -> bool {
+    met.named.is_some() && met.bike_col.is_some() && !met.bikes.is_empty() && met.rides.len() == met.bikes.len()
+}
+
+/// **The car's search with the riders' bikes in it** (F76): [`Collision::search_props`] with
+/// `met`'s bikes ([`crate::flight::Met::rides`]) in its scene as a plane's search has them
+/// ([`crate::flight::Flight::frame_met`]): each bike's frame collidable its collision record's, a
+/// record after the car's, ahead of the knockable props'. R22's capture: the buggy's three body rays
+/// that strike the bike's tail are its record's entries naming the bike (kind 0), their mirrors at
+/// the head of the bike's list, before the bike's own entry.
+///
+/// An entry on bike `k` names its player ([`crate::flight::Met::bikes`]), which the car's resolve
+/// pushes ([`crate::flight::Met::pushed`]); one on knock `k` names [`crate::flight::KNOCK_FROM`]` + k`,
+/// as [`Collision::search_props`] names it. The mirrors each bike's record took are
+/// [`crate::flight::Met::struck`]'s, by player, naming the car as [`crate::flight::Met::named`];
+/// the answer's second list is the mirrors each knock's record took, in `knocks`' order.
+#[allow(clippy::type_complexity)]
+pub fn search_met(
+    collision: &mut Collision,
+    body: &mut crate::biplane::Body,
+    world: &mut dyn crate::world::World,
+    dt: F,
+    knocks: &[crate::flight_search::Knock<'_>],
+    met: &mut crate::flight::Met,
+) -> (Vec<crate::contact::Mover>, Vec<Vec<crate::contact::Contact>>) {
+    use crate::contact_search::{self, Search};
+    use crate::flight_search::{self, Bikes, Scene};
+    let rays = collision.rays.clone();
+    collision.record.node = crate::wreck_bike::node_of(body);
+    contact_search::clear(&mut collision.record, Some(&mut *body));
+    let (field, props, trees) = flight_search::near_world(world, &rays, &collision.record.node, &mut collision.nearby);
+    let bounds = field.as_deref().map(|f| {
+        let (lo, hi) = (f.min(), f.max());
+        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+    });
+    let col = met.bike_col.clone().expect("strikes_bikes");
+    let rides = std::mem::take(&mut met.rides);
+    let velocities: Vec<Vf> = met.bikes.iter().map(|&p| met.vehicles[p].velocity).collect();
+    let owned = velocities.len();
+    let bikes = Some(Bikes { mesh: &col.frame, bikes: &rides });
+    let mut scene = Scene::flown(props, trees, bikes, bounds, &rays, &collision.record.node, &mut collision.nearby)
+        .sweep_of(crate::prop_world::sweep_categories())
+        .owned(&velocities);
+    if !knocks.is_empty() {
+        scene = scene.knocking(knocks, 1 + owned);
+    }
+    let mut records = vec![std::mem::take(&mut collision.record)];
+    records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
+    records.extend(knocks.iter().map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
+    contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
+    let movers = Search::movers(&scene);
+    drop(scene);
+    let mut records = records.into_iter();
+    collision.record = records.next().unwrap_or_default();
+    let n = met.vehicles.len();
+    met.struck = vec![Vec::new(); n];
+    met.pushed = vec![false; n];
+    for e in &mut collision.record.contacts {
+        match e.other {
+            Some(k) if (1..=owned).contains(&k) => {
+                let p = met.bikes[k - 1];
+                e.other = Some(p);
+                met.pushed[p] = true;
+            }
+            Some(k) if k > owned => e.other = Some(crate::flight::KNOCK_FROM + k - 1 - owned),
+            _ => {}
+        }
+    }
+    for (bike, &p) in records.by_ref().take(owned).zip(&met.bikes) {
+        met.struck[p] = bike.contacts.into_iter().map(|e| crate::contact::Contact { other: met.named, ..e }).collect();
+    }
+    met.rides = rides;
+    (movers, records.map(|r| r.contacts).collect())
 }
 
 // --- the tire contact sort (S229a) -----------------------------------------------------------------

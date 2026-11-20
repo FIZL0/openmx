@@ -2427,10 +2427,17 @@ impl<P: sim_world::World> Game for World<P> {
         let n = self.seats.len();
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
         // ahead of the bike's own entries, as the original searches its planes first.
-        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
+        // And what each driven car's own rays put on them (F76), after the planes'.
+        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len() + driven.len()];
         // The flying seats first in seat order, so seat 0's plane searches and resolves first in
         // their joint frame (N28, as c16_fly.rs's MEETS holds), then the bikes last seat first.
-        let order: Vec<usize> = (0..n).filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
+        // A driven car steps after the planes and before every bike, whichever seat it is (F76: R22's
+        // node steps the cars in its dynamics world before the player updates).
+        let order: Vec<usize> = (0..n)
+            .filter(|&i| flying[i])
+            .chain(driven.iter().copied())
+            .chain((0..n).rev().filter(|&i| !flying[i] && !driven.contains(&i)))
+            .collect();
         // The seats' one prop set for the pass (S197c): every seat's bike strikes it, it steps once
         // after them all, and seat 0's, which is drawn, is every seat's.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>());
@@ -2471,12 +2478,16 @@ impl<P: sim_world::World> Game for World<P> {
                 let at = self.seats[me].garage.flight_flown()?.body.position;
                 Some(game_sim::rider_contact::met_plane(&phys, me, n + k, m, at, &self.place))
             });
-            // A driven car meets them by the mirrors of their strikes on its hull (F26).
-            if let Some(j) = driven.iter().position(|&j| j == me) {
+            // A driven car meets them by the mirrors of their strikes on its hull (F26), and by its
+            // own rays on their bikes, whose chassis its resolve pushes (F76): its place among the
+            // bikes' others is its hull's.
+            let car = driven.iter().position(|&j| j == me);
+            if let Some(j) = car {
                 let m = mirrors.get_mut(flown.len() + j).map(std::mem::take).unwrap_or_default();
                 let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                let named = n + flown.len() + j;
                 met = (self.seats[me].garage.car_up().and_then(|c| c.driven.as_ref()))
-                    .map(|c| game_sim::rider_contact::met_riders(&phys, m, c.body.position, &self.place));
+                    .map(|c| game_sim::rider_contact::met_car(&phys, &on, me, named, m, c.body.position, &self.place));
             }
             // A ridden quad the same, by the mirrors on its record (MD179).
             if let Some(j) = quads.iter().position(|&j| j == me) {
@@ -2525,7 +2536,7 @@ impl<P: sim_world::World> Game for World<P> {
                 game_sim::wreck_plane::step_downed(&mut riders, f, downed, m, dt, &self.place, true);
                 self.seats[me].garage.plane_reposed();
             }
-            self.met_after(plane, met, bump.as_ref(), &mut struck);
+            self.met_after(plane.or(car.map(|j| flown.len() + j)), met, bump.as_ref(), &mut struck);
             // What its resolve did to the shared parked cars, written back (F72, `Sim::parked_pushed`).
             if let (Some(cars), Some(b)) = (parked.as_mut(), bump.as_ref()) {
                 for f in b.planes.iter().filter(|f| f.seat >= n) {
@@ -2660,7 +2671,8 @@ impl<P: sim_world::World> World<P> {
     }
 
     /// What a seat's pass leaves for the others (N22a, N22b): its plane's pushes on the riders'
-    /// bikes and the mirrors of its strikes for their lists, and its bike's bumps.
+    /// bikes and the mirrors of its strikes for their lists, and its bike's bumps. A driven car's
+    /// the same as a plane's (F76), `plane` then its place in `struck`.
     fn met_after(
         &mut self,
         plane: Option<usize>,
