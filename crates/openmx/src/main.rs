@@ -1211,7 +1211,7 @@ fn dress_tagged(p: &mut PeerDress, tag: &str, pick: &roster::Pick, fonts_of: Opt
         heli_camera: None,
         flier_cameras: Default::default(),
         car_cameras: p.car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
-        untamed_camera: None,
+        untamed_cameras: Vec::new(),
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
         camera_presets: Default::default(),
@@ -1519,11 +1519,12 @@ struct Rig {
     /// file ([`chase::car_presets`]). They share the bike's framing, field-of-view ease and look-back
     /// slots; a car without one is followed by the bike's.
     car_cameras: Vec<(Kind, Race)>,
-    /// MX vs. ATV Untamed's follow camera for a quad whose pack's `Cam\FC_ATVDefault.pb` is in
-    /// Untamed's slow/fast layout (MD251). It draws the quad's view; the quad's entry in
+    /// MX vs. ATV Untamed's follow cameras, one a machine kind whose pack's camera file is in
+    /// Untamed's slow/fast layout: the quad's `Cam\FC_ATVDefault.pb` (MD251), an Untamed car's
+    /// `Cam\FC_<kind>Default.pb` (MD257). Each draws its machine's view; the machine's entry in
     /// `car_cameras` still holds the preset, the look-back and the stick ([`chase::untamed_follow`]);
     /// the framing reaches it in [`frame_cars`] (MD256).
-    untamed_camera: Option<chase::UntamedCamera>,
+    untamed_cameras: Vec<(Kind, chase::UntamedCamera)>,
     /// The camera the screen switches to while this player's rider is down (V31).
     wreck_camera: chase::WreckCamera,
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
@@ -7027,9 +7028,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         car_presets.push((Kind::Atv, bytes));
     }
     // An Untamed quad's on its slow/fast file (MD251), which every seat starts a copy of.
-    let untamed_camera = atv_files.as_ref().filter(|o| !o.untamed.is_empty()).map(|o| chase::UntamedCamera::new(o.untamed.clone()));
+    let mut untamed_cameras: Vec<(Kind, chase::UntamedCamera)> =
+        atv_files.as_ref().filter(|o| !o.untamed.is_empty()).map(|o| (Kind::Atv, chase::UntamedCamera::new(o.untamed.clone()))).into_iter().collect();
     // And the MX vs. ATV car's (MD82d), on its pack's own copy of its kind's camera file.
     let car_camera_file = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_camera(&args, c));
+    // An Untamed car's is in the quad's slow/fast layout, and is followed as the quad is (MD257).
+    let untamed_car = chase::untamed_presets(car_camera_file.as_ref().map(|(b, _)| b.as_slice()));
+    if !untamed_car.is_empty() {
+        untamed_cameras.push((Kind::MxvatvCar, chase::UntamedCamera::new(untamed_car)));
+    }
     // And its engine (MD157), off its pack's `carengine.aud`.
     let mxvatv_car_sound = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_engine(&args, c));
     if let Some((bytes, _)) = &car_camera_file {
@@ -7600,7 +7607,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // And their own cars' (S246).
             flier_cameras: Default::default(),
             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
-            untamed_camera: untamed_camera.clone(),
+            untamed_cameras: untamed_cameras.clone(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -7637,7 +7644,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             flier_cameras: Default::default(),
             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
-            untamed_camera: untamed_camera.clone(),
+            untamed_cameras: untamed_cameras.clone(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -9915,7 +9922,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
                             flier_cameras: Default::default(),
                             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
-                            untamed_camera: untamed_camera.clone(),
+                            untamed_cameras: untamed_cameras.clone(),
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
                             camera_presets: Default::default(),
@@ -11398,8 +11405,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // (S103). This frame has no obstacle push-out — the base class's did, and the base
                 // class's frame is not the one the disc runs.
                 let step = if mod_follows { chase::mod_follow } else { Race::update };
-                // An Untamed quad on its own slow/fast file is followed as SLUS-21701 follows it (MD251).
-                let untamed = rig.untamed_camera.as_mut().filter(|_| up == Kind::Atv && mod_follows);
+                // An Untamed quad or car on its own slow/fast file is followed as SLUS-21701 follows
+                // it (MD251, MD257).
+                let untamed = rig.untamed_cameras.iter_mut().find(|(k, _)| *k == up).map(|(_, u)| u).filter(|_| mod_follows);
                 let mut view = match untamed {
                     Some(u) => chase::untamed_follow(&mut u.follow, follow, dt, &rider, &mut world.place),
                     None => step(
@@ -13973,10 +13981,10 @@ fn cars_for_display(layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) 
 /// A ground camera's presets off its file's bytes (MD136): the cars' MX-format files by
 /// [`layout_presets`], the quad's MX vs. ATV `.pb`/`.ini` by [`flier_layout_presets`].
 fn kind_presets(kind: Kind, bytes: &[u8], layout: Layout, display: Display, file: &str) -> Vec<Preset> {
-    // An Untamed slow/fast file (MD251): stand-ins for the shell's preset cycle, look-back and
-    // framing, in the file's order; the Untamed camera draws the view.
+    // An Untamed slow/fast file (MD251, an Untamed car's MD257): stand-ins for the shell's preset
+    // cycle, look-back and framing, in the file's order; the Untamed camera draws the view.
     let untamed = match kind {
-        Kind::Atv => chase::untamed_presets(Some(bytes)),
+        Kind::Atv | Kind::MxvatvCar => chase::untamed_presets(Some(bytes)),
         _ => Vec::new(),
     };
     if !untamed.is_empty() {
@@ -14004,9 +14012,10 @@ fn frame_cars(rig: &mut Rig, cars: &[(Kind, Vec<Preset>)]) {
             })
             .collect();
         chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.0);
-        // The Untamed quad camera (MD256) on the same framing over its own slow/fast presets, on the
-        // preset the stand-ins' camera is now on; its ease replaces the stand-ins', which never run.
-        if let Some(u) = rig.untamed_camera.as_mut().filter(|_| *kind == Kind::Atv) {
+        // The Untamed quad or car camera (MD256, MD257) on the same framing over its own slow/fast
+        // presets, on the preset the stand-ins' camera is now on; its ease replaces the stand-ins',
+        // which never run.
+        if let Some((_, u)) = rig.untamed_cameras.iter_mut().find(|(k, _)| k == kind) {
             let framed = chase::untamed_seat_presets(&u.disc, rig.framing.0, &laid, mine_only);
             chase::untamed_reframe(&mut u.follow, framed, cam.cam.preset, &mut rig.fov_ease.0);
         }
@@ -14802,11 +14811,19 @@ fn atv_hands(atv: &vehicle::AtvRide) -> Option<audio::AtvFrame> {
 /// The MX vs. ATV car's own follow-camera file (MD82d): its kind's `Cam\FC_<kind>Default.pb`
 /// ([`chase::mod_presets`], the file SLUS-21104 picks by the car's class) off the car's pack, and its
 /// name. `None`, a line saying so, where the pack is gone or lacks the file or it holds no presets
-/// for the full screen: the bike's camera follows the car then.
+/// for the full screen: the bike's camera follows the car then. An Untamed car's file is compiled
+/// (`.pb.bpb`) and in the quad's slow/fast layout (MD257): its bytes are the text, which
+/// [`chase::untamed_presets`] reads for MX vs. ATV Untamed's follow camera.
 fn mxvatv_car_camera(args: &Args, car: &vehicle::MxvatvCarRide) -> Option<(Vec<u8>, &'static str)> {
     let file = chase::mod_presets(chase::mxvatv_car_machine(car.machine));
     let pack = machine_packs::find(&mods_dir(args)?).0.into_iter().find(|p| p.id == car.pack);
-    let bytes = pack.as_ref().and_then(|p| p.files.read(file).ok());
+    let bytes = pack.as_ref().and_then(|p| p.ini_bytes(file).ok());
+    let untamed = chase::untamed_presets(bytes.as_deref());
+    if !untamed.is_empty() {
+        let names: Vec<&str> = untamed.iter().map(|p| p.name.as_str()).collect();
+        println!("mxvatv car: {}'s camera, {} presets in {file}, MX vs. ATV Untamed's slow/fast follow camera: {}", car.pack, untamed.len(), names.join(", "));
+        return bytes.map(|b| (b, file));
+    }
     let presets = bytes.as_deref().map(|b| chase::flier_presets(b, game_sim::camera::Aspect::Standard, game_sim::camera::Viewport::Full)).unwrap_or_default();
     if presets.is_empty() {
         println!("mxvatv car: {} has no {file} with presets; the bike's camera follows it", car.pack);
