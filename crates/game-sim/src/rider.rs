@@ -715,6 +715,17 @@ impl Rider {
     #[allow(clippy::too_many_arguments)] // frame_among's, and the contacts
     pub fn frame_bumped(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
                         rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
+        self.frame_posed(p, t, c, dt, world, rivals, bump, &mut |_| {})
+    }
+
+    /// [`Rider::frame_bumped`] with the body posed inside the frame (S490): `poser` runs after the
+    /// rider's steps and before the riding ragdoll's tick, as the original's body actor poses its
+    /// skeleton in frame t before its ragdoll step, so the step follows this frame's skeleton
+    /// ([`Rider::skeleton`]) and not the last frame's. A shell that poses after the frame passes a
+    /// no-op, which is `frame_bumped`.
+    #[allow(clippy::too_many_arguments)] // frame_bumped's, and the pose
+    pub fn frame_posed(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
+                       rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>, poser: &mut dyn FnMut(&mut Rider)) -> Frame {
         let mut out = Frame::default();
         // 0a — what the riding ragdoll's tick at the end reads off the top of this one (S90): the
         // bike's transform before it moves, and the vehicle animation's clip-table words and clip as
@@ -1419,6 +1430,7 @@ impl Rider {
         // A tick that put the bike back starts a fresh body off the skeleton where the bike now is.
         // B19: the verdict's tick still rides (the actor reads the reason a tick on), and the tick
         // after enters the wreck from what that ride left.
+        poser(self);
         let (before, table, clip) = riding_from;
         let before = if out.respawned { self.ride.transform() } else { before };
         if out.wreck.is_none() && Self::entry_waits(&self.state, self.crash.as_ref(), self.ragdoll.as_ref(), self.riding.as_deref(), out.respawned) {

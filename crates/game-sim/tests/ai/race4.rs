@@ -90,7 +90,13 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// joints `c33_pose` left after frame t-1; the original poses its body inside frame t, before its
 /// ragdoll step. Fed the copy's joints of frame t (under its bike node from before it), bone 17 stays
 /// within 0.06 ft through 131 where the seeded run is 0.29 ft off at 130. Either way ai0's bodies
-/// stray up to 0.45 ft at 24-36 (part 7), the same with or without the seed.
+/// stray up to 0.45 ft at 24-36 (part 7), the same with or without the seed. S490: the Sim's riding
+/// step can take the frame's own skeleton (`Sim::step_all_posed`), and posed so, ai0's bones follow
+/// the original's much closer (bone 17 0.02 ft at 14 where this replay is 0.13), but the marks would
+/// fall: the foot ball touches at 130, a tick early, and the generator would part at 131. Part 7 is a
+/// hand: this replay keeps the image's holds, so the grips never turn with the bars. With the
+/// original's holds of each frame, every part stays within 0.08 ft through 130
+/// (`s490_c33s_bodies_posed_in_the_frame_follow_the_original`); the early touch stays even then.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -398,6 +404,64 @@ fn c33_player(ee: &Ee, k: usize) -> usize {
 
 #[test]
 fn s12e_free09s_four_racers_ride_as_the_capture() {
+    c33_replay(false);
+}
+
+/// S490: the riding bodies posed inside the frame, as the original poses its body in frame t before
+/// its ragdoll step ([`Sim::step_all_posed`]), and each rider's holds the frame's own (the original's
+/// request after frame t, off an interpreter copy stepped beside the Sim, [`c33_frame_holds`]): ai0's
+/// riding bones stay within [`S490_BONES_WITHIN`] of the copy's through [`S490_THROUGH`]. Posed
+/// after the step instead (the replay above), they are 0.43 ft off at 128; with the image's holds
+/// kept, part 7 (a hand) strays 0.42 ft at 24-36, the grips not turning with the bars.
+#[test]
+fn s490_c33s_bodies_posed_in_the_frame_follow_the_original() {
+    c33_replay(true);
+}
+
+/// How far any of ai0's riding parts may be from the original's in [`c33_replay`]'s in-frame run, in
+/// feet: 0.08 is the worst seen (0.04 to 0.05 at 127-131, after the restart at 120).
+const S490_BONES_WITHIN: f32 = 0.1;
+/// The last tick the in-frame run is held to. At 130 ai0's foot ball (bone 17) is 0.02 ft low and
+/// touches, a tick before the original's: its foot dust then draws on 131, the original's on 132.
+/// That gap stays with the original's joints and holds both fed, and the actor's fades, damping and
+/// hold pins agree, so it is in the riding body's own step after the restart at 120.
+const S490_THROUGH: u64 = 130;
+
+/// The original's request after the frame, per rider of [`C33_RIDERS`]: the root node and the four
+/// holds' world points (rider `+0xb80`: `+0x50`, `+0xb0..+0xe0`), as [`super::wreck_dust::s483_riding_of`]
+/// reads them off the image.
+fn c33_frame_holds(copy: &Ee) -> Vec<(game_sim::math::Mat4, [Vf; 4])> {
+    use game_sim::math::Mat4;
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|o| copy.u32_at(at + o)));
+    C33_RIDERS
+        .iter()
+        .map(|&(r, _, _)| {
+            let req = copy.u32_at(super::wreck_dust::rider_actor(copy, r) + 0x488);
+            (Mat4([0, 0x10, 0x20, 0x30].map(|o| quad(req + 0x50 + o))), [0xb0, 0xc0, 0xd0, 0xe0].map(|o| quad(req + o)))
+        })
+        .collect()
+}
+
+/// How far each of rider `k`'s riding parts' nodes are from the copy's (each part's node world,
+/// part `+0xa0` → node `+0x80`), in feet.
+fn c33_part_offs(copy: &Ee, sim: &Sim, k: usize) -> Vec<f32> {
+    let rider = sim.rider_of(c33_player(copy, k));
+    let (Some(r), Some(kit)) = (&rider.riding, &rider.ragdoll_kit) else { return Vec::new() };
+    let parts = copy.u32_at(super::wreck_dust::rider_actor(copy, C33_RIDERS[k].0) + 0x2f4);
+    r.nodes(kit)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let w = copy.u32_at(parts + 0xb0 * i as u32 + 0xa0) + 0x80 + 0x30;
+            (0..3).map(|c| (copy.f32_at(w + 4 * c as u32) - m.0[3][c]).powi(2)).sum::<f32>().sqrt()
+        })
+        .collect()
+}
+
+/// C33's replay. `in_frame`: S490's run, the bodies posed inside the frame on the copy's holds and
+/// held to the copy's bones through [`S490_THROUGH`], where it stops; else S12e's, posed after the
+/// step as the shell's `ai_ride` does, held to its marks.
+fn c33_replay(in_frame: bool) {
     let kit = match Kit::load() {
         Ok(k) => k,
         Err(w) => return skip(&w),
@@ -489,14 +553,60 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     // load rides on the controls the state was saved holding (S117): the image's stick.
     let mut controls = vec![Controls::default(); C33_RIDERS.len()];
     controls[c33_player(&ee, 2)] = c33_saved_controls(&ee, C33_RIDERS[2].0);
+    // S490: the interpreter copy the in-frame run steps beside the Sim, and the worst part gap seen.
+    let mut copy = in_frame.then(|| {
+        let mut copy = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+        copy.set(28, u64::from(addr("boot_gp").unwrap()));
+        let clock = f64::from(copy.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+        super::draws::render_setup(&mut copy);
+        (copy, clock)
+    });
+    let mut worst = (0.0f32, 0, 0);
+    let by_player: Vec<usize> = (0..C33_RIDERS.len()).map(|p| (0..C33_RIDERS.len()).find(|&k| c33_player(&ee, k) == p).unwrap()).collect();
     for (n, pair) in rows.windows(2).enumerate() {
         let (last, row) = (&pair[0], &pair[1]);
         assert_eq!(row.frame, C33_FROM + 2 + n as u64, "the capture's rows run on from the image, one a tick");
+        if in_frame && row.frame > S490_THROUGH {
+            break;
+        }
         // The step into a row is the frame length the row before it read.
         let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(&ee, k)).body.look).collect();
         let gen_was = sim.ai.as_ref().unwrap().rng.state();
-        sim.step_all(last.dt, &controls, &mut world);
-        c33_pose(&ee, &mut sim, &mut bodies, &controls, last.dt);
+        match copy.as_mut() {
+            None => {
+                sim.step_all(last.dt, &controls, &mut world);
+                c33_pose(&ee, &mut sim, &mut bodies, &controls, last.dt);
+            }
+            Some((copy, clock)) => {
+                super::draws::neutral_pad(copy);
+                super::draws::whole_frame(copy, last.dt, clock);
+                super::draws::render(copy);
+                let held = c33_frame_holds(copy);
+                // Each body posed before its riding step, on the levers its bike rode and the
+                // holds framed by the bike as its frame left it, as the riding step frames them.
+                sim.step_all_posed(last.dt, &controls, &mut world, &mut |p, rider, hands| {
+                    use game_sim::math;
+                    let (root, at) = &held[by_player[p]];
+                    let inv = math::inverse(&rider.ride.transform()).unwrap();
+                    let local = |v: Vf| math::transform_point(&inv, v);
+                    rider.holds = Some(Arc::new(game_sim::ragdoll_riding::Holds { root: math::mul(root, &inv), hands: [local(at[0]), local(at[1])], feet: [local(at[2]), local(at[3])] }));
+                    let (body, doll) = &mut bodies[by_player[p]];
+                    body.ride(last.dt, rider, hands, game_sim::rider::Gate::default());
+                    rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+                });
+                for (k, (body, doll)) in bodies.iter_mut().enumerate() {
+                    c33_drawn(sim.rider_of(c33_player(&ee, k)), body, doll);
+                }
+                let offs = c33_part_offs(copy, &sim, 0);
+                assert!(!offs.is_empty(), "tick {}: ai0 rides no riding body", row.frame);
+                for (i, &off) in offs.iter().enumerate() {
+                    assert!(off <= S490_BONES_WITHIN, "tick {}: ai0's part {i} is {off} ft from the original's", row.frame);
+                    if off > worst.0 {
+                        worst = (off, row.frame, i);
+                    }
+                }
+            }
+        }
         // S328b: the notes switch on and pick as the original's do (draws.rs's C33_NOTES_ON and
         // C33_NOTE_PICKS), through 16.
         if row.frame <= 16 {
@@ -590,6 +700,10 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         if lanes.iter().all(|l| l.parted.is_some()) {
             break;
         }
+    }
+    if in_frame {
+        println!("posed in the frame, ai0's riding parts are within {:.4} ft of the original's through tick {S490_THROUGH} (worst part {} at tick {})", worst.0, worst.2, worst.1);
+        return;
     }
     for (i, lane) in lanes.iter_mut().enumerate() {
         if let Some(p) = lane.pending.take() {
