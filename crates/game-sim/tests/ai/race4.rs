@@ -61,7 +61,15 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// its own fiction of a path happened to miss it. S482b: each rider rides its riding body off the
 /// image, posed each tick by the shell's body machine, and ai0's foot ball touches at 131 as the
 /// original's: the generator agrees through 133 (it parts at 134), the human through 1802 again and
-/// ai2 through 279.
+/// ai2 through 279. S347b: ai2's preload pop is not where it parts. With the generator put back to
+/// the capture's each row, ai2 agrees through 729 and ai0 through 373. So all of ai2's early split,
+/// and ai0's from 319 to 373, comes after the generator. The generator parts at 134 because ai0's
+/// foot dust (entry 4) draws on 134. The original's foot ball has left the ground after 133 (bone 17's
+/// y is 150.764 against our 150.744). That gap goes back to tick 4. There every image body is Held
+/// and unplaced, and both sides switch to Riding and pose it. The original poses from its animated
+/// skeleton (bones within ~0.1 ft of the image's). The Sim has no `rider.skeleton` before the first
+/// pose, so it poses from the rig's fixed pose, ~1 ft off (all four riders, ~1.26 ft, decaying to
+/// ~0.2 by tick 15).
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
