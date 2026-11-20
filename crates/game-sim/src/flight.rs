@@ -460,6 +460,10 @@ pub struct Met {
     /// [`WRECK_FROM`]` + j`, and the mirror goes at the head of the wreck bike's list in
     /// [`Met::downed`].
     pub hulls: Vec<Option<crate::wreck_plane::Hull>>,
+    /// Out: the mirrors of its strikes on each of [`Met::hulls`], by the same `j` (S486a): what a
+    /// hull's owner with no wreck bike in [`Met::downed`] hears, a parked car's struck listener
+    /// ([`crate::wreck_plane::search_downed_parked`]).
+    pub hit: Vec<Vec<contact::Contact>>,
 }
 
 impl Flight {
@@ -1114,6 +1118,15 @@ impl Flight {
         }
         // The wreck bikes stepped in its world (F32), their bodies those after the props.
         let mut downed = met.as_deref_mut().map(|m| std::mem::take(&mut m.downed)).unwrap_or_default();
+        // Every hull's mirrors kept for its owner (S486a): a parked car is woken by them.
+        if let Some(m) = met.as_deref_mut() {
+            m.hit = vec![Vec::new(); m.hulls.len()];
+            for (&j, mirrors) in wrecked.iter().zip(&hit) {
+                if let Some(h) = m.hit.get_mut(j) {
+                    h.clone_from(mirrors);
+                }
+            }
+        }
         // The mirrors of its strikes on their hulls at the head of their lists (F35): the plane searched
         // first, before the wreck bike filed its own.
         for (&j, mirrors) in wrecked.iter().zip(hit).filter(|(_, m)| !m.is_empty()) {
@@ -1130,6 +1143,7 @@ impl Flight {
         }
         for d in &mut downed {
             d.place += at;
+            d.cars.iter_mut().for_each(|c| *c += at);
         }
         let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies, downed };
         WORLD.step(dt, &mut listeners);
@@ -1140,6 +1154,7 @@ impl Flight {
             m.wrecks = pushed;
             for d in &mut downed {
                 d.place -= at;
+                d.cars.iter_mut().for_each(|c| *c -= at);
             }
             m.downed = downed;
         }
@@ -2004,9 +2019,15 @@ impl Dynamics for Listeners<'_> {
             let d = &mut self.downed[i as usize - 1];
             let from = d.bike.origin();
             let mut flown: Vec<_> = d.planes.iter().map(|&k| self.plane.flown(k, from, &*self.ground.0)).collect();
+            // And the parked cars' bodies after the planes' (S486a), the ones the plane's resolve pushes.
+            flown.extend(d.cars.iter().map(|&c| crate::wreck_plane::flown_of(&self.props[c])));
             d.force(&mut self.props[d.place], &mut flown);
-            for f in &flown {
+            let (planes, cars) = flown.split_at(d.planes.len());
+            for f in planes {
                 self.plane.pushed(f);
+            }
+            for (&c, f) in d.cars.iter().zip(cars) {
+                (self.props[c].collider, self.props[c].body) = (f.collider, f.body);
             }
             return;
         }

@@ -461,6 +461,9 @@ impl Sim {
                 std::iter::once((&self.rider, &*self.phy)).chain(self.others.iter().map(|p| (&p.rider, &*p.phy))).collect();
             let mut met = rider_contact::met_plane(&riders, 0, riders.len(), mirrors, flying, &*world);
             drop(riders);
+            // The parked cars in the plane's world (S486a): their hulls struck by its rays and its
+            // downed wreck bikes', their bodies on both resolves.
+            let cars = self.parked_in_plane(flying, &*world);
             let plane = self.plane.as_mut().expect("a plane ride");
             // In a race the plane draws on the race's generator, the original's one `rand()` (S387).
             if let Some(race) = self.race.as_deref_mut() {
@@ -480,7 +483,7 @@ impl Sim {
             // step, the plane's body on its resolve, after, which the rider's own step below does not
             // repeat.
             let mut riders: Vec<&mut crate::rider::Rider> = self.others.iter_mut().map(|p| &mut p.rider).collect();
-            let downed = wreck_plane::search_downed(&mut riders, plane, dt, world, &mut met);
+            let (downed, wrecked_cars) = wreck_plane::search_downed_parked(&mut riders, plane, &cars, dt, world, &mut met);
             let meets = Some(&mut met);
             let (_struck, seam) = if self.traffic.props.is_empty() {
                 plane.frame_met(dt, pad, world, &self.tables.ride, &bikes, meets)
@@ -504,6 +507,7 @@ impl Sim {
             }
             // The original steps its bike world after the plane's post every tick (S99's clock), so
             // the other riders ride on while player 1 flies (B9a).
+            self.parked_from_plane(&met, &wrecked_cars);
             self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
             self.parked_cars_sleep(&resting);
             self.traffic.frame_late(dt, world);

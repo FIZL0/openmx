@@ -1956,3 +1956,116 @@ fn n24_rows_beside_the_port() {
         println!("   row {r:>6}:      v0 {:?} v1 {:?}", f(cap.plane_state(r, 0)[0]), f(cap.plane_state(r, 1)[0]));
     }
 }
+
+/// What [`fly_by_parked`] keeps of a tick (S486a): the truck awake, its place and velocity, the
+/// plane's place and velocity, and P2's wreck bike's place (zero standing).
+#[derive(Clone, Debug)]
+struct ParkedTick {
+    awake: bool,
+    truck: Vf,
+    truck_vel: Vf,
+    plane: Vf,
+    plane_vel: Vf,
+    wreck: Vf,
+}
+
+/// **[`fly_by`]'s lane with free09's truck parked at `spot`** (S486a): `spot` handed the plane's
+/// position and P2's wreck bike's origin (zero standing) in image `from`, the truck settled over the
+/// ground there, its nose along `-z`, and in the ride ([`Sim::park_cars`]). `None` where the image or
+/// the disc is not in this worktree.
+fn fly_by_parked(from: u32, to: u32, pad_of: &dyn Fn(u32) -> Report, reason: u32, spot: &dyn Fn(Vf, Vf) -> Vf) -> Option<Vec<ParkedTick>> {
+    use game_sim::car::{Car, CarModel, Kind, Parked};
+    let dt = F(1.0 / 60.0);
+    let ee = image(from)?;
+    let (plane, rays, hull) = machines()?;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let truck = {
+        let res = disc.res("machine.res").ok()?;
+        let kind = Kind::MonsterTruck;
+        let car = Car::read_bytes(&res.read(kind.phy()).ok()?, kind);
+        let model = CarModel::read(&res.read("monstertruck\\anim\\monstertruck.psg").ok()?).ok()?;
+        let rays = track::Rays::parse(&res.read(kind.rays()).ok()?).ok()?;
+        let hull = track::Mesh::parse(&res.read(kind.hull()).ok()?).ok()?;
+        (car, model, rays, hull)
+    };
+    let tables = Arc::new(Tables::build());
+    let (phy, col) = bike(&mut disc, &tables);
+    let col = Arc::new(col);
+    let mesh = bike_box(&mut disc);
+    let mut other = standing_p2(&ee, &phy, &col);
+    if reason != 0 {
+        let (part, wrecks) = wreck_files(&mut disc).expect("the rider's wreck files on the disc");
+        other.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+        wrecked_p2(&ee, p2(&ee), reason, &mut other);
+    }
+    let me = standing_p2(&ee, &phy, &col);
+    let mut sim = Sim::with_rider(0x5272, Arc::clone(&tables), phy.clone(), me);
+    sim.add_player(phy, other);
+    let wreck = wreck_hull(&mut disc);
+    in_free09_ss(&mut disc, |world, area| {
+        let flight = seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+        let down = sim.others[0].rider.crash.as_ref().map_or(Vf::ZERO, |c| c.bike.origin());
+        let at = spot(flight.body.position, down);
+        sim.plane = Some(match wreck.clone() {
+            Some(w) => flight.with_wreck_hull(w),
+            None => flight,
+        });
+        let (car, model, rays, hull) = truck;
+        let t = &tables.ride;
+        let truck = Parked::settled(Arc::new(car), &model, Rays::of(&rays), Arc::new(hull), world, at, Vf::new(0.0, 0.0, -1.0, 0.0), &t.acos, &t.curve);
+        assert!(!truck.awake(), "the truck settled and asleep");
+        sim.park_cars(vec![truck]);
+        sim.poll(dt, &[pad_of(from - 1), Report::missing()]);
+        let mut out = Vec::new();
+        for t in from..to {
+            let controls = sim.poll(dt, &[pad_of(t), Report::missing()]);
+            sim.step(dt, &controls, world);
+            let p = sim.plane.as_ref().unwrap();
+            let c = &sim.parked_cars[0];
+            let wreck = sim.others[0].rider.crash.as_ref().map_or(Vf::ZERO, |c| c.bike.origin());
+            out.push(ParkedTick {
+                awake: c.awake(),
+                truck: c.machine.body.position,
+                truck_vel: c.machine.body.velocity,
+                plane: p.body.position,
+                plane_vel: p.body.velocity,
+                wreck,
+            });
+        }
+        Some(out)
+    })
+}
+
+/// **The plane flown into a parked truck wakes it and shoves it its way** (S486a): from image 137910
+/// the truck parked 30 ft ahead of the plane (along `-x`), asleep; the plane's rays reach its hull at
+/// tick 42, and that tick the truck is awake with the plane's way in its velocity (about -11 ft/s in
+/// x, the plane's -25 cut to -16), then settles and sleeps again. Before S486a the plane flew through.
+#[test]
+fn the_plane_flown_into_a_parked_truck_wakes_and_pushes_it() {
+    let ahead = |plane: Vf, _: Vf| Vf::new(plane.x() - 30.0, plane.y(), plane.z() + 2.0, 1.0);
+    let Some(ticks) = fly_by_parked(137910, 138030, &cross_then_idle, 0, &ahead) else { return };
+    let hit = ticks.iter().position(|t| t.awake).expect("the plane met the truck");
+    let (before, at) = (&ticks[hit - 1], &ticks[hit]);
+    assert!((30..60).contains(&hit), "the plane reaches the truck about tick 42, got {hit}");
+    assert!(at.truck_vel.x() < -5.0, "the truck shoved along the plane's -x: {:?}", at.truck_vel.0);
+    assert!(at.plane_vel.x() > before.plane_vel.x() + 5.0, "the plane slowed by the truck: {:?} -> {:?}", before.plane_vel.0, at.plane_vel.0);
+    assert!(ticks[hit + 1].truck.x() < at.truck.x(), "the truck moves on its own frame next tick");
+    assert!(ticks[hit..].iter().any(|t| !t.awake), "the truck sleeps again");
+}
+
+/// **A downed rider's wreck bike in the plane lane meets a parked truck** (S486a): P2 wrecked
+/// (reason 7) in image 138010, the truck parked 8 ft along `+x` of the wreck bike, asleep; the wreck
+/// bike rolls into its hull about tick 8 and wakes it, the plane 45 ft and more away (its rays reach
+/// nothing). Before S486a the plane lane's wreck bikes searched no parked car.
+#[test]
+fn a_wreck_bike_in_the_plane_lane_wakes_a_parked_truck() {
+    let beside = |_: Vf, w: Vf| Vf::new(w.x() + 8.0, w.y(), w.z(), 1.0);
+    let Some(ticks) = fly_by_parked(138010, 138050, &cross_then_idle, 7, &beside) else { return };
+    assert!(!ticks[0].awake, "the truck asleep before the wreck bike reaches it");
+    let woke = ticks.iter().position(|t| t.awake).expect("the wreck bike met the truck");
+    let t = &ticks[woke];
+    let apart = |a: Vf, b: Vf| (0..3).map(|i| (a.0[i] - b.0[i]).powi(2)).sum::<f32>().sqrt();
+    let gap = apart(t.plane, t.truck);
+    assert!(gap > 30.0, "the plane is far from the truck when it wakes: {gap} ft");
+    assert!(apart(t.wreck, t.truck) < 10.0, "the wreck bike is at the truck");
+}
