@@ -23819,7 +23819,8 @@ fn s345_the_first_person_bit_leaves_the_ride_alone() {
 /// trail (bike `+0x10dc`'s subtree) on at row 100 and off at row 300, and that copy still matches the
 /// capture's physics every row. The shown subtree's update does change more RAM than the record: its
 /// nodes and six objects by the bike from row 100, and by row 150 a global (0x393848), words in the
-/// simulation object's `+0x2be0..` and heap blocks (0xafc790.., 0xb19d80..) — what those feed is R61's.
+/// simulation object's `+0x2be0..` and heap blocks (0xafc790.., 0xb19d80..). What those feed: R61's
+/// tests below (only `rand`, 0x393848, reaches the simulation).
 #[test]
 fn s345_the_first_person_cameras_trail_leaves_the_physics_alone() {
     for (name, len) in [("ride-2", 459), ("flip-1", 465)] {
@@ -23828,4 +23829,110 @@ fn s345_the_first_person_cameras_trail_leaves_the_physics_alone() {
         assert_eq!(seen.trail_rows, 200, "{name}: the trail shown on rows 100-299");
         assert!(seen.first_other.as_deref().is_some_and(|s| s.starts_with("row 100:")), "{name}: {:?}", seen.first_other);
     }
+}
+
+// --- R61: what the shown trail's extra writes reach ------------------------------------------------
+
+/// The C library's `rand` state (64 bits, `*(0x00393a90)+0xa8`), which the trail's emitters draw from
+/// (0x0050ceb0 and 0x0050db60, twice per spawning frame) as the simulation does.
+const R61_RAND: u32 = 0x0039_3848;
+/// The shared smooth noise's tables (permutation 0x003f3540 .. the last gradients), built off `rand`
+/// by 0x00134680 the first time anything samples the noise (0x00134580, its flag 0x0038f708).
+const R61_NOISE: (u32, u32) = (0x003f_3540, 0x003f_6d88);
+/// The rider character (vtable 0x003d11b0, F41/S278), whose words below `+0xb00` the test compares.
+const R61_RIDER: u32 = 0x010a_f350;
+
+/// What one R61 replay saw: the first row after which the two copies' `rand` state, noise tables and
+/// rider differ; the rows the pose blend (bike `+0x14e4`) and the rider's touching flag in the record
+/// (bike `+0x920`) differ.
+#[derive(Debug, Default)]
+struct R61Seen {
+    rand_from: Option<usize>,
+    noise_from: Option<usize>,
+    rider_from: Option<usize>,
+    blend_rows: Vec<usize>,
+    flag_rows: u32,
+}
+
+/// [`s345_replay`]'s two copies (flags 0x18, and 0x38 with the first-person bit), both with `+0xb34` 1
+/// on rows `on..off`, so the second copy's sync shows the trail; with `sync`, the second copy's `rand`
+/// state is set to the first's before that row's frame. The second copy must match the capture's
+/// physics every row.
+fn r61_replay(name: &str, on: usize, off: usize, sync: Option<usize>) -> Option<R61Seen> {
+    let (mut a, rows) = (hooked(image()?), rows(name)?);
+    let mut b = hooked(image()?);
+    b.set_u32(BIKE + 0x444, 0x38);
+    let parted = |a: &Ee, b: &Ee, from: u32, to: u32| a.ram[from as usize..to as usize] != b.ram[from as usize..to as usize];
+    let mut seen = R61Seen::default();
+    for (r, row) in rows.iter().enumerate() {
+        if sync == Some(r) {
+            for k in [0, 4] {
+                b.set_u32(R61_RAND + k, a.u32_at(R61_RAND + k));
+            }
+        }
+        for ee in [&mut a, &mut b] {
+            if r == on {
+                ee.set_u32(BIKE + 0xb34, 1);
+            }
+            if r == off {
+                ee.set_u32(BIKE + 0xb34, 0);
+            }
+            poke(ee, row, &READER);
+            ee.set(28, GP);
+            ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        }
+        let d = diff(&b, row);
+        assert!(d.is_empty(), "{name} row {r}, trail shown: {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        let first = |at: &mut Option<usize>, apart: bool| {
+            if apart && at.is_none() {
+                *at = Some(r);
+            }
+        };
+        first(&mut seen.rand_from, parted(&a, &b, R61_RAND, R61_RAND + 8));
+        first(&mut seen.noise_from, parted(&a, &b, R61_NOISE.0, R61_NOISE.1));
+        first(&mut seen.rider_from, parted(&a, &b, R61_RIDER, R61_RIDER + 0xb00));
+        if a.u32_at(BIKE + 0x14e4) != b.u32_at(BIKE + 0x14e4) {
+            seen.blend_rows.push(r);
+        }
+        seen.flag_rows += u32::from(a.u32_at(BIKE + 0x920) != b.u32_at(BIKE + 0x920));
+        poke(&mut a, row, &SPOT);
+        poke(&mut b, row, &SPOT);
+    }
+    let blend = seen.blend_rows.first().map(|&r| (r, seen.blend_rows.len()));
+    eprintln!("{name}, trail rows {on}..{off}, rand synced at {sync:?}: {:?}, blend apart (from, rows) {blend:?}, flag rows {}",
+        (seen.rand_from, seen.noise_from, seen.rider_from), seen.flag_rows);
+    Some(seen)
+}
+
+/// **R61 — on S345's rows the shown trail's draws come too late to reach the simulation.** The
+/// trail's emitters stop drawing `rand` while it is shown, so the copies' `rand` parts (ride-2 at
+/// row 128, flip-1 at row 195), but nothing the simulation draws comes after: ride-2 never samples
+/// the noise, flip-1 builds its tables at row 113 and wrecks at row 125, both still in step. The
+/// noise tables, the pose blend and the rider stay the same on both copies.
+#[test]
+fn r61_the_trail_parts_rand_after_the_rides_last_draw() {
+    for (name, parts) in [("ride-2", 128), ("flip-1", 195)] {
+        let Some(seen) = r61_replay(name, 100, 300, None) else { return };
+        assert_eq!(seen.rand_from, Some(parts), "{name}: {seen:?}");
+        assert_eq!(seen.noise_from, None, "{name}: {seen:?}");
+        assert_eq!(seen.rider_from, None, "{name}: {seen:?}");
+        assert!(seen.blend_rows.is_empty() && seen.flag_rows == 0, "{name}: {seen:?}");
+    }
+}
+
+/// **R61 — shown from row 0, the trail's `rand` reaches the rider through the noise.** flip-1 with
+/// `+0xb34` 1 from row 0: `rand` parts at once, the noise tables built at row 113 differ, so the trick
+/// hold's noise moves the pose blend (bike `+0x14e4`, set on rows 114-124 and never zeroed, which the
+/// wreck test and the rider's clip read) and the rider from row 114. The bike's physics still matches the capture every
+/// row, and the rider's flag the bike's frame reads (`+0x920`, F41) never differs. With the second
+/// copy's `rand` set to the first's before row 113, none of it differs: the noise is the one path.
+#[test]
+fn r61_the_trails_rand_reaches_the_rider_through_the_noise() {
+    let Some(seen) = r61_replay("flip-1", 0, 465, None) else { return };
+    assert_eq!((seen.rand_from, seen.noise_from, seen.rider_from), (Some(0), Some(113), Some(114)), "{seen:?}");
+    assert!(seen.blend_rows.iter().copied().eq(114..465), "the blend from row 114 on: {seen:?}");
+    assert_eq!(seen.flag_rows, 0, "{seen:?}");
+    let Some(seen) = r61_replay("flip-1", 0, 465, Some(113)) else { return };
+    assert_eq!((seen.noise_from, seen.rider_from), (None, None), "{seen:?}");
+    assert!(seen.blend_rows.is_empty() && seen.flag_rows == 0, "{seen:?}");
 }

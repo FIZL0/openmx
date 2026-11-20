@@ -11925,7 +11925,48 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0xe73d90, 0xe74180, 0xe746a0: 0x3a bytes and one at +0x90 each), and by row 150 in 0x393848,
 #   SIM+0x2be0.. (0x6685c0..0x668ab9), 0x673b0c, 0x71b0c8 and heap blocks 0xafc790..0xb06807,
 #   0xb19d80..0xb1a45c, which stay different after the trail goes off. Who reads those: R61.
-# B35 — the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
+# R61 — of what the shown trail writes beyond S345's record, only rand's state reaches the simulation:
+# through the smooth noise's tables to the pose blend and the rider (tests/mxvatv_bike_ride.rs
+# r61_the_trail_parts_rand_after_the_rides_last_draw, r61_the_trails_rand_reaches_the_rider_through_the_noise).
+# Found with S345's replay, every store on the shown copy logged (Ee::log) and a temporary read watch in
+# Ee::read (pc, ra, address) over every byte that ever differed, both C15 rides; pcs placed by `./kit fn`.
+#   Writers and readers, rows 100-299 (ride-2 / flip-1 alike; the whole set is wider than S345's first
+#   row: heap 0xafa090..0xb09327 and 0xb19d80..0xb3ad23, and the trail's items 0xeb5b30..0xec1040):
+#   - 0x393848 (8 bytes): rand's state, *(0x00393a90)+0xa8, sd at 0x003561f0. See below.
+#   - The six objects: scene nodes (0xe73820, 0xe73d20, 0xe74390.. hang off the bike's +0x17bc..+0x17d8):
+#     +0x70..+0xa9 the world matrix cache and +0x100 bit 0 its up-to-date bit. The trail's emitters ask
+#     their spots (0x00194c20, 0x00195230), which refresh them earlier than the plain copy does. Every
+#     read goes through the refresh 0x00193b30 (bit set -> skip; else up the +0xf0 parents and compose
+#     down) or 0x00193d10 (the same bit; the bike's part place 0x00194da0 from 0x004d8af0 / 0x004dde6c):
+#     a lazy cache, the same values whenever read.
+#   - SIM+0x2be0.. (0x6685c0..0x668ab9, stores 0x0050e40c..0x0050e5ac, 0x0050eaa0), 0x673764..0x673f62
+#     (0x00514a90, 0x00514f88..0x00514fc8), 0x71b0c8 (0x0050da90), heap 0xafa090.. (the particle pools,
+#     0x0050d79c..0x0050da74) and 0xb19d80.. (batch vertices, 0x00514964..0x00514a70); the trail items and
+#     their emitter objects (0x0050ab40 light/douse, 0x0050a50c, 0x0050aad8, 0x004ff300..0x004ff9b0);
+#     0x1e8c708/0x1e8c734 (item resets 0x004fe860, 0x004ff614..). Read only by the effects: items' walk
+#     0x004fa4a0 and their virtuals 0x004fab10..0x004ff8b0, emitter gate 0x0050a040, 0x0050a8b0, the two
+#     emitter kinds 0x0050ceb0 / 0x0050db60, base 0x0050e7e0, batches 0x00514880 / 0x00514e40.
+#   - Rider 0x010af350 + 0xb0c, one byte (rows 100-299 only; sq at 0x004f29f8, a quad's w lane): read
+#     by nothing in the frame.
+#   Rand: sim-side draws on flip-1 are the noise build 0x00134680 (2047 draws, the first sample at row
+#   113), the rider's wreck cue pick 0x001972a0 and the wreck's 0x004eb554.. / 0x004edb60.. (row 125);
+#   ride-2 draws none. The emitters draw twice per spawning frame (0x0050d084/0x0050d0bc,
+#   0x0050dd54/0x0050dd8c). With the trail shown they stop: the shown copy's state freezes, parting at
+#   ride-2 row 128 and flip-1 row 195, after every sim draw, so neither ride's simulation sees it. Why
+#   the emitters stop under a shown trail was not followed.
+#   Shown from row 0 (flip-1): rand parts at row 0; the noise tables 0x003f3540..0x003f6d88 come out
+#   different at row 113; the trick hold's noise (0x004e4810) moves the pose blend +0x14e4 from row 114
+#   (never zeroed; read by the wreck test's "blend <= 0.95" and copied to +0x908, the rider's clip
+#   time), so the rider (0x010af350..+0xb00, its skeleton nodes, part bodies 0x010e31f0.. and
+#   0x01104d50..) from row 114, and after the wreck the ground ring 0x00541550, the spatial database and
+#   the rider's writes into the record (+0x870..+0x97c). The bike's physics blocks still match C15 every
+#   row, and the touching flag +0x920 (the one rider word the bike's frame reads, F41) never differs.
+#   With the shown copy's rand set to the plain copy's before row 113, nothing outside the effects
+#   differs (0x6562e2..0x656338 from row 33 is a batch only the plain copy starts, 0x00514d2c..): the
+#   noise is the only path. So a pure frame that ever runs the first-person camera must
+#   keep the emitters' draws under a shown trail, or rand (and every later noise build, wreck spin and
+#   cue pick) parts from the original's.
+# B35 —the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
 # (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
 #   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,
 #   the record's +0x34 touched and +0xf0 count; it writes only the record's +0x200 (the part). MX
