@@ -14367,3 +14367,37 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   Port: bikes strike via prop_strike_after with the other sides past the planes; the props' step
 #   runs after the riders (props_step_flown, the plane at striker 0); bodies_look and notes_frame
 #   run on default controls for player 1 (listener = the plane). race_frame stays off.
+
+# S492 — an AI bike knocks a prop while player 1 flies (tests/ai/flown_knock.rs
+#   s492_an_ai_bike_knocks_a_prop_while_player_1_flies; port order: Sim::step_flown_riders then
+#   Sim::props_step_flown)
+#   biplane.p2m2's state (free06), whole frames (S328 recipe), neutral pad. No AI rider meets a ball on
+#   its own in the state's first ticks, so ball 0 (object 0x00d3f510, body 0x00d3ce80, record
+#   0x00d46ac0, node 0x005a8dd0, mesh collidable 0x00d45580) is put on the ground at
+#   (2830.4, 243.56, 3104.23), where AI rider 0x01881b10's bike (record 0x007ffdf0) rides at tick 9:
+#   every float triple within 12 ft of the body's place in body/node/mesh shifted (put_ball.py's way),
+#   then enable 0x0015b790(object) and physics_collection_activate 0x003b27a0(collection). The
+#   collection = the mesh's second listener (+0xf4 list, [1]) - 0x30 = 0x00d3f1c0; its world +0x250.
+#   - Enable alone is not enough: without the activate the collection never steps.
+#   - The ball's tree key is re-filed during its own tick 0. The bike's search (rider+0x7bc) keeps
+#     its list (+0x30 BUILT = 1) while it stays in its bound, so it never sees the moved ball; the
+#     test clears BUILT once before tick 1 (a fresh gather, as if the ball had lain there).
+#   - A ball placed further along (2818.2, 243.6, 3108.3) is steered round by the AI and never struck.
+#   Each tick, in order:
+#   - plane node 0x0060b200's collides: plane, 0x018c1bd0, 0x019a9790, 0x01970060, 0x007ffdf0, then
+#     the woken ball's record last.
+#   - node world 0x0060b278: resolves of the plane, 0x01970060, 0x018c1bd0 (x4 substeps).
+#   - player updates: 0x01881b10 (resolves 0x007ffdf0 x2), 0x019a44b0 (0x019a9790 x2), 0x018f7290,
+#     the human 0x01890cd0; then world 0x00a83830.
+#   - then physics_collection_update 0x003b28a0(ball's collection): dynamics_world_step of 0x00d3f410,
+#     the ball's resolve(record, 1) x2. So the props' step runs after every rider's update, the flying
+#     human's too — the port's order (props_step_flown after step_flown_riders) holds.
+#   Tick 9: the ball's own rays strike the bike (kind 0 on the ball naming 0x007ffdf0, kind 1 mirror on
+#   the bike). Tick 10, the knock: collide(0x007ffdf0) leaves a kind-0 entry naming the ball; during
+#   it physics_object_struck 0x0015ad40 calls enable(ball) (ra 0x0015ad6c). The ball's list is then
+#   [k1 0x007ffdf0 (mirror), k0 0x007ffdf0]. The bike's two resolves (inside its player update) name
+#   the ball [k0 ball, k1 ball]; the ball resolves in its collection's step after all players; its
+#   velocity goes to about (-14.1, 3.3, 21.6).
+#   Not checked: an asleep ball struck (the test's ball is already awake); the port's ball/bike bits
+#   against this run (the port's own another_rider_strikes_while_player_1_flies checks a player-2 bike
+#   against step_all, not this capture).
