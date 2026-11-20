@@ -534,3 +534,130 @@ fn mxvatv_mass_properties_every_word_is_the_originals() {
         assert!(n >= 50, "only {n} file(s) had {want:?}: {tally:?}");
     }
 }
+
+// --- MD63e: the ride's bike on the part reader's words ------------------------------------------------
+
+/// What the ride makes of a file's `[Mass Properties]` ([`handling::mxvatv_phy`], then the collider
+/// the contacts read), as `(name, the record's or body's address, bits)`: each compared with the word
+/// SLUS-21104's part reader leaves there.
+fn ride_words(f: &BTreeMap<String, String>) -> Vec<(&'static str, u32, u32)> {
+    let phy = handling::mxvatv_phy_ini(&Ini::parse(&text(f)), &CurveTable::build());
+    let c = game_sim::rider_contact::collider(&phy.collisions, phy.mass.mass);
+    let p = &phy.collisions;
+    let mut w = vec![
+        ("the chassis' mass", BODY + 0x18, phy.mass.mass.to_bits()),
+        ("the gravity force's y", GRAVITY + 0x44, phy.mv.gravity.y().to_bits()),
+        ("CheckForHighSpeedCollisions", RECORD + 0x30, u32::from(p.check_for_high_speed_collisions)),
+        ("the collision mass", RECORD + 0x58, c.mass.to_bits()),
+        ("HighSpeedRaySpeedScale", RECORD + 0xb0, p.high_speed_ray_speed_scale.to_bits()),
+        ("HighSpeedUnpenetrationDistance", RECORD + 0xb4, p.high_speed_unpenetration_distance.to_bits()),
+        ("the sweep's facing", RECORD + 0xb8, p.high_speed_min_collision_angle.to_bits()),
+        ("MaxPenetration", RECORD + 0x10c, c.max_depth.to_bits()),
+        ("the spring's stiffness", RECORD + 0x118, c.scenery.stiffness.to_bits()),
+        ("the spring's damping", RECORD + 0x11c, c.scenery.damping.to_bits()),
+        ("Restitution", RECORD + 0x120, c.scenery.restitution.to_bits()),
+        ("BodyMaxPenetration", RECORD + 0x124, p.body_max_compression.to_bits()),
+        ("the body spring's stiffness", RECORD + 0x130, c.actor.stiffness.to_bits()),
+        ("the body spring's damping", RECORD + 0x134, c.actor.damping.to_bits()),
+        ("BodyRestitution", RECORD + 0x138, c.actor.restitution.to_bits()),
+        ("AngularImpulseEnabled", RECORD + 0x13c, u32::from(c.scenery.angular)),
+        ("BodyAngularImpulseEnabled", RECORD + 0x140, u32::from(c.actor.angular)),
+        ("Friction", RECORD + 0x1a0, c.scenery.friction.to_bits()),
+        ("BodyFriction", RECORD + 0x1a4, c.actor.friction.to_bits()),
+    ];
+    let mut quad = |name, a: u32, v: Vf| {
+        for (k, b) in v.to_bits().into_iter().enumerate() {
+            w.push((name, a + 4 * k as u32, b));
+        }
+    };
+    quad("CollisionCofGOffset", RECORD + 0x80, c.cofg);
+    quad("HighSpeedRayOffset", RECORD + 0xa0, p.high_speed_ray_offset);
+    quad("SpringMomentScale", RECORD + 0x160, c.scenery.spring_mask);
+    quad("FrictionMomentScale", RECORD + 0x170, c.scenery.friction_mask);
+    quad("BodySpringMomentScale", RECORD + 0x180, c.actor.spring_mask);
+    quad("BodyFrictionMomentScale", RECORD + 0x190, c.actor.friction_mask);
+    for (z, v) in c.surfaces.iter().enumerate() {
+        w.push(("a FrictionZone", RECORD + 0x1a8 + 4 * z as u32, v.to_bits()));
+    }
+    w
+}
+
+/// The flag words the record keeps whole are the ride's bools: a word that is neither 0 nor 1 is
+/// compared as whether it is 0.
+fn flag_word(name: &str) -> bool {
+    matches!(name, "CheckForHighSpeedCollisions" | "AngularImpulseEnabled" | "BodyAngularImpulseEnabled")
+}
+
+/// MD63e — an MX vs. ATV bike's ride ([`handling::mxvatv_phy`]) reads its `[Mass Properties]` as
+/// SLUS-21104's part reader does, not as MX Unleashed's vehicle reader: over 10,000 files with every
+/// key present or not, the chassis' mass, the gravity force, the collider's masses, springs (the
+/// stiffness and damping per mass, the body's `-1`s), restitutions, moment scales, angular impulse
+/// flags, frictions and the sweep's words are the ones the original's reader writes, bit for bit.
+#[test]
+fn mxvatv_ride_mass_properties_are_the_part_readers() {
+    let Some(mut ee) = image() else { return };
+    let file = Rc::new(RefCell::new(BTreeMap::new()));
+    hook_ini(&mut ee, &file);
+    ee.hooks.remove(&INI_FLAG);
+    let mut g = Gen(0x0d63_e000);
+    let mut tally = BTreeMap::<&str, u32>::new();
+    let curve = CurveTable::build();
+    for k in 0..10_000 {
+        let (f, _) = g.full();
+        *file.borrow_mut() = f.clone();
+        reset(&mut ee);
+        ee.set_u32(RECORD + 0xe4, BODY);
+        ee.call(READER, &[u64::from(OBJ), u64::from(INI)], &[], 2_000_000);
+        let p = mass::Part::read(&Ini::parse(&text(&f)).section("Mass Properties"), Vf::new(1.0, 1.0, 1.0, 1.0), &curve);
+        for t in full_path(&f, &p) {
+            *tally.entry(t).or_default() += 1;
+        }
+        for (name, at, bits) in ride_words(&f) {
+            let was = word(&ee, at);
+            let same = if flag_word(name) { (was != 0) == (bits != 0) } else { was == bits };
+            assert!(
+                same,
+                "file {k}: {name} at {at:#x} is {was:#010x} ({}) in the original and {bits:#010x} ({}) in the ride\n{}",
+                f32::from_bits(was),
+                f32::from_bits(bits),
+                text(&f)
+            );
+        }
+    }
+    for want in ["mass", "no mass", "collision mass", "no collision mass", "BodySpringStiffness", "BodySpringDamping",
+                 "BodyMaxPenetration", "BodyRestitution", "BodyFriction", "body spring moment scale -1",
+                 "body friction moment scale -1", "spring damping 0", "facing behind", "ON prefix", "strtol base 0"] {
+        let n = tally.get(want).copied().unwrap_or(0);
+        assert!(n >= 50, "only {n} file(s) had {want:?}: {tally:?}");
+    }
+}
+
+/// MD63e without the image: an MX vs. ATV file with no mass keys rides on the part reader's
+/// defaults, where MX Unleashed's reader would leave a weightless bike with no collision spring.
+#[test]
+fn an_mx_phy_without_mass_keys_rides_on_the_part_readers_defaults() {
+    let t = "[Front Tire]\nSpring = 30\nSpringWhenStopped = 20\n[Rear Tire]\nSpring = 40\n";
+    let phy = handling::mxvatv_phy(t.as_bytes(), &CurveTable::build());
+    let m = mass::MASS_PER_POUND * F(500.0);
+    assert_eq!(phy.mass.weight, F(500.0));
+    assert_eq!(phy.mass.mass.to_bits(), m.to_bits(), "Weight 500 times the reader's pounds to mass");
+    assert_ne!(phy.mass.mass.to_bits(), (F(500.0) / F(32.2)).to_bits(), "not MX Unleashed's Weight / 32.2");
+    // The wheels' springs are per pound of the part's mass.
+    assert_eq!(phy.mv.front_spring, game_sim::phy::spring_rate(F(30.0), m));
+    assert_eq!(phy.mv.front_spring_when_stopped, game_sim::phy::spring_rate(F(20.0), m));
+    assert_eq!(phy.mv.rear_spring, game_sim::phy::spring_rate(F(40.0), m));
+    let c = &phy.collisions;
+    assert_eq!((c.spring, c.damping, c.max_compression), (F(10.0), F::from_bits(0x3f33_3333), F(0.25)));
+    assert_eq!((c.body_spring, c.body_damping, c.body_max_compression), (c.spring, c.damping, c.max_compression));
+    assert_eq!(c.spring_moment_scale, Vf::new(1.0, 1.0, 1.0, 1.0));
+    assert_eq!(c.body_friction_moment_scale, Vf::new(1.0, 1.0, 1.0, 1.0));
+    assert!(!c.check_for_high_speed_collisions);
+    assert!(c.angular_impulse_enabled && c.body_angular_impulse_enabled);
+    assert_eq!(c.collision_weight, F(500.0));
+    assert_eq!(c.collision_mass.to_bits(), m.to_bits());
+    assert_eq!(c.high_speed_min_collision_angle, F::ONE, "the cosine of 0");
+    // MX Unleashed's own files are read as before.
+    let mxu = game_sim::phy::Phy::read(&Ini::parse(t), &CurveTable::build());
+    assert_eq!(mxu.mass.mass, F::ZERO);
+    assert_eq!(mxu.collisions.spring, F::ZERO);
+}

@@ -11769,6 +11769,25 @@ atv_heap_free               atv 0x001b76d0 = free
 #   stack). The record keeps the box's inertia; the body gets the file's.
 #   State 4 (race250p, 420 lb): the load's half box is (1.4301566, 2.3848903, 3.8156264), worked back
 #   from rec+0x60; the box call on state 4's node now gives a larger one.
+# MD63e — the ride's MX vs. ATV bike on the part reader (game_sim::handling::mxvatv_mass, called by
+# mxvatv_phy_ini over Phy::read of the moved keys; tests/mxvatv_mass.rs
+# mxvatv_ride_mass_properties_are_the_part_readers). Comment rows only.
+#   Diffed against Phy::read (MXU's vehicle reader): what differed and is now the part reader's:
+#   chassis mass Weight*0.0310559 on Weight default 500 (MXU Weight/32.2, default 0), and the four
+#   wheel springs |k * that mass * 32.2| (MD122: the tire reader takes the part's mass); collision
+#   springs SpringStiffness 10 / SpringDamping 0x3f333333 / MaxPenetration 0.25 (MXU 0); moment scales
+#   default ones (MXU -1,-1,-1,1 = no mask), body two = the others only for an explicit -1,-1,-1,1;
+#   AngularImpulseEnabled, BodyAngularImpulseEnabled, CheckForHighSpeedCollisions by mass::flag, the
+#   last default 0 (MXU 1); CollisionWeight default the part's Weight, a mass <= 0 leaves rec+0x58 0;
+#   the sweep's facing cos(angle as radians), default angle 0 (MXU degrees, default -1).
+#   Same in both: GravityScale/force and frictions (MD63d), Inertia/CofG/WreckCofG/BalanceCofG/travels/
+#   YawRateLimit (the bike loader's re-read, MXU's keys and defaults), Restitution (0), the body -1s
+#   (the collider resolves them as the record does). Not taken: Radius, the dampings, InertiaScale (the
+#   body's; the ride's chassis has its own), the record's box inertia (the collider has none). A lane
+#   of Inertia under 0: the body writes 0 for its inverse, Ride::new inverts the matrix (no file has one).
+#   Oracle: 10,000 Gen::full files, the image's reader vs the ride's Phy + rider_contact::collider:
+#   body+0x18, g+0x44, rec+0x30/+0x58/+0x80/+0xa0/+0xb0/+0xb4/+0xb8/+0x10c/+0x118..+0x124/+0x130..+0x140/
+#   +0x160..+0x19c/+0x1a0..+0x1e4, bit for bit (flag words as zero or not).
 
 # F31b5f — the bike words the tail's, wreck's and update's interpreter callees write, on C15 ride-2 and
 # flip-1 (game_sim::handling::update::trick_hold, wreck::settle; tests/mxvatv_bike_ride.rs). Journal:
