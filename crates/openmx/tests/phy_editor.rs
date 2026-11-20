@@ -173,24 +173,28 @@ fn an_edited_bike_saves_and_reloads() {
     let saved = phy_editor::load(&folder).unwrap();
     assert_eq!((saved.id.as_str(), saved.name.as_str(), saved.bike.as_str()), ("phy_moon_bike", "Moon Bike!", "race125p.phy"));
     assert_eq!(saved.edits, editor.edits, "the knobs come back");
-    assert_eq!(format!("{:?}", saved.read(&curve())), format!("{:?}", editor.phy(&curve())), "the saved file is the edited bike");
+    let file = Phy::read_bytes(&std::fs::read(folder.join("race125p.phy")).unwrap(), &curve());
+    assert_eq!(format!("{file:?}"), format!("{:?}", editor.phy(&curve())), "the saved file is the edited bike");
     // and the knobs taken over a fresh editor on the disc's file build it again
     let mut again = Editor::new("Bike\\Race125P.phy", bike().as_bytes());
     again.take(&saved);
     assert_eq!(format!("{:?}", again.phy(&curve())), format!("{:?}", editor.phy(&curve())));
     assert_eq!(phy_editor::listed(&mods, "RACE125P.phy").len(), 1);
     assert!(phy_editor::listed(&mods, "pro250p.phy").is_empty());
-    let (mut a, mut b) = (sim_on(saved.read(&curve())), sim_on(editor.phy(&curve())));
+    let (mut a, mut b) = (sim_on(file), sim_on(editor.phy(&curve())));
     assert_eq!(ride(&mut a, 120), ride(&mut b, 120));
     std::fs::remove_dir_all(mods.parent().unwrap()).unwrap();
 }
 
 #[test]
-fn an_edited_bike_is_refused_online_unless_every_seat_has_it() {
-    assert_eq!(phy_editor::online_refusal(false, false, false), None);
-    assert!(phy_editor::online_refusal(true, false, true).is_some(), "unsaved edits are no file another machine holds");
-    assert!(phy_editor::online_refusal(true, true, false).is_some());
-    assert_eq!(phy_editor::online_refusal(true, true, true), None);
-    assert_eq!(phy_editor::pack_key("phy_moon_bike"), "handling/phy_moon_bike");
+fn an_edited_bike_is_refused_online() {
+    let (bytes, curve) = (bike(), curve());
+    let disc = Phy::read_bytes(bytes.as_bytes(), &curve);
+    assert_eq!(phy_editor::held(false, false, &disc, bytes.as_bytes(), &curve), None, "a free ride on the disc's file");
+    assert!(phy_editor::held(true, false, &disc, bytes.as_bytes(), &curve).is_some(), "online every machine rides the room's files");
+    assert!(phy_editor::held(false, true, &disc, bytes.as_bytes(), &curve).is_some(), "a tape rides the file it was written on");
+    let mut laid = disc.clone();
+    laid.handling = game_sim::handling::Handling::MxVsAtv;
+    assert!(phy_editor::held(false, false, &laid, bytes.as_bytes(), &curve).is_some(), "another game's handling is no file the knobs edit");
     assert_eq!(Edits::default().changed(), 0);
 }

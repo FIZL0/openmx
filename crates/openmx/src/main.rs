@@ -9444,6 +9444,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // And Backwards Landings Bail's (S161).
     let mut menu_back = front.as_deref().map(|f| f.menu.settings.backwards_bail);
+    // The physics editor (P387) over player 1's bike, and why it can't turn anything on this ride.
+    let phy_held = phy_editor::held(online.is_some(), head.is_some() || world.tape.is_some(), &stock_phys[0], &phy_bytes, &tables.ride.curve);
+    let mut phy_desk = phy_editor::Editor::new(&format!("{}.phy", bike_words[0]), &phy_bytes);
+    let mut phy_fill = true;
+    if let Some(front) = front.as_deref_mut() {
+        physics_carried(&mut front.menu, &mut phy_desk, phy_held, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve);
+    }
     // Each seat's wreck rumble (P183): the plane's crash word last frame, to see it go up.
     let mut wreck_rumbles: Vec<pad::WreckRumble> = Vec::new();
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
@@ -10622,6 +10629,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("backwards landings bail: {} (from the pause)", if on { "on" } else { "off" });
                 }
             }
+            // The physics editor's page (P387): what it asked, and the ride retuned to it at once.
+            physics_frame(&mut front.menu, &mut phy_desk, phy_held, &mut phy_fill, &mut stock_phys, &mut world.seats, &mods, &tables.ride.curve, &args);
             // Each player frozen while their own pause is open (P84), the others riding on. Online the
             // seats are the session's, frozen at the tick their pads say so (below).
             for (i, seat) in world.seats.iter_mut().enumerate() {
@@ -16358,6 +16367,114 @@ fn remodify(
         if let Some(cam) = &mut rig.heli_camera {
             cam.cam.ceiling = to.plane_eye_ceiling(i, fog);
         }
+    }
+}
+
+/// The physics editor's knobs from the last ride on the same bike (P387), on this one as it starts:
+/// the page keeps them across rides, and with the switch on and nothing holding the bike, the ride
+/// rides them from its first tick.
+fn physics_carried(
+    menu: &mut menu::Menu,
+    desk: &mut phy_editor::Editor,
+    held: Option<&str>,
+    stock: &mut [Phy],
+    seats: &mut [Seat],
+    mods: &game_sim::modifiers::Mods,
+    curve: &game_sim::camera::CurveTable,
+) {
+    let p = &menu.physics;
+    if p.bike != desk.file_name() || p.knobs.len() != phy_editor::COUNT {
+        return;
+    }
+    for (e, k) in desk.edits.0.iter_mut().zip(&p.knobs) {
+        *e = k.pct;
+    }
+    if menu.settings.physics_editor && held.is_none() && !desk.edits.is_stock() && !stock.is_empty() && !seats.is_empty() {
+        stock[0] = desk.phy(curve);
+        mods.resim(mods, 0, &stock[0], &mut seats[0].sim);
+        println!("physics editor: {} knobs changed on {}, from the last ride", desk.edits.changed(), desk.file_name());
+    }
+}
+
+/// A frame of the physics editor (P387): what its page asked done — a knob turned or put back, the
+/// knobs saved as a handling mod or a saved one's taken — and on a change player 1's bike built again
+/// from the knobs and the ride retuned to it where it is ([`game_sim::modifiers::Mods::resim`], as a
+/// change of modifiers in the pause is), under the ride's modifiers: the next tick rides it. The page
+/// is filled again after. With the switch off nothing is asked and the bike is the file's.
+#[allow(clippy::too_many_arguments)]
+fn physics_frame(
+    menu: &mut menu::Menu,
+    desk: &mut phy_editor::Editor,
+    held: Option<&str>,
+    fill: &mut bool,
+    stock: &mut [Phy],
+    seats: &mut [Seat],
+    mods: &game_sim::modifiers::Mods,
+    curve: &game_sim::camera::CurveTable,
+    args: &Args,
+) {
+    use menu::physics::Ask;
+    if !menu.settings.physics_editor {
+        return;
+    }
+    let mut turned = false;
+    for ask in menu.take_physics() {
+        if held.is_some() {
+            break;
+        }
+        match ask {
+            Ask::Turn(i, up) if i < phy_editor::COUNT => {
+                let was = desk.edits.0[i];
+                desk.edits.step(i, up);
+                turned |= desk.edits.0[i] != was;
+            }
+            Ask::Stock(i) if i < phy_editor::COUNT => {
+                turned |= desk.edits.0[i] != phy_editor::STOCK;
+                desk.edits.0[i] = phy_editor::STOCK;
+            }
+            Ask::Turn(..) | Ask::Stock(_) => {}
+            Ask::Reset => {
+                turned |= !desk.edits.is_stock();
+                desk.edits = phy_editor::Edits::default();
+            }
+            Ask::Save(name) => {
+                menu.physics.said = Some(match mods_dir(args) {
+                    Some(dir) => match desk.save(&dir, &name) {
+                        Ok(folder) => {
+                            println!("physics editor: saved {} as {}", desk.file_name(), folder.display());
+                            format!("Saved as {name}, handling/{} in the mods folder.", phy_editor::mod_id(&name))
+                        }
+                        Err(e) => format!("Not saved: {e}"),
+                    },
+                    None => "Not saved: the mods folder is off (Settings' Mods).".into(),
+                });
+                *fill = true;
+            }
+            Ask::Load(at) => {
+                let saved = mods_dir(args).map(|dir| phy_editor::listed(&dir, &desk.file_name())).unwrap_or_default();
+                if let Some(s) = saved.get(at) {
+                    desk.take(s);
+                    turned = true;
+                    menu.physics.said = Some(format!("Loaded {}, handling/{} in the mods folder.", s.name, s.id));
+                }
+            }
+        }
+    }
+    if turned && !stock.is_empty() && !seats.is_empty() {
+        stock[0] = desk.phy(curve);
+        mods.resim(mods, 0, &stock[0], &mut seats[0].sim);
+        println!("physics editor: {} knobs changed on {}", desk.edits.changed(), desk.file_name());
+        *fill = true;
+    }
+    if std::mem::take(fill) {
+        let p = &mut menu.physics;
+        p.bike = desk.file_name();
+        p.held = held.map(str::to_string);
+        p.knobs = phy_editor::knobs()
+            .enumerate()
+            .map(|(i, k)| menu::physics::Shown { group: k.group, label: k.label, about: k.about, pct: desk.edits.0[i], value: desk.has(i).then(|| desk.value(i)).flatten() })
+            .collect();
+        p.saved = mods_dir(args).map(|dir| phy_editor::listed(&dir, &p.bike).into_iter().map(|s| s.name).collect()).unwrap_or_default();
     }
 }
 

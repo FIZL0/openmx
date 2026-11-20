@@ -55,6 +55,7 @@ use std::path::{Path, PathBuf};
 pub mod ink;
 #[path = "menu_pages.rs"]
 mod pages;
+pub use pages::physics;
 #[path = "menu_cameras.rs"]
 pub mod cameras;
 #[path = "menu_screens.rs"]
@@ -531,6 +532,9 @@ pub struct Settings {
     /// the original's pop-up when the rider stops beside one. Off, neither is; the pause's switch
     /// stays. On unless turned off.
     pub bays: bool,
+    /// Whether the Ride tab offers the physics editor (P387), which edits the ridden bike's `.phy`
+    /// as it rides. Off unless turned on.
+    pub physics_editor: bool,
     /// The game modifiers the next ride loads with (P55): the original game's unless changed.
     pub modifiers: Mods,
     /// Modifier presets saved by name, in the order they were saved. Each is one player's set
@@ -1473,6 +1477,7 @@ impl Default for Settings {
             vsync: true,
             frame_limit: FrameLimit::default(),
             bays: true,
+            physics_editor: false,
             modifiers: Mods::original(),
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
@@ -1769,6 +1774,7 @@ impl Settings {
                 "vsync" => s.vsync = v != "off",
                 "frame_limit" => s.frame_limit = FrameLimit::from_word(v).unwrap_or(s.frame_limit),
                 "machine_bays" => s.bays = v != "off",
+                "physics_editor" => s.physics_editor = v == "on",
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
                 "trick_packs" => s.trick_packs = pack_names(v),
@@ -1916,6 +1922,7 @@ impl Settings {
             self.render_scale.word()
         ) + &self.display_text()
             + &self.bays_text()
+            + if self.physics_editor { "physics_editor = on\n" } else { "" }
             + &self.air_wrecks_text()
             + &self.backwards_bail_text()
             + &self.atv_text()
@@ -2803,10 +2810,13 @@ pub enum Screen {
     /// P363: the rider's statistics, off the race-track pick's Square: player 0's record, its
     /// global and its racing statistics, after the original's statistics page.
     Stats,
+    /// P387's physics editor, a page of the Ride tab's: the ridden bike's `.phy` as knobs, saved as
+    /// a handling mod.
+    Physics,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 28] = [
+    pub const ALL: [Screen; 29] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2835,6 +2845,7 @@ impl Screen {
         Screen::PauseGarage,
         Screen::Shop,
         Screen::Stats,
+        Screen::Physics,
     ];
 
     fn index(self) -> usize {
@@ -2872,6 +2883,7 @@ impl Screen {
             Screen::PauseGarage => "pause-garage",
             Screen::Shop => "shop",
             Screen::Stats => "stats",
+            Screen::Physics => "physics",
         }
     }
 
@@ -2909,6 +2921,7 @@ impl Screen {
             Screen::PauseGarage => "Garage",
             Screen::Shop => "Unlock Shop",
             Screen::Stats => "Statistics",
+            Screen::Physics => "Physics Editor",
         }
     }
 }
@@ -3533,6 +3546,8 @@ pub struct Menu {
     pub music_games: Vec<MusicGame>,
     /// The preset the modifiers' Load Preset row is on (P55).
     mod_preset: usize,
+    /// The physics editor's page (P387), which the shell fills from the ridden bike's file.
+    pub physics: physics::Panel,
     /// Each screen's tab, in [`Screen::ALL`]'s order (P118): Settings' and the Garage's.
     tab: [usize; Screen::ALL.len()],
     /// Whose rows the pages' Player rows show, 0 for 1P (P118).
@@ -3825,6 +3840,7 @@ impl Menu {
             music_choices: Vec::new(),
             music_games: Vec::new(),
             mod_preset: 0,
+            physics: physics::Panel::default(),
             tab: [0; Screen::ALL.len()],
             player: 0,
             mods_all: true,
@@ -4956,6 +4972,11 @@ impl Menu {
                 self.open_settings(pages::TAB_RIDE);
                 self.open_original();
             }
+            Screen::Physics => {
+                self.main();
+                self.open_settings(pages::TAB_RIDE);
+                self.open_physics();
+            }
             Screen::Keyboard => {
                 self.main();
                 self.open_garage();
@@ -5011,7 +5032,7 @@ impl Menu {
             Screen::Splash => 1,
             Screen::Main => main_rows().len(),
             Screen::Tracks => self.track_count(),
-            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page_of(screen).len().max(1),
+            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => self.pause_layout().len(),
@@ -5451,7 +5472,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Store | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::PauseGarage => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Store | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics | Screen::PauseGarage => unreachable!(),
         }
         Act::Stay
     }
@@ -5487,7 +5508,7 @@ impl Menu {
                     // code is all capitals.
                     let word_start = self.typing.is_empty() || self.typing.ends_with(' ');
                     let upper = match self.typing_for {
-                        Typing::Name | Typing::Preset | Typing::Camera | Typing::Fame => word_start,
+                        Typing::Name | Typing::Preset | Typing::Camera | Typing::Fame | Typing::Physics => word_start,
                         Typing::Code => true,
                         Typing::Chat | Typing::Number => false,
                     };
@@ -5546,6 +5567,11 @@ impl Menu {
                 if !name.is_empty() {
                     self.save_camera(&name);
                 }
+            }
+            Typing::Physics => {
+                let name = clean_name(&self.typing);
+                self.pop();
+                self.finish_physics_name(&name);
             }
             Typing::Fame => {
                 let typed = std::mem::take(&mut self.typing);
@@ -5852,6 +5878,8 @@ enum Typing {
     Camera,
     /// The name a Hall of Fame record goes in under (P334).
     Fame,
+    /// A handling mod's name, the physics editor's Save as Mod (P387).
+    Physics,
 }
 
 impl Typing {
@@ -5861,7 +5889,7 @@ impl Typing {
             // A code is four; a little over lets a slip be seen and deleted.
             Typing::Code => 8,
             Typing::Chat => 40,
-            Typing::Preset | Typing::Camera => NAME_MAX,
+            Typing::Preset | Typing::Camera | Typing::Physics => NAME_MAX,
             Typing::Number => roster::NUMBER_MAX,
             Typing::Fame => fame::NAME_KEYS,
         }
@@ -5876,6 +5904,7 @@ impl Typing {
             Typing::Camera => "Camera Name",
             Typing::Number => "Number",
             Typing::Fame => "Hall of Fame",
+            Typing::Physics => "Mod Name",
         }
     }
 }

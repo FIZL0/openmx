@@ -1,4 +1,4 @@
-//! **The physics editor** (P387, after MX vs. ATV Alive's Physics Studio as MXA's modders know it):
+//! **The physics editor** (P387, after MXA's Physics Studio's knob groups):
 //! the bike's `.phy` edited while it is ridden, a knob at a time, and kept as a handling mod.
 //!
 //! A knob is a scale on a group of the file's own numbers (Engine Power is every `HP<n>` of
@@ -8,8 +8,9 @@
 //! build off the same file. All knobs at 100% is the disc's file, read as it always is.
 //!
 //! Saved, the edited file goes to `mods/handling/<id>/` beside a `mod.json` of kind `handling`
-//! (which names the bike file and the knobs), a pack as every other mod is (P318): the online
-//! handshake hashes it like any pack.
+//! (which names the bike file and the knobs), a pack as every other mod is (P318), which the lobby
+//! lists and hashes like any. An online ride takes no edits ([`held`]): riding a saved one there,
+//! where every seat holds it, is P387a's.
 
 use game_sim::camera::CurveTable;
 use game_sim::phy::{Ini, Phy};
@@ -268,15 +269,6 @@ pub struct Saved {
     /// The bike file it edits (`race125p.phy`).
     pub bike: String,
     pub edits: Edits,
-    /// The edited file itself, which is what a ride on it reads.
-    pub phy: Vec<u8>,
-}
-
-impl Saved {
-    /// The bike it saved, through the ported loader.
-    pub fn read(&self, curve: &CurveTable) -> Phy {
-        Phy::read_bytes(&self.phy, curve)
-    }
 }
 
 /// The handling mod in `folder`, or why it is not one.
@@ -298,11 +290,9 @@ pub fn load(folder: &Path) -> Result<Saved, String> {
             }
         }
     }
-    let path = folder.join(&bike);
-    let phy = crate::files::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let leaf = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let id = said("id").unwrap_or(leaf);
-    Ok(Saved { name: said("name").unwrap_or_else(|| id.clone()), id, bike, edits, phy })
+    Ok(Saved { name: said("name").unwrap_or_else(|| id.clone()), id, bike, edits })
 }
 
 /// Every handling mod in `mods/handling/` for the bike file `bike` (`race125p.phy`), by folder name.
@@ -321,21 +311,19 @@ pub fn mod_id(name: &str) -> String {
     format!("phy_{}", if id.is_empty() { "custom" } else { id })
 }
 
-/// The pick's word for the pack a seat rides an edited bike from (P318's `kind/id`).
-pub fn pack_key(id: &str) -> String {
-    format!("{KIND}/{id}")
-}
-
-/// Whether a ride may go online with this seat's bike (P387): a bike edited and not saved is no file
-/// another machine could hold, so it never may; a saved mod only when every seat's machine holds
-/// that same mod (`every_seat_has`, P318's handshake). `None` is yes, else the reason.
-pub fn online_refusal(edited: bool, saved: bool, every_seat_has: bool) -> Option<&'static str> {
-    match (edited, saved, every_seat_has) {
-        (false, _, _) => None,
-        (true, false, _) => Some("An edited bike can't ride online. Save it as a handling mod, and every rider needs that mod."),
-        (true, true, false) => Some("An edited bike rides online only when every rider has its handling mod."),
-        (true, true, true) => None,
+/// Why the editor can't turn a ride's bike, or none (P387). An online ride is refused an edited bike:
+/// every machine rides the files the room's handshake held each seat to, and an edit is in none of
+/// them. A tape rides the file it was written on. And `stock`, the bike as the ride built it before
+/// its modifiers, has to be the disc's `bytes` read as they are: MX vs. ATV's handling or a trick
+/// pack laid over it is no file the knobs edit.
+pub fn held(online: bool, tape: bool, stock: &Phy, bytes: &[u8], curve: &CurveTable) -> Option<&'static str> {
+    if online {
+        return Some("Online rides keep the bike's own file: an edited bike can't ride online.");
     }
+    if tape {
+        return Some("A tape rides the bike's own file.");
+    }
+    (format!("{stock:?}") != format!("{:?}", Phy::read_bytes(bytes, curve))).then_some("Only on the original's handling, with no trick pack laid over the bike.")
 }
 
 /// `s` as a JSON string.

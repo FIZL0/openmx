@@ -312,8 +312,11 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     // Controls, Audio and Camera are Settings' tabs since P118, Graphics since P128, never a screen of
     // their own on the stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those. Results
     // is the shell's after a race is left (P327), `race_from_the_main_menu_rides_its_setup_and_shows_results`'s.
-    let wanted: Vec<Screen> =
-        Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics | Screen::Results)).collect();
+    // Physics opens only once its switch is on (P387), `the_physics_editor_is_off_by_default_and_asks_the_shell`'s.
+    let wanted: Vec<Screen> = Screen::ALL
+        .into_iter()
+        .filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics | Screen::Results | Screen::Physics))
+        .collect();
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
     let mut seen = HashSet::from([key(&menu)]);
@@ -550,6 +553,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         lobby_seats: 16,
         // No machines at their bays (P103).
         bays: false,
+        // The physics editor's switch on (P387).
+        physics_editor: true,
         // 1P on the original's camera and 3P on one of their own, the rest on the default (P82).
         cameras: {
             let mut c = [menu::CameraView::DEFAULT; menu::SEATS_MAX];
@@ -11020,4 +11025,37 @@ fn the_statistics_rows_read_the_riders_record() {
     let [(_, global), (_, racing)] = menu::stats_rows(&rec, true);
     assert_eq!(global[1], ("Kilometres Ridden", "16.1 km".to_string()));
     assert_eq!(words(&racing)[..3], ["Races: 3", "Wins: 1", "Win Percentage: 33%"]);
+}
+
+/// P387: the physics editor is off until the Ride tab's switch turns it on (and settings.txt keeps
+/// it); then its row opens the page the shell fills, whose knobs ask the shell rather than change
+/// anything themselves, dimmed where the bike's file has none of a knob or the ride holds the bike.
+#[test]
+fn the_physics_editor_is_off_by_default_and_asks_the_shell() {
+    use menu::physics::{Ask, Shown};
+    let (mut m, mut r) = fresh();
+    assert!(!m.settings.physics_editor);
+    assert!(!Settings::default().text().contains("physics_editor"));
+    settings_at(&mut m, &mut r, "Ride");
+    assert!(!m.page().iter().any(|row| row.key == menu::Key::PhysicsPage), "no page while it is off");
+    down_to(&mut m, &mut r, menu::Key::PhysicsEditor);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.physics_editor && m.take_changed());
+    assert!(Settings::parse(&m.settings.text()).physics_editor, "settings.txt keeps it");
+    let knob = |label, value: Option<&str>| Shown { group: "Engine", label, about: "", pct: 100, value: value.map(str::to_string) };
+    m.physics.bike = "race125p.phy".into();
+    m.physics.knobs = vec![knob("Engine Power", Some("11")), knob("Clutch", None)];
+    down_to(&mut m, &mut r, menu::Key::PhysicsPage);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Physics));
+    assert_eq!(m.page()[m.cursor(Screen::Physics)].key, menu::Key::PhyKnob(0), "it opens on the first knob");
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.take_physics(), [Ask::Turn(0, true), Ask::Stock(0)]);
+    let row = |m: &Menu, i| m.page().into_iter().find(|row| row.key == menu::Key::PhyKnob(i)).unwrap();
+    assert!(row(&m, 0).off.is_none() && row(&m, 1).off.is_some(), "a knob the file lacks is dimmed");
+    m.physics.held = Some("Online rides keep the bike's own file".into());
+    assert!(row(&m, 0).off.is_some(), "a held bike dims every knob");
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_physics().is_empty());
 }

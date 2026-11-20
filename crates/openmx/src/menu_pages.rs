@@ -5,6 +5,9 @@
 use super::*;
 use game_sim::modifiers::Category;
 
+#[path = "menu_physics.rs"]
+pub mod physics;
+
 /// Settings' tabs, which L1 and R1 step through, round from either end.
 /// Display is the screen's HUD and its aspect ratio (P176); Graphics (P128) the world's draw, the picture and its rate, under
 /// headings, with the Original Game page's graphics sub-switches (P126). The Original Game page is
@@ -230,6 +233,14 @@ pub enum Key {
     /// The Ride tab's row into the Original Game page (P179).
     OriginalPage,
     Departure(Departure),
+    /// P387: the Ride tab's physics editor switch and its row into the page; the page's knobs by
+    /// their place in [`physics::Panel::knobs`], and its Save, Load and Reset.
+    PhysicsEditor,
+    PhysicsPage,
+    PhyKnob(usize),
+    PhySave,
+    PhyLoad,
+    PhyReset,
     Heading,
 }
 
@@ -507,6 +518,7 @@ impl Menu {
             Screen::Modifiers => self.modifier_page(),
             Screen::Mods => self.mods_rows(),
             Screen::Original => self.original_rows(),
+            Screen::Physics => self.physics_rows(),
             _ => Vec::new(),
         };
         // P277: each dropdown's choices with their short hints
@@ -578,7 +590,7 @@ impl Menu {
 
     /// Whether a screen is an option page.
     pub fn is_page(screen: Screen) -> bool {
-        matches!(screen, Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original)
+        matches!(screen, Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics)
     }
 
     fn player_row(&self, about: &str) -> Row {
@@ -619,6 +631,7 @@ impl Menu {
         ];
         rows.extend(self.trick_rows());
         rows.push(original);
+        rows.extend(self.physics_switch_rows());
         rows.extend(updates);
         rows
     }
@@ -1890,6 +1903,10 @@ impl Menu {
         let next = |row: &Row| pick.unwrap_or_else(|| cycle(row.now.unwrap_or(0), d, row.choices.len()));
         // the modifiers page's Player row, and whether it is the host's with All Players (P134)
         let mods_players = (self.screen() == Some(Screen::Modifiers)).then(|| self.mods_own().is_none());
+        // P387's rows ask the shell, which owns the bike's file
+        if self.change_physics(row, p) {
+            return;
+        }
         // P223: a row the presets set, changed by hand (here or by the Original switch), ends Auto.
         let look = super::video::Look::of(&self.settings);
         let s = &mut self.settings;
