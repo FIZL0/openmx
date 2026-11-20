@@ -1305,6 +1305,18 @@ impl Obstacles for Tiled {
     }
 }
 
+impl crate::camera::UntamedScene for Tiled {
+    /// The tiles' terrain alone (B44).
+    fn world_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        world::march(self.finest, start, end, |x, z| self.at(x, z)).map(|(_, hit)| hit)
+    }
+
+    /// The tiles' collision shapes alone.
+    fn prop_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.shapes_along(start, end).map(|(_, hit)| hit)
+    }
+}
+
 /// A world as a heightfield: the box is the whole world's, and every query goes to the tile under
 /// the point through [`Heightfield::tile`], in that tile's coordinates, on that tile's own field
 /// ([`Ground::field`]). It has no cells of its own.
@@ -1485,6 +1497,26 @@ impl Obstacles for Land<'_> {
             Land::Track(p) => p.nearest(start, end),
             Land::Tiles(t) => t.nearest(start, end),
             Land::Woods(w) => w.world.nearest(start, end),
+        }
+    }
+}
+
+impl crate::camera::UntamedScene for Land<'_> {
+    fn world_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        use crate::camera::UntamedScene as _;
+        match self {
+            Land::Track(p) => p.world_nearest(start, end),
+            Land::Tiles(t) => t.world_nearest(start, end),
+            Land::Woods(w) => w.world.world_nearest(start, end),
+        }
+    }
+
+    fn prop_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        use crate::camera::UntamedScene as _;
+        match self {
+            Land::Track(p) => p.prop_nearest(start, end),
+            Land::Tiles(t) => t.prop_nearest(start, end),
+            Land::Woods(w) => w.world.prop_nearest(start, end),
         }
     }
 }

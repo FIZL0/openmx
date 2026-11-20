@@ -1066,6 +1066,26 @@ impl Surface for Nothing {
     }
 }
 
+impl UntamedScene for Nothing {}
+
+/// The scene as MX vs. ATV Untamed's follow camera asks it (B44): two segment questions where
+/// [`Obstacles`] has one. The filter's goal sweep (`FUN_003ab3a0`) asks the world's triangles in its
+/// first loop and the props, through its collision object, after; the eye's sweep asks the props.
+/// The rules differ (2 ft off a world face, 2.5 ft off a prop and the eye on its straight spring), so
+/// a prop answered as a world triangle is held at the wrong distance. Both default to
+/// [`Obstacles::nearest`], for a scene that is one thing.
+pub trait UntamedScene: Surface + Obstacles {
+    /// The nearest of the world's triangles on `start -> end`, back faces culled.
+    fn world_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.nearest(start, end)
+    }
+
+    /// The nearest prop on `start -> end`, back faces culled.
+    fn prop_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.nearest(start, end)
+    }
+}
+
 // --- what the camera asks the ground ---------------------------------------------------------------
 
 /// The ground, as the camera asks about it: one point, moved onto the surface under it.
@@ -2663,7 +2683,7 @@ impl UntamedFollow {
     /// ([`UntamedFollow::sweep_from_eye`]), the springs run, and the frame draws where they are.
     /// Either sweep finding a prop runs the eye on the straight spring this frame, at 0.8 of its
     /// tightness, so it slides along the prop rather than swinging round through it.
-    pub fn update(&mut self, dt: F, rider: &Ridden, scene: &mut (impl Surface + Obstacles)) -> View {
+    pub fn update(&mut self, dt: F, rider: &Ridden, scene: &mut impl UntamedScene) -> View {
         let goal = self.goal(rider);
         self.look.goal = goal.look;
         self.eye.goal = goal.eye;
@@ -2698,28 +2718,28 @@ impl UntamedFollow {
     /// Each world hit whose face looks back at the target point moves the line's end 2 ft out in
     /// front of the face, along its normal, so the eye slides along a wall rather than being pulled
     /// in; a face that looks away (the line leaving from behind it) moves the start 0.5 ft past it.
-    /// The original asks the world's triangles for those, and the props through its collision
-    /// object; here [`Obstacles::nearest`] answers both, and since it culls back faces only the
-    /// first kind reaches this. A prop on the line from the target point to the moved end moves the
+    /// Those are the world's triangles ([`UntamedScene::world_nearest`]); a prop is not met there
+    /// (B44), and since the ask culls back faces only the first kind of hit reaches this. A prop
+    /// ([`UntamedScene::prop_nearest`]) on the line from the target point to the moved end moves the
     /// end 2.5 ft out from it, and says so (the filter's `+0x29`). The goal is then the moved end
     /// (the original also blends it with the old goal by how long the eye has been pressed, and
     /// drops the blend), and both the eye and its goal are kept [`UNTAMED_EYE_FLOOR`] over the
     /// ground (`FUN_003a9e80`).
-    pub fn sweep_goal(&mut self, origin: Vf, scene: &mut (impl Surface + Obstacles)) -> bool {
+    pub fn sweep_goal(&mut self, origin: Vf, scene: &mut impl UntamedScene) -> bool {
         let mut pressed = false;
         let d = self.eye.goal.sub(origin);
         if untamed_dot(d, d).sqrt() > 0.0 {
             let mut start = origin;
             let mut end = self.eye.goal;
             for _ in 0..3 {
-                let Some(hit) = scene.nearest(start, end) else { break };
+                let Some(hit) = scene.world_nearest(start, end) else { break };
                 if untamed_dot(d, hit.normal) > 0.0 {
                     untamed_keep_off(&mut start, hit, F(0.5));
                 } else {
                     untamed_keep_off(&mut end, hit, F(2.0));
                 }
             }
-            if let Some(hit) = scene.nearest(origin, end) {
+            if let Some(hit) = scene.prop_nearest(origin, end) {
                 if untamed_has_normal(hit.normal) {
                     untamed_keep_off(&mut end, hit, F(2.5));
                     pressed = true;
@@ -2737,12 +2757,12 @@ impl UntamedFollow {
     /// line with the goal less than 1 ft in front of it puts the goal 2 ft in front, and says so.
     /// The original also keeps the last ten props it met and the last goal clear of one; nothing in
     /// the camera reads either.
-    pub fn sweep_from_eye(&mut self, scene: &mut impl Obstacles) -> bool {
+    pub fn sweep_from_eye(&mut self, scene: &mut impl UntamedScene) -> bool {
         let d = self.eye.goal.sub(self.eye.pos);
         if untamed_dot(d, d).sqrt() <= 0.1 {
             return false;
         }
-        let Some(hit) = scene.nearest(self.eye.pos, add3(self.eye.goal, d)) else { return false };
+        let Some(hit) = scene.prop_nearest(self.eye.pos, add3(self.eye.goal, d)) else { return false };
         if !untamed_has_normal(hit.normal) {
             return false;
         }

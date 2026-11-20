@@ -2,7 +2,7 @@
 //! quad at rest on Normal Camera, read out of the RAM image (`context/untamed/md147/spawn.ee.bin`,
 //! camera `0xf96e60`, its target block `0x1be5110`, its filter `0xf96b50`).
 
-use game_sim::camera::{Obstacle, Obstacles, Ridden, Surface, Target, UntamedFollow, UntamedPreset};
+use game_sim::camera::{Obstacle, Obstacles, Ridden, Surface, Target, UntamedFollow, UntamedPreset, UntamedScene};
 use game_sim::phy::Ini;
 use ps2_float::{F, Vf};
 
@@ -87,6 +87,8 @@ impl Obstacles for Flat {
     }
 }
 
+impl UntamedScene for Flat {}
+
 /// Flat ground far down and one wall: the plane `z = at`, its face towards `+z` when `facing` is 1
 /// and `-z` when −1. As [`Obstacles::nearest`] asks, a line that leaves from behind the face meets
 /// nothing.
@@ -117,6 +119,10 @@ impl Obstacles for Wall {
         Some(Obstacle { point, normal: Vf::new(0.0, 0.0, self.facing, 0.0) })
     }
 }
+
+/// The wall answers both of the Untamed camera's asks: it is a world face to the goal sweep's loop
+/// and a prop to the eye's sweep.
+impl UntamedScene for Wall {}
 
 /// The spawn quad turned square to `+z` and still.
 fn square() -> Ridden {
@@ -384,13 +390,12 @@ fn rocksbury() -> Option<game_sim::world::Props> {
     Some(props)
 }
 
-/// The stadium as the camera's filter meets it. Its walls are props, not the world's triangles: so
-/// the goal sweep's first ask in a frame (the world's, whose loop ends on a miss) meets nothing and
-/// every later ask is the props', unless `world_too`, when the props answer the world's ask as well
-/// (as a [`game_sim::world::Place`] does). The ground is far down.
+/// The stadium as the camera's filter meets it, asked as a [`game_sim::world::Place`] asks (B44):
+/// its walls are props, so the world's ask (the terrain's, here a floor far down that no line
+/// reaches) meets none of them and the props' ask meets them all. With `world_too` the props answer
+/// the world's ask as well, as the one merged ask did before the split.
 struct Stadium<'a> {
     props: &'a mut game_sim::world::Props,
-    asks: usize,
     world_too: bool,
 }
 
@@ -402,10 +407,16 @@ impl Surface for Stadium<'_> {
 
 impl Obstacles for Stadium<'_> {
     fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
-        self.asks += 1;
-        if self.asks == 1 && !self.world_too {
-            return None;
-        }
+        self.props.nearest(start, end)
+    }
+}
+
+impl UntamedScene for Stadium<'_> {
+    fn world_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        if self.world_too { self.props.nearest(start, end) } else { None }
+    }
+
+    fn prop_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
         self.props.nearest(start, end)
     }
 }
@@ -417,8 +428,8 @@ impl Obstacles for Stadium<'_> {
 /// first, nothing is on the target point's line yet and the eye's sweep puts the goal 2 ft out; on
 /// the other 379 the goal sweep's props hit puts it 2.5 ft out from the face that line meets (two
 /// faces of the wall, about 6 and 1.4 degrees off the z axis), and the eye, on the straight spring,
-/// runs up to 5.68 ft behind the face before it comes back. Asked as world triangles too, the same
-/// wall would stop the goal 2 ft out on all 379.
+/// runs up to 5.68 ft behind the face before it comes back. Asked as world triangles too (one merged
+/// ask, as before B44), the same wall would stop the goal 2 ft out on all 379.
 ///
 /// A row whose filter is not one frame on from the row before's (the reader caught the target block
 /// or the filter a frame early or late; told by the springs' last target point) is left out.
@@ -442,7 +453,7 @@ fn r51_the_eye_backed_into_rocksburys_wall_is_the_originals() {
             cam.eye = was.spring(0x70);
             let rider = rows[j].ridden();
             let unswept = cam.goal(&rider).eye;
-            cam.update(F(1.0 / 30.0), &rider, &mut Stadium { props, asks: 0, world_too });
+            cam.update(F(1.0 / 30.0), &rider, &mut Stadium { props, world_too });
             (cam, unswept)
         };
         let (cam, unswept) = frame(false, &mut props);

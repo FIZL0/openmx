@@ -999,6 +999,18 @@ impl Obstacles for Place<'_> {
     }
 }
 
+impl crate::camera::UntamedScene for Place<'_> {
+    /// The terrain's crossing alone: the world's triangles, which the collision shapes are not.
+    fn world_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.ground.nearest(start, end)
+    }
+
+    /// The collision shapes' hit alone.
+    fn prop_nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.props.nearest(start, end)
+    }
+}
+
 /// A point a fraction of the way along `span` from `start`, over `xyz`, with `start`'s own `w`.
 fn along(start: Vf, span: Vf, t: F) -> Vf {
     start.merge(Dest::XYZ, start.add(span.mul_q(t.0)))
