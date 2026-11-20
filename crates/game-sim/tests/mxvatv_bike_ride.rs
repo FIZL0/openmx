@@ -23715,3 +23715,117 @@ fn the_fade_search_is_the_originals() {
         assert!(kinds.contains_key(k), "no {k}: {kinds:?}");
     }
 }
+
+// --- S345: the first-person bit the camera link can add leaves the simulation alone ----------------
+
+/// The bike's words the sync's first-person branches write (`+0x944`, the trail's last on; the record
+/// `+0xa98..+0xb44`, which holds `+0xaa0..+0xacf`), and its flags.
+const S345_RECORD: [(u32, u32); 3] = [(0x444, 4), (0x944, 4), (0xa98, 0xac)];
+
+/// What one S345 replay saw: rows where the first-person record differed, where the trail's byte did,
+/// and where bytes outside the record, the trail's byte and the stack did (the first such row's
+/// ranges kept).
+#[derive(Debug, Default)]
+struct S345Seen {
+    record_rows: u32,
+    trail_rows: u32,
+    other_rows: u32,
+    first_other: Option<String>,
+}
+
+/// One C15 capture replayed whole in the interpreter on two copies of state 4, one with the flags
+/// 0x18 as captured and one with the first-person camera's 0x20 or-ed in (what F48's camera link
+/// does when a post switches to the remembered first-person camera), so every sync on that copy
+/// takes its `+0xa94` branches, the trail's too (the replay's `+0x734` is 8). With `camera`, both
+/// copies' `+0xb34` is 1 from row 100 to row 299, as the first-person camera sets it while it is
+/// the current one (0x0048ecb4, cleared at 0x0048ed3c). Every row the first-person copy must match
+/// the capture's physics blocks; the two copies' RAM is compared whole.
+fn s345_replay(name: &str, len: usize, camera: bool) -> Option<S345Seen> {
+    let (mut a, rows) = (hooked(image()?), rows(name)?);
+    let mut b = hooked(image()?);
+    assert_eq!(rows.len(), len, "{name}'s rows");
+    assert_eq!(a.u32_at(BIKE + 0x444), 0x18, "state 4's flags");
+    assert_eq!([0x734, 0x9c4, 0xa94].map(|o| a.u32_at(BIKE + o)), [8, 0x10, 0x20], "the replay's, camera's and first-person masks");
+    b.set_u32(BIKE + 0x444, 0x38);
+    let trail = a.u32_at(BIKE + 0x10dc);
+    assert_ne!(trail, 0, "the bike's trail");
+    let stack = a.ram.len() as u32 - 0x0004_0000;
+    let allowed = |at: u32| {
+        S345_RECORD.iter().any(|&(o, n)| (BIKE + o..BIKE + o + n).contains(&at)) || at == trail + 0x21 || at >= stack
+    };
+    let mut seen = S345Seen::default();
+    for (r, row) in rows.iter().enumerate() {
+        for ee in [&mut a, &mut b] {
+            match r {
+                100 if camera => ee.set_u32(BIKE + 0xb34, 1),
+                300 if camera => ee.set_u32(BIKE + 0xb34, 0),
+                _ => {}
+            }
+            poke(ee, row, &READER);
+            ee.set(28, GP);
+            ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        }
+        let d = diff(&b, row);
+        assert!(d.is_empty(), "{name} row {r}, first-person: {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        let mut odd: Vec<(u32, u32)> = Vec::new();
+        let (mut rec, mut tr) = (false, false);
+        for (page, (x, y)) in a.ram.chunks(0x1000).zip(b.ram.chunks(0x1000)).enumerate() {
+            if x == y {
+                continue;
+            }
+            for (k, _) in x.iter().zip(y).enumerate().filter(|(_, (p, q))| p != q) {
+                let at = (page * 0x1000 + k) as u32;
+                if !allowed(at) {
+                    match odd.last_mut() {
+                        Some((_, end)) if *end + 16 > at => *end = at + 1,
+                        _ => odd.push((at, at + 1)),
+                    }
+                }
+                rec |= (BIKE + 0xa98..BIKE + 0xb44).contains(&at);
+                tr |= at == trail + 0x21;
+            }
+        }
+        seen.record_rows += u32::from(rec);
+        seen.trail_rows += u32::from(tr);
+        if !odd.is_empty() {
+            seen.other_rows += 1;
+            let odd: Vec<String> = odd.iter().take(12).map(|&(s, e)| format!("{s:#x}..{e:#x}")).collect();
+            seen.first_other.get_or_insert_with(|| format!("row {r}: {}", odd.join(", ")));
+        }
+        poke(&mut a, row, &SPOT);
+        poke(&mut b, row, &SPOT);
+    }
+    eprintln!("{name}{}: {seen:?}", if camera { " with the camera's +0xb34" } else { "" });
+    Some(seen)
+}
+
+/// **S345 — the first-person bit the camera link can add changes nothing but the first-person
+/// record.** Both C15 rides ([`s345_replay`], no camera): the first-person copy matches the capture's
+/// physics every row, and its RAM differs from the other copy's only in the flags, the record words
+/// `+0xa98..+0xb43` and `+0x944` (every row), and the stack. The trail is never turned on (its wanted
+/// word `+0xb34` stays 0: only the first-person camera sets it).
+#[test]
+fn s345_the_first_person_bit_leaves_the_ride_alone() {
+    for (name, len) in [("ride-2", 459), ("flip-1", 465)] {
+        let Some(seen) = s345_replay(name, len, false) else { return };
+        assert_eq!(seen.record_rows, len as u32, "{name}: the first-person branches ran every row");
+        assert_eq!(seen.trail_rows, 0, "{name}: the trail left off");
+        assert_eq!(seen.other_rows, 0, "{name}: {:?}", seen.first_other);
+    }
+}
+
+/// **S345 — and with the first-person camera's trail word, the ride is still the capture's.** The
+/// same replays with `+0xb34` 1 on rows 100-299 on both copies: the first-person copy's sync turns the
+/// trail (bike `+0x10dc`'s subtree) on at row 100 and off at row 300, and that copy still matches the
+/// capture's physics every row. The shown subtree's update does change more RAM than the record: its
+/// nodes and six objects by the bike from row 100, and by row 150 a global (0x393848), words in the
+/// simulation object's `+0x2be0..` and heap blocks (0xafc790.., 0xb19d80..) — what those feed is R61's.
+#[test]
+fn s345_the_first_person_cameras_trail_leaves_the_physics_alone() {
+    for (name, len) in [("ride-2", 459), ("flip-1", 465)] {
+        let Some(seen) = s345_replay(name, len, true) else { return };
+        assert_eq!(seen.record_rows, len as u32, "{name}: the first-person branches ran every row");
+        assert_eq!(seen.trail_rows, 200, "{name}: the trail shown on rows 100-299");
+        assert!(seen.first_other.as_deref().is_some_and(|s| s.starts_with("row 100:")), "{name}: {:?}", seen.first_other);
+    }
+}

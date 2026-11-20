@@ -1791,7 +1791,10 @@ const INTERFACE_MASKS: [u32; 7] = [0x734, 0x9c4, 0xa94, 0xb54, 0x6b4, 0x498, 0x6
 /// (`+0x444`) when it switches the camera and every registered object is linked again. Each key a
 /// registered object wants (`wanted`, one per object and in their order) that one of the bike's
 /// interfaces answers (a mask in [`INTERFACE_MASKS`] sharing a bit with it) is or-ed in whole. The
-/// link never clears a bit, so the flags change only when a wanted key is new to them.
+/// link never clears a bit, so the flags change only when a wanted key is new to them. The
+/// first-person bit it can add only makes [`sync`] fill the first-person record, words only cameras
+/// read, so the pure frame need not run it (S345). The trail it can then show waits on the
+/// first-person camera's own word `+0xb34`; shown, the physics stays the capture's (R61 for the rest).
 pub fn camera_link(m: &mut impl Updates, wanted: &[u32]) {
     for &key in wanted {
         if INTERFACE_MASKS.iter().any(|&o| key & w(m, o) != 0) {

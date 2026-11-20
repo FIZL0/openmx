@@ -11879,6 +11879,43 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Oracle: 10 000 registries (the bike's link and 0-3 stand-ins with hooked +0x2c/+0x30/+0x34/+0x40/
 #   +0x44, random keys and masks, random flags), the pass vs camera_link: +0x444 equal, the bike told
 #   once per answered key.
+# S345 — the first-person bit F48's camera link can add changes nothing the simulation reads, so the
+# pure frame may keep dropping the posts (tests/mxvatv_bike_ride.rs
+# s345_the_first_person_bit_leaves_the_ride_alone). Found in SLUS-21104's code (GAME_REL disassembled
+# with `./kit dis 0x45c580 0x540000 --program atv`, grepped for the decimal offsets; the main ELF too):
+#   Interface keys are one bit per name: 0x00214b30(reg, name, add) walks its name list (strncmp
+#   0x80), bit 1 << index, appends a new name. "FirstPersonCameraInterface" is at 0x525a00 (asked by
+#   the first-person camera base 0x00484010 alone: its +0xa8 key, its +0xa4 the record it is handed,
+#   stored at 0x00484f1c) and 0x5266e0 (offered by the bike's ctor 0x004a5220 at bike+0xa90 via
+#   0x004f6fb0, and by the rider's ctor 0x004f2410 at rider+0x9d0; its +0xa90.. are its own). The
+#   rider wants "RiderInterface" (0x52a9ff, rider+0x374), the camera bases "CameraInterface". So only
+#   first-person cameras are handed bike+0xa90, through the lookups 0x004ddf20 (and the other
+#   classes' 0x004ab070, 0x004bf7c0).
+#   Loads by name of the words the sync's +0xa94 branches write, over the whole overlay: +0xa98,
+#   +0xaa0..+0xacf, +0xad0, +0xae0, +0xb30, +0xb38, +0xb40: none (only the ctor's zeroing and the three
+#   classes' syncs 0x004e2f50 / 0x004c1150 / 0x004d3230 and one at 0x004cd4f0 store them). +0xb3c:
+#   0x004ccdb4 reads its own store from 0x004ccd30 (no call between; another class's wheel angle).
+#   +0x944: read only by the syncs (0x004a8020, a setter virtual, also stores it). The trail's on/off
+#   write the trail node's byte +0x21 only (F44). The flags +0x444 themselves are read only and-ed
+#   with a mask (+0x734 the snapshots, +0x9c4/+0xa94/+0xb54 the syncs); the other two `lw 1092(..)`
+#   (0x004dea9c a strncpy at load, 0x005026e0 a model's words) are not the bike's.
+#   The first-person camera writes back into the record: q+0x90 (bike+0xb20, the eye offset the sync's
+#   trail spot adds, sq at 0x004841e0). +0xb34 (the trail's wanted on) has no store by name but the
+#   ctor's; it is read by the sync and by the bike vt 0x004e7a50 (+0x45c's +0x28 == 1 and +0xb34 == 1
+#   -> 0x004e1e10). Those are the camera's, not the link's: carried only if the pure frame ever runs
+#   a first-person camera.
+#   The first-person camera sets +0xb34 to 1 when it becomes current (0x0048ecb4, on the record it
+#   holds at its +0xa4) and to 0 when it stops (0x0048ed3c), each followed by the record owner's vt
+#   +0xb4 slot 8.
+#   Run 1: both C15 rides whole in the interpreter on state 4 with flags 0x18 and with 0x38, +0xb34
+#   left 0: the 0x38 copy matches the capture's physics every row, and its RAM differs only in +0x444,
+#   +0x944, +0xa98..+0xb43 (every row) and the stack. The link's bit alone is the record only.
+#   Run 2: the same with +0xb34 1 on rows 100-299 on both copies: the 0x38 copy's sync shows the trail
+#   (+0x21 of the root, 200 rows) and its physics still matches every row, but RAM also differs from
+#   row 100 in the trail subtree's nodes and six objects by the bike (0xe6f8f0, 0xe732a0, 0xe73890,
+#   0xe73d90, 0xe74180, 0xe746a0: 0x3a bytes and one at +0x90 each), and by row 150 in 0x393848,
+#   SIM+0x2be0.. (0x6685c0..0x668ab9), 0x673b0c, 0x71b0c8 and heap blocks 0xafc790..0xb06807,
+#   0xb19d80..0xb1a45c, which stay different after the trail goes off. Who reads those: R61.
 # B35 — the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
 # (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
 #   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,
