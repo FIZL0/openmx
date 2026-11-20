@@ -14265,6 +14265,8 @@ fn s485_capture() -> Option<Vec<[f32; 11]>> {
 /// F73: the thrown rider's bones meet the truck's hull, lie against its nose and wake it on the 10th
 /// and the 12th (and the 14th and 16th, which the original's does not). The rider is put back 9
 /// frames before the original's.
+/// S491: the decay is the braked truck's. Driven on the step after the strike (brakes off, as a
+/// plane's strike leaves it in R48's oracle), strike+1's vz is 2.53 and the truck drives on.
 #[test]
 fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let Some(cap) = s485_capture() else { return };

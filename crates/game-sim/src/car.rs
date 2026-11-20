@@ -3139,7 +3139,11 @@ impl Machine {
 /// car's step. The enable also sets the car's driven word, which the car's first step clears again
 /// when nobody is in it, before its controls read it: a parked car's controls stay undriven here.
 /// (S489a: R48's oracle clears it only after the controls step, so a struck car's brakes come off on
-/// the frames it is struck; [`InPlane::struck`] has that for the plane's world, not yet this one.)
+/// the frames it is struck; [`InPlane::struck`] has that for the plane's world. S491: not here.
+/// Driven on the step after a bike's strike, the port's truck keeps vz 2.53 on strike+1 where
+/// ride1.csv's brakes to 1.75, and drives on at ~1.7 ft/s while the wreck bike leans on it; undriven
+/// it is within 0.01. So the original's truck is braked then: something clears the word between
+/// the riders' strike and the car's next controls step, or the bike's wake does not set it.)
 #[derive(Clone, Debug)]
 pub struct Parked {
     pub car: std::sync::Arc<Car>,
