@@ -1,0 +1,7 @@
+# R63: player 1 opens the pause menu
+release
+sleep 30t
+down start
+sleep 9t
+up start
+sleep 60t

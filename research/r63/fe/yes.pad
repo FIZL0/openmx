@@ -1,0 +1,11 @@
+release
+sleep 10t
+down up
+sleep 6t
+up up
+sleep 24t
+down cross
+sleep 6t
+up cross
+sleep 24t
+sleep 900t
