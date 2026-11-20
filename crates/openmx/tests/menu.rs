@@ -616,6 +616,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         markers: [true, false, true, true, true, true, true, true],
         // 1P preloading Untamed's bikes on the right stick (P367).
         preload_axes: [menu::PreloadAxis::RightY, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off, menu::PreloadAxis::Off],
+        // 2P on dual sticks (P386).
+        dual_sticks: [false, true, false, false, false, false, false, false],
         // P191: the updater never asks.
         updates: menu::Updates::Never,
     };
@@ -5203,7 +5205,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::PreloadAxis, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration, Key::Heading, Key::DeadZone], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::PreloadAxis, Key::Sticks, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration, Key::Heading, Key::DeadZone], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -7345,6 +7347,33 @@ fn each_seat_picks_its_preload_axis_on_the_controls_tab() {
     assert_eq!(m.settings.preload_axes[1].axis(), Some(game_sim::input::Axis::LeftY));
     assert!(m.settings.text().contains("\npreload_axis = off left_y off\n"), "{}", m.settings.text());
     assert_eq!(Settings::parse(&m.settings.text()).preload_axes, m.settings.preload_axes);
+}
+
+/// P386: each seat has a Sticks row on the Controls tab, Single by default (the original's one
+/// stick), picked a seat at a time and saved in settings.txt only once a seat rides dual sticks.
+#[test]
+fn each_seat_picks_single_or_dual_sticks_on_the_controls_tab() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.dual_sticks, [false; menu::SEATS_MAX], "single by default");
+    assert!(!m.settings.text().contains("sticks"), "nothing written while every seat is single");
+    m.seated = 2;
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Sticks).unwrap();
+    assert_eq!(row(&m).choices, ["Single Stick", "Dual Stick"]);
+    assert_eq!(row(&m).value, "Single Stick");
+    // 2P's row: dual sticks for 2P alone.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    down_to(&mut m, &mut r, Key::Sticks);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(row(&m).value, "Dual Stick");
+    assert_eq!(m.settings.dual_sticks[..3], [false, true, false]);
+    assert!(m.settings.text().contains("\nsticks = single dual single\n"), "{}", m.settings.text());
+    assert_eq!(Settings::parse(&m.settings.text()).dual_sticks, m.settings.dual_sticks);
+    assert_eq!(menu::dual_sticks_seats("dual"), Some([true; menu::SEATS_MAX]));
+    assert_eq!(menu::dual_sticks_seats("both"), None);
 }
 
 /// P367: each Preload Axis is named by the push Untamed's preload reads as plus — the stick
