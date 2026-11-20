@@ -2382,9 +2382,14 @@ impl<P: sim_world::World> Game for World<P> {
         }
         let spots: Vec<Spot> = self.seats.iter().map(|s| s.garage.spot(&s.sim, &mut self.place)).collect();
         let on: Vec<bool> = self.seats.iter().map(|s| !s.waiting && s.riding && s.garage.up == Kind::Bike).collect();
+        // P350a: and the first seat's race AI riders after the seats, every one in the world.
         fn riders<'a>(seats: &'a [Seat], on: &[bool]) -> Vec<(&'a rider::Rider, bool)> {
-            seats.iter().zip(on).map(|(s, &o)| (&s.sim.rider, o)).collect()
+            let ai = race_ai(seats).iter().map(|p| (&p.rider, true));
+            seats.iter().zip(on).map(|(s, &o)| (&s.sim.rider, o)).chain(ai).collect()
         }
+        // Where the hulls' names start in the riders' world: after the seats and those AI riders.
+        let named_from = self.seats.len() + race_ai(&self.seats).len();
+        let on_all: Vec<bool> = on.iter().copied().chain(race_ai(&self.seats).iter().map(|_| true)).collect();
         // A flown plane is in the riders' world too (N22a): its hull struck by their bikes, and the
         // planes stepped before the bikes, as the original's dynamics world steps before its riders.
         let flying: Vec<bool> = self.seats.iter().map(|s| !s.waiting && s.riding && s.garage.flight_flown().is_some()).collect();
@@ -2455,8 +2460,12 @@ impl<P: sim_world::World> Game for World<P> {
             let at = self.seats[me].sim.rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
             let own = lists.as_mut().map(|l| std::mem::take(&mut l[me]));
-            let mut bump = own.map(|l| game_sim::rider_contact::struck_first(&firsts, l, at, &self.place)).filter(|l| !l.is_empty()).map(|l| {
-                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+            // P350a: the first seat's Sim walks its AI riders' contacts itself and leaves the seats'
+            // bump unread, so it has none: written back after its pass, its stale chassis would
+            // undo what the AI riders' frames and the race (`race_guests_out`) did.
+            let unread = me == 0 && !race_ai(&self.seats).is_empty();
+            let mut bump = own.filter(|_| !unread).map(|l| game_sim::rider_contact::struck_first(&firsts, l, at, &self.place)).filter(|l| !l.is_empty()).map(|l| {
+                let phys = seats_phys(&self.seats);
                 let mut b = game_sim::rider_contact::bump_riders(&phys, me, l, &self.place);
                 let from = self.seats[me].sim.rider.ride.transform().0[3];
                 b.planes = flown
@@ -2474,9 +2483,9 @@ impl<P: sim_world::World> Game for World<P> {
             let plane = flown.iter().position(|&j| j == me);
             let mut met = plane.and_then(|k| {
                 let m = mirrors.get_mut(k).map(std::mem::take).unwrap_or_default();
-                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                let phys = seats_phys(&self.seats);
                 let at = self.seats[me].garage.flight_flown()?.body.position;
-                Some(game_sim::rider_contact::met_plane(&phys, me, n + k, m, at, &self.place))
+                Some(game_sim::rider_contact::met_plane(&phys, me, named_from + k, m, at, &self.place))
             });
             // A driven car meets them by the mirrors of their strikes on its hull (F26), and by its
             // own rays on their bikes, whose chassis its resolve pushes (F76): its place among the
@@ -2484,15 +2493,15 @@ impl<P: sim_world::World> Game for World<P> {
             let car = driven.iter().position(|&j| j == me);
             if let Some(j) = car {
                 let m = mirrors.get_mut(flown.len() + j).map(std::mem::take).unwrap_or_default();
-                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
-                let named = n + flown.len() + j;
+                let phys = seats_phys(&self.seats);
+                let named = named_from + flown.len() + j;
                 met = (self.seats[me].garage.car_up().and_then(|c| c.driven.as_ref()))
-                    .map(|c| game_sim::rider_contact::met_car(&phys, &on, me, named, m, c.body.position, &self.place));
+                    .map(|c| game_sim::rider_contact::met_car(&phys, &on_all, me, named, m, c.body.position, &self.place));
             }
             // A ridden quad the same, by the mirrors on its record (MD179).
             if let Some(j) = quads.iter().position(|&j| j == me) {
                 let m = mirrors.get_mut(flown.len() + driven.len() + j).map(std::mem::take).unwrap_or_default();
-                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                let phys = seats_phys(&self.seats);
                 met = (self.seats[me].garage.atv_up().and_then(|a| a.quad()))
                     .map(|q| game_sim::rider_contact::met_riders(&phys, m, q.body.position, &self.place));
             }
@@ -2590,6 +2599,36 @@ fn pass_order(flying: &[bool], driven: &[usize]) -> Vec<usize> {
         .collect()
 }
 
+/// P350a: the first seat's AI riders as the other seats meet them: a race over several seats is
+/// the first's Sim's (P350), so its AI riders are its players after its human. Every list of the
+/// riders [`World::simulate`] walks has them after the seats, so the hulls are named after them.
+/// None with one seat, whose Sim meets its own AI riders.
+fn race_ai(seats: &[Seat]) -> &[game_sim::Player] {
+    match seats {
+        [first, _, ..] => &first.sim.others,
+        _ => &[],
+    }
+}
+
+/// Every seat's rider and bike, then the first seat's AI riders' ([`race_ai`]).
+fn seats_phys(seats: &[Seat]) -> Vec<(&rider::Rider, &game_sim::phy::Phy)> {
+    let ai = race_ai(seats).iter().map(|p| (&p.rider, &*p.phy));
+    seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).chain(ai).collect()
+}
+
+/// [`seats_phys`]'s riders to write a resolve's pushes back to.
+fn seats_riders_mut(seats: &mut [Seat]) -> Vec<&mut rider::Rider> {
+    let guests = seats.len() > 1;
+    let Some((first, rest)) = seats.split_first_mut() else { return Vec::new() };
+    let sim = &mut first.sim;
+    let mut all = vec![&mut sim.rider];
+    all.extend(rest.iter_mut().map(|s| &mut s.sim.rider));
+    if guests {
+        all.extend(sim.others.iter_mut().map(|p| &mut p.rider));
+    }
+    all
+}
+
 /// Seat `me`'s flown plane and the riders of the other seats `on` holds in the ride (S276,
 /// [`game_sim::wreck_plane`]): the downed among them meet the plane.
 fn flown_among<'s>(seats: &'s mut [Seat], me: usize, on: &[bool]) -> (Vec<&'s mut rider::Rider>, Option<&'s mut game_sim::flight::Flight>) {
@@ -2663,6 +2702,16 @@ impl<P: sim_world::World> World<P> {
     fn race_guests_in(&mut self) {
         let (first, rest) = self.seats.split_first_mut().expect("a seat");
         let players = first.sim.players();
+        // P350a: the AI riders' brains read the other seats off cards after the Sim's own players',
+        // each its race player (`race_player`), as the Sim's last feed left theirs; its next feed
+        // drops them again (`ai::Lane::feed_cards`).
+        if let Some(lane) = first.sim.ai.as_deref_mut().filter(|l| !rest.is_empty() && l.cards.len() >= players) {
+            let kept: Vec<game_sim::ai::Other> = lane.cards.drain(players..).collect();
+            for (k, s) in rest.iter().enumerate() {
+                let card = kept.get(k).copied().unwrap_or(game_sim::ai::Other::FRESH);
+                lane.cards.push(card.fed(&s.sim.rider));
+            }
+        }
         let Some(race) = first.sim.race.as_deref_mut().filter(|_| !rest.is_empty()) else { return };
         let laps = race.laps.is_some();
         race.guests = rest.iter().map(|s| game_sim::race::CardFeed::of(&s.sim.rider, &mut self.place, laps)).collect();
@@ -2748,12 +2797,12 @@ impl<P: sim_world::World> World<P> {
         struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
     ) {
         if let (Some(k), Some(m)) = (plane, met) {
-            let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+            let mut all = seats_riders_mut(&mut self.seats);
             game_sim::rider_contact::pushed_riders(&mut all, &m);
             struck[k] = m.struck;
         }
         if let Some(b) = bump {
-            let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+            let mut all = seats_riders_mut(&mut self.seats);
             game_sim::rider_contact::bumped_riders(&mut all, b);
             // The shared parked cars after the seats' (F72) are the caller's.
             let seats = self.seats.len();
@@ -2957,6 +3006,63 @@ mod split_contact {
         };
         let ((pushed, gap), (alone, still)) = (ride(true), ride(false));
         assert_ne!(pushed, alone, "side by side with the files, the riders push apart");
+        assert!(gap > still, "the gap {gap} is no wider than {still} without the files");
+    }
+
+    /// P350a: a race's AI riders are players in the first seat's Sim, and the other seats meet them
+    /// as they meet each other: seat 1's rider 1.5 ft from the first seat's second player (its human
+    /// far off) is pushed away from it with the bike collision files, and stays where it stood without.
+    #[test]
+    fn a_split_seat_meets_the_first_seats_ai_rider() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let s = game_sim::stock::SPAWN;
+        let ride = |files: bool| {
+            let rider = |sim: &Sim, dx: f32| {
+                let mounts = game_sim::stock::mounts(&sim.phy);
+                let at = Vf::new(s.x() + dx, s.y(), s.z(), 1.0);
+                let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Default::default());
+                r.sense.wrecks_enabled = false;
+                if files {
+                    r.carries_bike_col(std::sync::Arc::clone(&col));
+                }
+                r
+            };
+            let sim = || {
+                let mut sim = Sim::new(0x5378);
+                std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                sim
+            };
+            let mut first = sim();
+            first.rider = rider(&first, 60.0);
+            let ai = rider(&first, 0.0);
+            first.add_player((*first.phy).clone(), ai);
+            let mut second = sim();
+            second.rider = rider(&second, 1.5);
+            let mut world = split(vec![first, second]);
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let gap = world.seats[1].sim.rider.ride.position().x() - world.seats[0].sim.others[0].rider.ride.position().x();
+            (world.seats[1].sim.rider.ride.chassis.clone(), gap)
+        };
+        let ((pushed, gap), (alone, still)) = (ride(true), ride(false));
+        assert_ne!(pushed, alone, "beside the AI rider with the files, seat 1's rider is pushed");
         assert!(gap > still, "the gap {gap} is no wider than {still} without the files");
     }
 
