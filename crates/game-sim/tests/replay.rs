@@ -14584,6 +14584,246 @@ fn r57_port_ride(drawn: bool) -> Option<(Vec<S485Tick>, R57Bones, [f32; 18])> {
     Some((port, bones, radii))
 }
 
+/// The skeleton an R58 ride hands the riding body ([`Rider::skeleton`]).
+#[derive(Clone, Copy, Debug)]
+enum R58Skeleton {
+    /// None: the kit's fixed riding pose, as R57's ride.
+    Kit,
+    /// The original's animated skeleton off recording2's image ([`r24_posed`]), held at the image's
+    /// pose as [`s474_ride_drawn`] holds it, raised this many feet in the bike's frame.
+    Image(f32),
+    /// The port's own animated body, posed every tick as the shell's frame poses it (Body::ride with
+    /// the gas held, then Body::ragdoll_posed).
+    Animated,
+}
+
+/// One R58 variant of [`r57_port_ride`]'s drawn ride: `skel` is the skeleton the riding body is
+/// handed; `poke` runs after each tick (its count from 1) before the bones are logged. Per tick:
+/// down, every bone's place and velocity, and per collision (the rider file's order,
+/// [`R57_BONES`]) touched, scene and ground.
+#[allow(clippy::type_complexity)]
+fn r58_port_ride(skel: R58Skeleton, mut poke: impl FnMut(usize, &mut Sim)) -> Option<(Vec<S485Tick>, Vec<Option<(bool, Vec<(Vf, Vf)>, Vec<(bool, bool, bool)>)>>)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes.into_iter().find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix(FREERIDE_PHY).is_ok()))?;
+    let bike = disc.res(&bike).ok()?;
+    let sub = bike.find_suffix(".sub")?.name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
+    let mut chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let root = chassis.nodes.root.expect("a chassis root");
+    let dt = F(1.0 / 30.0);
+    let mut draw = |r: &game_sim::rider::Rider| {
+        let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = chassis.riding_under(r, want);
+        chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
+        let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(&chassis) else { panic!("the chassis lacks a hold") };
+        let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+        game_sim::ragdoll_riding::Holds { root: Mat4(chassis.world[root].0.map(Vf)), hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] }
+    };
+    let image = private_dir("states").join("recording2.p2m2_SaveState.eeMemory.bin");
+    let st = SaveState::open_either(&image)?;
+    let mut posed: Option<Arc<game_sim::ragdoll_ride::Posed>> = None;
+    let mut body = if matches!(skel, R58Skeleton::Kit) { None } else { Some(r24_body()?) };
+    let mut bones = Vec::new();
+    let port = s485_ride_from(S486C_BIKE, 80, true, |t, sim, _| {
+        if let (R58Skeleton::Animated, Some((body, doll))) = (skel, body.as_mut()) {
+            let gas = game_sim::ride::Controls { gas: F::ONE, ..game_sim::ride::Controls::default() };
+            body.ride(dt, &mut sim.rider, &gas, game_sim::rider::Gate::default());
+            sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+        } else if let (R58Skeleton::Image(lift), 1, Some((body, doll))) = (skel, t, body.as_mut()) {
+            // The image's ride transform: tick 1's (the bike starts from rest), moved back to the image.
+            let vp = st.vf(st.vehicle().unwrap() + 0x1b0).unwrap();
+            let mut m = sim.rider.ride.transform();
+            for i in 0..3 {
+                m.0[3].0[i] -= S486C_BIKE[i] - vp.0[i];
+            }
+            let mut p = r24_posed(&st, body, doll, &m);
+            for b in &mut p.bones {
+                b.at.0[1] += lift;
+            }
+            posed = Some(Arc::new(p));
+        }
+        if posed.is_some() {
+            sim.rider.skeleton = posed.clone();
+        }
+        let h = draw(&sim.rider);
+        sim.rider.holds = Some(Arc::new(h));
+        poke(t, sim);
+        let r = &sim.rider;
+        let of = |doll: &game_sim::ragdoll::Ragdoll| doll.bones.iter().map(|b| (b.body.position, b.body.velocity)).collect();
+        let touch = |doll: &game_sim::ragdoll::Ragdoll, contacts: &[game_sim::ragdoll_contact::Contact]| {
+            R57_BONES
+                .iter()
+                .map(|&b| {
+                    let k = doll.collisions.iter().position(|c| c.bone == b).expect("a collision for the bone");
+                    (contacts[k].touched, contacts[k].scene, contacts[k].ground)
+                })
+                .collect()
+        };
+        bones.push(match (&r.ragdoll, &r.riding) {
+            (Some(d), _) => Some((true, of(&d.ragdoll), touch(&d.ragdoll, &d.contacts))),
+            (None, Some(rd)) => Some((false, of(&rd.actor.ragdoll), vec![(false, false, false); R57_BONES.len()])),
+            (None, None) => None,
+        });
+    })?;
+    Some((port, bones))
+}
+
+/// **R58: the drawn ride's thrown rider differs from the original's because of the riding
+/// skeleton** (R57's follow-up; research/s484/index.md, R58). Per [`R58Skeleton`] the drawn ride
+/// beside the original's (context/capture/s484/ride2_bones.csv): who meets the hull per frame, the
+/// truck's wakes, the legs, the main bone's speed on the strike, and the bones' pose.
+///
+/// The riding main bone is kept in the bike box, whose front stands 0.25 ft ahead of the bike's
+/// origin. The original's rides 1.8 ft behind it, so the 1.77 ft the strike tick carries it does not
+/// reach the front, and it enters the wreck at 29.9 ft/s. The kit's fixed pose holds it 0.9 ft
+/// behind, the port's own animated body 1.2: the box catches it at the stopped bike's carried
+/// 1.44 ft/s (the 1.4 R57 saw), the rider folds onto a still pelvis, and the truck wakes on +14 (and
+/// +19, +21) too. On the original's skeleton (recording2's, held) it enters at 29.4, and the truck
+/// wakes on +10 and +12 only, as theirs. S486c's wreck bike and truck push hold on every variant.
+#[test]
+fn r58_the_drawn_ride_s_thrown_rider_beside_the_original_s() {
+    let Some((head, rows)) = r57_capture() else { return };
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let theirs = 58;
+    let at = |r: &[f32], b: usize| Vf::new(r[col(&format!("b{b}_x"))], r[col(&format!("b{b}_y"))], r[col(&format!("b{b}_z"))], 1.0);
+    let vel = |r: &[f32], b: usize| Vf::new(r[col(&format!("b{b}_vx"))], r[col(&format!("b{b}_vy"))], r[col(&format!("b{b}_vz"))], 0.0);
+    let v3 = |v: Vf| format!("({:5.2} {:5.2} {:5.2})", v.x(), v.y(), v.z());
+    let scene_t = |r: &[f32]| R57_BONES.iter().filter(|&&b| r[col(&format!("b{b}_scene"))] != 0.0).copied().collect::<Vec<_>>();
+    let face_t = |r: &[f32]| r[col("z")] - R57_NOSE_AHEAD;
+    let variants = [
+        ("kit pose", R58Skeleton::Kit, false),
+        ("image skeleton", R58Skeleton::Image(0.0), false),
+        ("image skeleton while riding", R58Skeleton::Image(0.0), true),
+        ("image skeleton 0.29 ft up", R58Skeleton::Image(0.29), false),
+        ("animated body", R58Skeleton::Animated, false),
+    ];
+    for (name, skel, drop) in variants {
+        // `drop`: the skeleton taken away once the rider is down, so the wreck's joints pull to the
+        // kit's rests rather than the riding pose's.
+        let Some((port, bones)) = r58_port_ride(skel, |_, sim| {
+            if drop && sim.rider.ragdoll.is_some() {
+                sim.rider.skeleton = None;
+            }
+        }) else {
+            return;
+        };
+        let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+        println!("\n== {name}: truck wakes on tick {}", ours + 1);
+        // The summary: who meets the hull per frame, the truck's wakes, the legs out on +20.
+        let n = (port.len() - ours).min(rows.len() - theirs);
+        let scene_p = |k: usize| bones[ours + k].as_ref().map_or(vec![], |(_, _, c)| R57_BONES.iter().zip(c).filter(|(_, c)| c.1).map(|(&b, _)| b).collect::<Vec<_>>());
+        for k in 0..n {
+            println!("  +{k:2} hull: {:?} / {:?}, truck {}/{}", scene_p(k), scene_t(&rows[theirs + k]), port[ours + k].awake as u8, rows[theirs + k][1] as u8);
+        }
+        let head = |touch: &dyn Fn(usize) -> bool| ((0..n).find(|&k| touch(k)), (0..n).filter(|&k| touch(k)).last());
+        let (pf, pl) = head(&|k| scene_p(k).contains(&3));
+        let (tf, tl) = head(&|k| scene_t(&rows[theirs + k]).contains(&3));
+        let wakes = |aw: &dyn Fn(usize) -> bool| (1..n).filter(|&k| aw(k) && !aw(k - 1)).collect::<Vec<_>>();
+        let legs = |k: usize| {
+            let p = bones[ours + k].as_ref().map(|(_, b, _)| [14, 17, 13, 16].map(|n| port[ours + k].truck.z() - R57_NOSE_AHEAD - b[n].0.z()));
+            let t = [14, 17, 13, 16].map(|n| face_t(&rows[theirs + k]) - at(&rows[theirs + k], n).z());
+            (p, t)
+        };
+        println!("  head on the hull: port +{pf:?}..+{pl:?}, original's +{tf:?}..+{tl:?}");
+        println!("  truck wakes again: port {:?}, original's {:?}", wakes(&|k| port[ours + k].awake), wakes(&|k| rows[theirs + k][1] != 0.0));
+        println!("  legs (14 17 13 16) off the face on +20: {:?}", legs(20));
+        let b0 = bones[ours].as_ref().map(|(_, b, _)| b[0].1.z());
+        println!("  main bone vz on the strike: {b0:?} / {}", vel(&rows[theirs], 0).z());
+        // S486c's holds on this ride: the wreck bike within 0.02 ft for 4 frames and 0.15 to +12, the
+        // truck's vz within 0.05 to +8.
+        let off = |k: usize| (port[ours + k].wreck.z() - rows[theirs + k][col("bike_z")]).abs();
+        let bike_ok = (0..13).all(|k| off(k) < if k < 4 { 0.02 } else { 0.15 });
+        let worst = (0..13).map(off).fold(0.0, f32::max);
+        let truck = (0..9).map(|k| (port[ours + k].truck_vel.z() - rows[theirs + k][col("vz")]).abs()).fold(0.0, f32::max);
+        println!("  S486c: wreck bike worst {worst:.3} ft (holds {bike_ok}), truck vz worst {truck:.4} (holds {})", truck < 0.05);
+        assert!(bike_ok && truck < 0.05, "{name}: S486c's wreck bike or truck push moved with the rider");
+        // How far the main bone rides behind the bike's origin on the frame before the strike: the
+        // bike box holds it to 0.25 ft ahead, and the strike tick carries it 1.77 ft.
+        let (p, r) = (&port[ours - 1], &rows[theirs - 1]);
+        let back_p = bones[ours - 1].as_ref().map(|(_, b, _)| p.bike.z() - b[0].0.z());
+        let back_t = r[col("bike_z")] - at(r, 0).z();
+        println!("  main bone behind the bike on strike-1: {back_p:?} / {back_t:.2} ft");
+        let b0 = b0.expect("the riding body on the strike");
+        match skel {
+            // The bike box catches a main bone that rides too far forward: it takes the stopped
+            // bike's carried velocity (0.8 x 1.8 ft/s), and the wreck enters with the pelvis still.
+            R58Skeleton::Kit | R58Skeleton::Animated => assert!(b0 < 2.0, "{name}: the main bone at {b0} ft/s on the strike, not held by the bike box"),
+            // On the original's skeleton it is not caught, and the truck wakes only on +10 and +12.
+            R58Skeleton::Image(_) => {
+                assert!((b0 - vel(&rows[theirs], 0).z()).abs() < 1.0, "{name}: the main bone at {b0} ft/s on the strike");
+                assert_eq!(wakes(&|k| port[ours + k].awake), wakes(&|k| rows[theirs + k][1] != 0.0), "{name}: the truck's wakes");
+                for k in 0..n {
+                    let behind = bones[ours + k].as_ref().map_or(0, |(_, b, _)| R57_BONES.iter().filter(|&&x| b[x].0.z() > port[ours + k].truck.z() - R57_NOSE_AHEAD).count());
+                    assert_eq!(behind, 0, "{name}: strike+{k}: bones behind the nose's face");
+                }
+            }
+        }
+        // The fall back off the nose: bones 0, 14 and 13 (face - z, y, vz, t/s/g), port / original.
+        for k in (4..n.min(26)).step_by(2) {
+            let Some((_, b, c)) = &bones[ours + k] else { continue };
+            let (p, r) = (&port[ours + k], &rows[theirs + k]);
+            let cells: Vec<String> = [0usize, 14, 13]
+                .iter()
+                .map(|&n| {
+                    let i = R57_BONES.iter().position(|&x| x == n).unwrap();
+                    let (pa, pv) = b[n];
+                    let f = |t: bool, s: bool, g: bool| format!("{}{}{}", if t { 't' } else { '.' }, if s { 's' } else { '.' }, if g { 'g' } else { '.' });
+                    let tf = f(r[col(&format!("b{n}_touched"))] != 0.0, r[col(&format!("b{n}_scene"))] != 0.0, false);
+                    let (ta, tv) = (at(r, n), vel(r, n));
+                    format!(
+                        "b{n} {:4.2} {:6.2} {:5.1} {} / {:4.2} {:6.2} {:5.1} {}",
+                        p.truck.z() - R57_NOSE_AHEAD - pa.z(),
+                        pa.y(),
+                        pv.z(),
+                        f(c[i].0, c[i].1, c[i].2),
+                        face_t(r) - ta.z(),
+                        ta.y(),
+                        tv.z(),
+                        tf
+                    )
+                })
+                .collect();
+            println!("  +{k:2} {}", cells.join(" | "));
+        }
+        for k in -1i32..=3 {
+            let (p, r) = (&port[(ours as i32 + k) as usize], &rows[(theirs as i32 + k) as usize]);
+            let Some((down, b, _)) = &bones[(ours as i32 + k) as usize] else { continue };
+            let (face_p, face_t) = (p.truck.z() - R57_NOSE_AHEAD, r[col("z")] - R57_NOSE_AHEAD);
+            println!(
+                "{k:+3}{} bike z off face {:.2} / {:.2}, bike vz {:.1}, bike y {:.2} / {:.2}, b0 y {:.2} / {:.2}",
+                if *down { ' ' } else { 'r' },
+                face_p - p.bike.z(),
+                face_t - r[col("bike_z")],
+                p.bike_vel.z(),
+                p.bike.y(),
+                r[col("bike_y")],
+                b[0].0.y(),
+                at(r, 0).y()
+            );
+            for n in R57_BONES {
+                let (pa, pv) = b[n];
+                let (ta, tv) = (at(r, n), vel(r, n));
+                println!(
+                    "   b{n:2} face-z {:5.2} / {:5.2}  v {} / {}  off b0 {} / {}",
+                    face_p - pa.z(),
+                    face_t - ta.z(),
+                    v3(pv),
+                    v3(tv),
+                    v3(pa.sub(b[0].0)),
+                    v3(ta.sub(at(r, 0)))
+                );
+            }
+        }
+    }
+}
+
 /// S485's control: without the parked truck the same ride goes on through its spot.
 #[test]
 fn without_the_parked_truck_the_bike_rides_through_its_spot() {

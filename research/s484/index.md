@@ -58,3 +58,79 @@ port's resting truck). The hull is not a box: bones meet it up to ~0.6 ft furthe
   drawn bike. Their bones are not the game's.
 - Their +10 and +12 wakes match ride1.csv's, but by a different path: a wedged rider, not a head
   lying on the face.
+
+## Why the drawn ride's rider still differs: the riding skeleton (R58)
+
+Test: `r58_the_drawn_ride_s_thrown_rider_beside_the_original_s` (tests/replay.rs). It rides R57's
+drawn ride (`r58_port_ride`) with three riding skeletons (`R58Skeleton`) and prints each beside the
+capture:
+
+- **Kit**: no `Rider::skeleton`, the kit's fixed riding pose (R57's ride).
+- **Image**: the original's skeleton off recording2's image (`r24_posed`), held as
+  `s474_ride_drawn` holds it.
+- **Animated**: the port's own body, posed every tick as the shell does (`Body::ride` with the
+  gas held, then `Body::ragdoll_posed`).
+
+### The answer: the riding skeleton
+
+It decides where the main bone rides, and that decides whether the bike box catches it.
+
+- The riding main bone is kept in the bike box (`ragdoll_riding::BIKE_BOX`: z from -3.25 to +0.25
+  ft in the bike's frame).
+- On the strike tick the bike stops dead. The main bone travels on 1.77 ft (53 ft/s for one tick).
+- Where the main bone rides on strike-1, behind the bike's origin, and what happens:
+
+  | skeleton | behind the bike | main bone vz on the strike | truck wakes after the strike |
+  |---|---|---|---|
+  | original's (capture) | 1.81 ft | 29.9 | +10, +12 |
+  | image | 1.71 | 29.4 | +10, +12 |
+  | kit pose | 0.93 | 1.4 | +10, +12, +14, +19, +21 |
+  | animated | 1.23 | 1.3 | +10, +12, +14 |
+
+- A main bone riding less than ~1.5 ft behind the bike's origin reaches the box's front in that
+  tick. The box catches it and sets it to the box's carried velocity: 0.8 × the stopped bike's
+  1.8 ft/s = 1.44. That is R57's 1.4 ft/s.
+- The rider then folds onto a still pelvis. The head lies on the face to +14, and the truck wakes
+  on +14 too.
+- On the image skeleton the box misses it. The hand-over speeds match (main bone 29.4 / 29.9, the
+  others within ~3 ft/s), and the truck wakes on +10 and +12 only, as theirs. No bone gets behind
+  the face.
+
+### The other two suspects
+
+- **The velocities at the hand-over**: not a cause of their own. They follow the pose: the image
+  skeleton fixes them without other changes.
+- **The bones against the hull**: not shown wrong. On the image skeleton the hull contacts from +3
+  to +12 match theirs bone for bone (only +3/+4 differ by one bone).
+- **The wreck's joint rests**: barely matter. Taking the skeleton away once the rider is down
+  (the joints pull to the kit's rests) moves the legs on +20 by < 0.01 ft.
+
+### Not matched yet, on the image skeleton
+
+- **The head meets the hull a frame late** (+2..+13, theirs +1..+12).
+- **The legs fall back slowly**: on +20 they are 1.9-2.5 ft out, theirs 4.2-4.9.
+  - The original's feet (14, 17) meet the bumper on +2 and bounce back at 4 ft/s on +3.
+  - The port's meet it on +3 and stay. They then slide back at 2-3.5 ft/s, theirs 5-8.
+  - The main bone matches to ~0.15 ft through +20 (2.95 / 3.07 off the face).
+- **Likely cause (not proven): the held image pose is not the pose at the strike.** It is
+  recording2's pose, not the pose of a rider at full gas. Proving it needs the original's skeleton
+  on each row (follow-up).
+  - On strike-1 the original's pelvis rides 0.29 ft higher.
+  - Its head, hands and knees ride ~0.3 ft further forward (off the main bone, z: head 1.02 / 0.72,
+    hands 1.75 / 1.43, knees 0.80 / 0.50).
+  - Raising the image skeleton 0.29 ft moves the legs to 2.5-2.9 ft out on +20. Not enough: the lean
+    is the rest.
+- **The port's animated body leans the other way.** Its main bone is 0.5 ft further forward, and
+  its hands and knees ~0.4 ft further back. So in the shell the box catches the main bone, as on the
+  kit pose.
+
+### What this means for the S485/S486c tests
+
+- S486c's wreck bike and truck push hold on all three skeletons: the rider does not move them
+  (asserted in the R58 test).
+- **They should ride with the bike drawn and the image skeleton.**
+  - That ride wakes the truck on +10 and +12 only, through a head lying on the face, as the
+    original's does.
+  - The undrawn ride gets the same wakes through a wedged rider.
+  - The drawn ride with the kit pose adds +14.
+- Filed as T10. The animated body's pose (and a per-row capture of the original's skeleton) is R59.
