@@ -81,6 +81,16 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// its clip machine starts fresh, not from the image's, and is 0.3-0.5 ft off from tick 5. Fed the
 /// original's skeleton instead (the actor's joint records after frame t, under the bike node from
 /// before it), ai0's bones stay within 0.04 ft and are 0.004 ft off at 120. The marks do not move.
+/// S488: each render Body is seeded from its actor's animation state (`c33_anim_seed`: machine,
+/// clock, snapshot, and the bike driver's pose and fore-aft its axes chase) and keeps the drawn nodes
+/// as the shell does (`c33_drawn`). Checked beside an interpreter copy stepped with `draws::whole_frame`,
+/// ai0's joints now match the original's after every frame bit for bit, but for the two fades after
+/// the restarts at 64 and 120 (0.034 and 0.097 in a quaternion, gone by 73 and 127). The marks do not
+/// move: the skeleton is the original's one frame late. The Sim's riding step in frame t poses to the
+/// joints `c33_pose` left after frame t-1; the original poses its body inside frame t, before its
+/// ragdoll step. Fed the copy's joints of frame t (under its bike node from before it), bone 17 stays
+/// within 0.06 ft through 131 where the seeded run is 0.29 ft off at 130. Either way ai0's bodies
+/// stray up to 0.45 ft at 24-36 (part 7), the same with or without the seed.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -717,7 +727,81 @@ fn c33_riding_seed(
         rider.holds = Some(Arc::new(holds));
         let (body, doll) = &mut bodies[k];
         rider.skeleton = Some(Arc::new(c33_posed(ee, a, r, body, doll, &m)));
+        c33_anim_seed(ee, a, rider, body);
+        c33_drawn(rider, body, doll);
     }
+}
+
+/// S488: body actor `a`'s animation state as the rider's body machine and its render body keep it,
+/// so the first [`c33_pose`] steps on from the image's clip, blend and phase and not from a machine
+/// built fresh. The offsets are `watch/rider-joints.toml`'s (motion.rs's V12 seeds from the same):
+/// the machine (`+0x680..+0x6a4`, `+0x8dc..+0x8fc`, the added record `+0x9f0`, the reverse clock
+/// `+0xa3c`, the two axis lags behind `+0x630`/`+0x634`), the clock (`+0x3c` finished, `+0x48..+0x94`)
+/// with its clips turned into the body's through the actor's clip table (`+0x900`), and the pose
+/// snapshot's two buffers (`+0x248` rotations, `+0x24c` translations) that a running fade reads.
+fn c33_anim_seed(ee: &Ee, a: u32, rider: &mut game_sim::rider::Rider, body: &mut game_render::rider::Body) {
+    use game_sim::vehicle_anim::Lag;
+    let f = |at: u32| F(ee.f32_at(a + at));
+    let on = |at: u32| ee.u32_at(a + at) != 0;
+    let lib = &body.pose_lib;
+    let id = |at: u32| {
+        let ptr = ee.u32_at(a + at);
+        (ptr != 0).then(|| (0..60).find(|&s| ee.u32_at(a + 0x900 + 4 * s) == ptr).and_then(|s| lib.clip[s as usize])).flatten()
+    };
+    let lag = |at: u32| {
+        let l = ee.u32_at(a + at);
+        Lag { value: F(ee.f32_at(l)), tau: F(ee.f32_at(l + 4)), ratio: F(ee.f32_at(l + 8)) }
+    };
+    let veh = &mut rider.body.veh;
+    veh.want = ee.i32_at(a + 0x8f4);
+    veh.state = ee.i32_at(a + 0x8f0);
+    veh.prev = ee.i32_at(a + 0x8ec);
+    veh.seq = (ee.u32_at(a + 0x8fc) & 0xff) as u8;
+    veh.rate = f(0x690);
+    veh.ramp = f(0x68c);
+    veh.started = on(0x688);
+    veh.holding = on(0x684);
+    veh.from_table = on(0x680);
+    veh.cross = f(0x8dc);
+    veh.cross_prev = f(0x8e0);
+    veh.cross_start = f(0x8e4);
+    veh.reverse = f(0xa3c);
+    veh.extra = ee.i32_at(a + 0x9f0);
+    veh.mix = lag(0x630);
+    veh.phase = lag(0x634);
+    rider.body.player = game_sim::motion::Player {
+        clip: id(0x48),
+        last: id(0x50),
+        time: f(0x84),
+        prev: f(0x54),
+        finished: on(0x3c),
+        fade: game_sim::motion::Fade {
+            on: on(0x80),
+            from: id(0x4c),
+            clock: f(0x88),
+            delay: f(0x90),
+            length: f(0x94),
+            end: f(0x8c),
+        },
+    };
+    let (rot, pos) = (ee.u32_at(a + 0x248), ee.u32_at(a + 0x24c));
+    let rig = &mut body.rig;
+    for j in 0..rig.set.under.rot.len() as u32 {
+        rig.set.under.rot[j as usize] = [0, 4, 8, 12].map(|o| ee.f32_at(rot + 0x10 * j + o));
+        rig.set.under.pos[j as usize] = [0, 4, 8, 12].map(|o| ee.f32_at(pos + 0x10 * j + o));
+    }
+    rig.snapshot.take(&rig.set.under, None, 0);
+    body.posed = true;
+    // The body's two axis targets are the bike driver's pose and fore-aft as the next tick's request
+    // latches them (`Rider::packed_pose`), so those come off the image's rider too (replay.rs's
+    // `seed_2p_rider`: `+0x9e8`, `+0x9ec`, the fade flag `+0x9f0` and ramp `+0x9f4`). Unseeded, they
+    // start near 0 against the image's 0.5 and pull the body's axes off for its first second.
+    let r = ee.u32_at(a + 0x488) - 0xb80;
+    let m = &mut rider.motion;
+    m.pose = F(ee.f32_at(r + 0x9e8));
+    m.fore_aft = F(ee.f32_at(r + 0x9ec));
+    m.faded = ee.u32_at(r + 0x9f0) != 0;
+    m.ramp = F(ee.f32_at(r + 0x9f4));
 }
 
 /// S347b1: body actor `a`'s animated skeleton (rider `r`'s) as the shell hands it to the riding body
@@ -766,7 +850,20 @@ fn c33_pose(ee: &Ee, sim: &mut Sim, bodies: &mut [(game_render::rider::Body, gam
         let rider = if p == 0 { &mut sim.rider } else { &mut sim.others[p - 1].rider };
         body.ride(dt, rider, &hands, game_sim::rider::Gate::default());
         rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+        c33_drawn(rider, body, doll);
     }
+}
+
+/// S488: the nodes the riding ragdoll drew, kept on the render body as the shell's `ai_ride` keeps
+/// them, so a restart's pose snapshot is the drawn tree's as the original's is (F12) and the fade
+/// after it starts where the original's does.
+fn c33_drawn(rider: &game_sim::rider::Rider, body: &mut game_render::rider::Body, doll: &game_render::rider::Ragdolled) {
+    body.drawn = match (&rider.riding, &rider.ragdoll_kit) {
+        (Some(r), Some(kit)) if r.placed() && rider.drawn_ragdoll().is_none() => {
+            Some(body.ragdoll_palette(doll, &r.nodes(kit), game_render::chassis::placed(&rider.ride)))
+        }
+        _ => None,
+    };
 }
 
 /// The last tick [`C33_DUST`] is held to here: the table's window, whose end (132) has ai0's foot
