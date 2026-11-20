@@ -5874,12 +5874,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     lot.lift = fliers.iter().map(|f| flier_refit::plane_lift(machine_res.as_ref(), f.plane.as_ref())).collect();
     // And whether each file bay is put on the ground there (S205).
     lot.ground_heights = machines.as_ref().map_or_else(Vec::new, |(_, b)| vehicle::ground_heights(b, Machine::Biplane));
-    // And the cars' files (S149e): each car's `.phy` and its two liveries' models, which every
+    // And the cars' files (S149e): each car's `.phy`, collision files and its two liveries' models, which every
     // player's garage builds its cars from ([`vehicle::cars_of`]).
     let car_files: Vec<(String, Vec<u8>)> = machine_res.as_ref().map_or_else(Vec::new, |res| {
         let mut names = Vec::new();
         for m in [Machine::Buggy, Machine::Monster, Machine::Baja] {
             names.extend(m.car_physics().map(|k| k.phy().to_string()));
+            // Its ray probe and its hull (B40): without them a driven car strikes no props (S229)
+            // and the bikes never strike it (F26).
+            names.extend(m.car_physics().into_iter().flat_map(|k| [k.rays().to_string(), k.hull().to_string()]));
             names.extend(m.models()[..vehicle::LIVERIES].iter().map(|n| format!("{}\\anim\\{n}.psg", m.dir())));
         }
         names.into_iter().filter_map(|n| Some((n.clone(), res.read(&res.find_suffix(&n)?.name).ok()?))).collect()

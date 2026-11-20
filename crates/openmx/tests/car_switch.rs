@@ -30,11 +30,13 @@ fn scratch(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Full throttle for `frames` ticks, switching into `car` at `up` and back to the bike at `down`.
-fn car_tape(frames: usize, car: &str, up: usize, down: usize) -> String {
+/// Full throttle for `frames` ticks, switching into `car` at `up` and back to the bike at `down`, the
+/// left stick held at `lock` over `steer`'s ticks.
+fn car_tape(frames: usize, car: &str, up: usize, down: usize, (steer, lock): (std::ops::Range<usize>, u8)) -> String {
     let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape the {car} on the gas\n");
-    let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
-    for _ in 0..frames {
+    for i in 0..frames {
+        let x = if steer.contains(&i) { lock } else { 0x7f };
+        let report = format!("0079ff{:02x}7f7f{x:02x}7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
         text += &format!("frame 0x3d08850a 0x{report} -\n");
     }
     text += &format!("switch {up} {car}\nswitch {down} bike\n");
@@ -43,9 +45,12 @@ fn car_tape(frames: usize, car: &str, up: usize, down: usize) -> String {
 
 #[test]
 fn each_car_is_switched_into_and_driven() {
-    for (track, car) in [("free09", "monster"), ("free07", "baja"), ("free11", "buggy")] {
+    // Since the shell's cars carry their collision files (B40) they strike what is in their way:
+    // the truck swerves right past the tree 80 ft down its line, and the buggy left out of the
+    // things 30-45 ft ahead of its bay.
+    for (track, car, steer) in [("free09", "monster", (35..50, 0xff)), ("free07", "baja", (0..0, 0x7f)), ("free11", "buggy", (30..60, 0x00))] {
         let tape = scratch(&format!("{car}.tape"));
-        std::fs::write(&tape, car_tape(240, car, 30, 200)).expect("the tape is written");
+        std::fs::write(&tape, car_tape(240, car, 30, 200, steer)).expect("the tape is written");
         let Some(said) = ride(track, 260, tape.to_str().expect("a path")) else { return };
         println!("{track}:\n{said}");
 

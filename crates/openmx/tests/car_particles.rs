@@ -215,7 +215,9 @@ fn the_shell_dusts_a_driven_car() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--track", "free09", "--frames", "220", "--steady-clock", "--play"])
+        // Ended 55 ticks into the drive, short of the tree 80 ft down its line: since the shell's cars
+        // carry their collision files (B40) the truck strikes it and stalls there.
+        .args(["--headless", "--track", "free09", "--frames", "85", "--steady-clock", "--play"])
         .arg(&path)
         .output()
         .expect("the shell runs");
