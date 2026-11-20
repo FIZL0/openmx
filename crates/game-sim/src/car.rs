@@ -2836,7 +2836,10 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
         // Over a seam (MD120), first: the refill gathers where the car now is.
         self.m.wrap_round(&*self.world, self.struck.as_mut().map(|(c, _)| &mut **c));
         if let Some((c, _)) = &mut self.struck {
-            c.refresh(&self.m.body, &mut *self.world);
+            match self.met.as_deref().filter(|m| strikes_bikes(m)) {
+                Some(m) => refresh_met(c, &self.m.body, &mut *self.world, m),
+                None => c.refresh(&self.m.body, &mut *self.world),
+            }
         }
         self.m.measure(self.car, self.world, dt, self.acos);
         // The unwreck runs in the post's wreck step, after the measure (S337); the stuck reset runs
@@ -3848,6 +3851,23 @@ pub fn search_met(
     }
     met.rides = rides;
     (movers, records.map(|r| r.contacts).collect())
+}
+
+/// **The car's nearby list gathered with the riders' bikes in it** (F78): [`Collision::refresh`]
+/// with `met`'s bikes ([`crate::flight::Met::rides`]) in the world, as a flown plane's refill has
+/// them ([`crate::flight::Flight`]'s post). The search reads this list, so a car whose list was
+/// gathered without them never strikes a bike ([`search_met`]).
+pub fn refresh_met(collision: &mut Collision, body: &crate::biplane::Body, world: &mut dyn crate::world::World, met: &crate::flight::Met) {
+    use crate::flight_search::{self, Bikes};
+    let Some(col) = met.bike_col.as_deref() else { return collision.refresh(body, world) };
+    let node = crate::wreck_bike::node_of(body);
+    let (field, props, trees) = flight_search::near_world(world, &collision.rays, &node, &mut collision.nearby);
+    let bounds = field.as_deref().map(|f| {
+        let (lo, hi) = (f.min(), f.max());
+        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+    });
+    let bikes = Bikes { mesh: &col.frame, bikes: &met.rides };
+    flight_search::refresh_flown(props, trees, Some(&bikes), bounds, &collision.rays, &node, &mut collision.nearby);
 }
 
 // --- the tire contact sort (S229a) -----------------------------------------------------------------

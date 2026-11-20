@@ -271,10 +271,17 @@ impl Game for Rides<'_> {
         // flying seats (N22a), which fly in seat order: seat 0's plane searches and resolves first in
         // their joint frame (N28).
         let n = self.sims.len();
-        let order: Vec<usize> = (0..n).filter(|&i| aloft[i]).chain((0..n).rev().filter(|&i| !aloft[i])).collect();
+        // A seat's car steps after the planes and before every bike, whichever seat it is (F78, as
+        // split screen's since F76: R22's node steps the cars in its dynamics world before the riders).
+        let order: Vec<usize> = (0..n)
+            .filter(|&i| aloft[i])
+            .chain(driven.iter().copied())
+            .chain((0..n).rev().filter(|&i| !aloft[i] && !driven.contains(&i)))
+            .collect();
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
-        // ahead of the bike's own entries, as the original searches its planes first.
-        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
+        // ahead of the bike's own entries, as the original searches its planes first. And what each
+        // seat's car's own rays put on them (F78), after the planes'.
+        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len() + driven.len()];
         // The seats' one prop set for the tick (S197c): every seat's bike strikes it, and it steps
         // once after them all.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.sims.iter_mut().collect::<Vec<_>>());
@@ -307,10 +314,17 @@ impl Game for Rides<'_> {
                 let at = self.sims[seat].plane.as_ref()?.body.position;
                 Some(rider_contact::met_plane_among(self.sims, seat, n + k, m, at, &*self.world))
             });
-            // A seat's car meets them by the mirrors of their strikes on its hull (F23).
-            if let Some(j) = driven.iter().position(|&j| j == seat) {
+            // A seat's car meets them by the mirrors of their strikes on its hull (F23), and by its
+            // own rays on their bikes, whose chassis its resolve pushes (F78, split screen's F76): its
+            // place among the bikes' others is its hull's.
+            let car = driven.iter().position(|&j| j == seat);
+            if let Some(j) = car {
                 let m = mirrors.get_mut(flown.len() + j).map(std::mem::take).unwrap_or_default();
-                met = (self.sims[seat].car.as_ref()).map(|c| rider_contact::met_among(self.sims, m, c.machine.body.position, &*self.world));
+                let on: Vec<bool> =
+                    self.sims.iter().zip(&touching).map(|(s, &t)| t && s.plane.is_none() && s.car.is_none() && s.quad.is_none()).collect();
+                let named = n + flown.len() + j;
+                met = (self.sims[seat].car.as_ref())
+                    .map(|c| rider_contact::met_car_among(self.sims, &on, seat, named, m, c.machine.body.position, &*self.world));
             }
             // A seat's quad the same, by the mirrors on its record (MD173).
             if let Some(j) = quadded.iter().position(|&j| j == seat) {
@@ -375,6 +389,12 @@ impl Game for Rides<'_> {
             // none yet (S149e).
             if sim.car.is_some() {
                 vehicle::drive_lane_met(sim, cars, dt, self.world, met.as_mut());
+                // What its own rays did to the bikes (F78): their chassis pushed, the mirrors for
+                // their lists, as a flown plane's.
+                if let (Some(j), Some(m)) = (car, met) {
+                    rider_contact::pushed_among(self.sims, &m);
+                    struck[flown.len() + j] = m.struck;
+                }
                 continue;
             }
             if sim.plane.is_some() {

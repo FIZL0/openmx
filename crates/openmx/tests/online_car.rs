@@ -717,6 +717,98 @@ fn an_online_bike_is_stopped_by_the_other_seats_parked_car() {
     }
 }
 
+/// F78: an online seat's car strikes the other seat's bike with its own rays, as split screen's does
+/// since F76 (R22's buggy). g's seat takes the buggy where its bike stands, 80 ft behind the host's
+/// standing bike and facing it, and from tick 30 holds the gas. On both machines the car's own
+/// search strikes the bike (its record's own entries, kind 0, name seat 0, which needs the bikes in
+/// its post's regather too; its resolve pushes the bike's chassis): the bike is shoved along the
+/// car's way, where with no bike in the car's search (the host's bike carrying no collision files)
+/// it stands; and the two machines agree tick for tick throughout.
+#[test]
+fn an_online_car_strikes_the_other_seats_bike_with_its_own_rays() {
+    use game_sim::bike_col::{self, BikeCol};
+    use ps2_float::Vf;
+    let Some(mut disc) = disc() else { return };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = std::sync::Arc::new(
+        BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL))).expect("the bike's collision files"),
+    );
+    let bikes: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+    let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+    let tables = game_sim::ride::Tables::build();
+    let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+    let cars = online_cars(&mut disc);
+    assert!(cars.iter().find(|c| c.machine == Machine::Buggy).is_some_and(|c| c.hull.is_some()), "machine.res has no buggyf.col");
+    let machine = |struck: bool| {
+        let sims = [0.0, -80.0]
+            .into_iter()
+            .enumerate()
+            .map(|(seat, z)| {
+                let mut sim = Sim::new(0xf78);
+                std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                let mounts = game_sim::stock::mounts(&sim.phy);
+                sim.rider = game_sim::rider::Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                sim.rider.sense.wrecks_enabled = false;
+                if struck || seat == 1 {
+                    sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                }
+                sim
+            })
+            .collect();
+        Machine2 { sims, world: Flat::default(), cars: vec![cars.clone(); net::SEATS], glitch: false, shove: None, quads: Vec::new() }
+    };
+    // g's seat on the buggy from its first tick, on the gas from tick 30; the host's pad idle.
+    let pad = |seat: usize, tick: usize| {
+        let mut r = Report::from_buttons(0);
+        if seat == 1 {
+            if tick >= 30 {
+                r = Report::from_buttons(game_sim::input::Control::Cross.mask());
+            }
+            r.0[net::SWITCH] = vehicle::Wanted { to: Some(Kind::Buggy), dpad_rides: true, ..Default::default() }.byte();
+        }
+        r
+    };
+    let ride = |struck: bool| {
+        let lineup = Lineup::parse("host,g").unwrap();
+        driven();
+        let mut nets: Vec<Netplay<rides::State>> =
+            ["host", "g"].iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+        let mut games: Vec<Machine2> = (0..2).map(|_| machine(struck)).collect();
+        // Whether the car's own rays ever struck the host's bike (not the mirrors of the bike's
+        // strikes, kind 1), and how fast the bike went.
+        let mut named = [false; 2];
+        let mut fastest = [0.0f32; 2];
+        rounds_on(&mut nets, &mut games, 3, 0..200, &pad, |_, _, games| {
+            for (i, g) in games.iter().enumerate() {
+                let Some(lane) = g.sims[1].car.as_ref() else { continue };
+                let record = &lane.struck.as_ref().expect("the buggy's collision").record;
+                named[i] |= record.contacts.iter().any(|c| c.kind == 0 && c.other == Some(0));
+                fastest[i] = fastest[i].max(g.sims[0].rider.ride.chassis.vel.z());
+            }
+        });
+        assert!(nets.iter().all(|np| np.desyncs.is_empty() && !np.desynced), "the machines parted");
+        let n = agree(&nets, 0);
+        assert!(n > 150, "only {n} ticks agreed");
+        games
+            .iter()
+            .zip(named)
+            .zip(fastest)
+            .map(|((g, named), fastest)| {
+                assert!(g.sims[1].car.is_some(), "the buggy is out");
+                (named, fastest, g.sims[0].rider.ride.position().z())
+            })
+            .collect::<Vec<_>>()
+    };
+    let (met, alone) = (ride(true), ride(false));
+    for (who, (&(named, fastest, bike), &(_, still, at))) in ["host", "g"].iter().zip(met.iter().zip(&alone)) {
+        println!("{who}: the car named the bike: {named}; the bike at most {fastest} ft/s, at z {bike}; with no bike in the car's search at most {still} ft/s, at z {at}");
+        assert!(named, "{who}: the car's own rays never struck the host's bike");
+        assert!(fastest > still + 1.0, "{who}: the bike was shoved to {fastest} ft/s along the car's way (unstruck {still})");
+        assert!(bike > at + 1.0, "{who}: the bike was shoved to z {bike} (unstruck {at})");
+    }
+}
+
 /// MD173: an online bike meets the other seat's quad as split screen's does (MD179). g's seat takes
 /// openmx-mods' Race 250 P where its bike stands, 25 ft up the host's way and facing along it, and
 /// leaves it standing, its pad idle; at tick 60 the host's bike is set rolling into its tail at 30
