@@ -83,5 +83,25 @@ velocities and the row's levers.
 ## Not verified / not 1:1
 
 - No riding ragdoll, notes, dust or tracks in the replay (C33 has them; not needed for the chassis).
-- a1's collision list and the plane's push are not compared (see above).
 - Only one drop, one bike, one map.
+
+## S493: the AI's reverse lever
+
+The reverse is fixed in `ride.rs`. a1 is now bit for bit through 11145 and parts at 11146.
+
+- **The pad's reverse rule is skipped for the brain's levers.** The original's AI hand-off writes the
+  lever words (+0x628..+0x648) itself, so its pad read never runs on them. Reverse 1 with no gas and
+  no brake pushes the bike back at any speed.
+- **The push turns with the chassis every substep.** The ground step's `transform_rotate` (0x1b2ff0)
+  rebuilds the transform first (0x1b1750), and each substep's integration has moved it. Rotating
+  every substep's push by the frame-start transform left a 0.2 ft/s sideways gap at 11135.
+- **The list:** on 11145 a1 lists the plane's mirror (kind 1), as the original's. On 11146 the
+  original's a1 also lists two of its own body rays on the plane's hull (kind 0, normal
+  (0.788, 0.044, −0.614), points near (2953.4, 271, 3014.4)). Ours lists none, though a1 is still bit
+  for bit going into that tick. So its resolve has only the mirror, and a1 and the plane (0.018 ft)
+  both part there. Filed as a follow-up.
+- The test now pins C44_AGREES_THROUGH 11145, C44_PARTS 11146, and the list and plane parting ticks
+  (both 11146). The reverse-push check is gone.
+- The per-substep push moves `tests/platforms.rs`'s canonical-run vectors a little (pos y by about
+  1e-4 ft). With the frame-start push they pass unchanged. They were regenerated and spliced const by
+  const.
