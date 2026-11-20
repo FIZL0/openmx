@@ -501,6 +501,10 @@ impl State for Sim {
         if !self.parked_cars.is_empty() {
             w.blob("parked_cars", &crate::snapshot::parked_bytes(&self.parked_cars));
         }
+        // And the parked planes (S494), as their wire bytes: only on a Sim that has them.
+        if !self.parked_planes.is_empty() {
+            w.blob("parked_planes", &crate::snapshot::parked_planes_bytes(&self.parked_planes));
+        }
         // And the AI riders (S327), as their bytes: only on a Sim that has them.
         if let Some(ai) = &self.ai {
             w.blob("ai", &crate::snapshot::ai_bytes(ai));

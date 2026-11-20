@@ -3088,10 +3088,11 @@ pub fn parked_plane(mut flight: Flight, body_at: Vf, facing: Vf, up: Vf, world: 
 /// (`read`; its `.phy`, ray probe, hull and model), stored at its spot ([`flier_spot`]) and
 /// settled with nobody aboard ([`parked_heli`], [`parked_plane`]) for [`FLIER_SETTLE_FRAMES`]; the
 /// answer its hull where its body then stands ([`game_sim::ai::parked_hull`]), what the AI riders
-/// sweep. `None` for a car, or with a file missing or no ground under the spot.
+/// sweep, and a plane's whole flight as it settled, what a bike strikes (S494,
+/// [`Sim::park_planes`]). `None` for a car, or with a file missing or no ground under the spot.
 pub fn parked_flier(
     m: Machine, spot: Spawn, ground_height: bool, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World, tables: &game_sim::ride::Tables,
-) -> Option<(game_sim::biplane::Body, game_sim::world::Prop)> {
+) -> Option<(game_sim::biplane::Body, game_sim::world::Prop, Option<Flight>)> {
     let dt = F(game_sim::car::LOAD_DT);
     let (model, hull) = match m {
         Machine::Helicopter => (game_sim::kiowa::KIOWA_MODEL, game_sim::kiowa::KIOWA_HULL),
@@ -3101,19 +3102,20 @@ pub fn parked_flier(
     let lift = flight::spawn_lift(&read(model)?).map_err(|e| eprintln!("parked: {model}: {e}")).ok()?;
     let hull = game_sim::track::Mesh::parse(&read(hull)?).map_err(|e| eprintln!("parked: {hull}: {e}")).ok()?;
     let (at, normal) = flier_spot(world, spot.at, ground_height, lift)?;
-    let body = match m {
+    let (body, flight) = match m {
         Machine::Helicopter => {
             let heli = KiowaRide::new(&read(game_sim::kiowa::KIOWA_PHY)?, 0, None).with_rays(&read(game_sim::kiowa::KIOWA_RAYS)?);
-            parked_heli(&heli, at, spot.facing, world, tables, dt, FLIER_SETTLE_FRAMES).ride.body
+            (parked_heli(&heli, at, spot.facing, world, tables, dt, FLIER_SETTLE_FRAMES).ride.body, None)
         }
         _ => {
             let rays = game_sim::track::Rays::parse(&read(game_sim::flight_search::BIPLANE_RAYS)?).ok()?;
             let plane = game_sim::phy::Plane::read_bytes(&read(game_sim::phy::BIPLANE_PHY)?);
             let flight = Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)).with_hull(hull.clone());
-            parked_plane(flight, at, spot.facing, normal, world, tables, dt, FLIER_SETTLE_FRAMES).body
+            let flight = parked_plane(flight, at, spot.facing, normal, world, tables, dt, FLIER_SETTLE_FRAMES);
+            (flight.body, Some(flight))
         }
     };
-    Some((body, game_sim::ai::parked_hull(hull, &body)))
+    Some((body, game_sim::ai::parked_hull(hull, &body), flight))
 }
 
 /// **The parked machines in a seat's Sim** (P378, P380): each car [`in_play`] parks, settled where it
@@ -3123,19 +3125,23 @@ pub fn parked_flier(
 ///
 /// The fliers (free06's helicopter, free10's plane; F80, [`InPlay::with_fliers`]) are settled once
 /// ([`parked_flier`]) and their hulls handed to [`Sim::parked`] after the cars'
-/// ([`Sim::park_cars_and_fliers`]), for the AI riders only: a bike does not strike them yet.
+/// ([`Sim::park_cars_and_fliers`]), for the AI riders. A one-seat ride's bike strikes and pushes
+/// the plane too (S494, [`Sim::park_planes`]); not yet the helicopter.
 #[derive(Clone, Debug, Default)]
 pub struct InPlay {
     /// The cars as the load settled them.
     parked: std::sync::Arc<[(Kind, game_sim::car::Parked)]>,
     /// The fliers as the load settled them (F80): each one's hull and its body where it came to rest
-    /// ([`game_sim::ai::parked_hull`] of the two what the Sim is handed).
-    fliers: std::sync::Arc<[(Kind, game_sim::track::Mesh, game_sim::biplane::Body)]>,
+    /// ([`game_sim::ai::parked_hull`] of the two what the Sim is handed), and a plane's flight (S494).
+    fliers: std::sync::Arc<[(Kind, game_sim::track::Mesh, game_sim::biplane::Body, Option<Flight>)]>,
     /// Each car as this seat's Sim last held it (P380), once it has been handed one: where a car taken
     /// out of the Sim while a player drives its kind is put back from.
     kept: Vec<game_sim::car::Parked>,
-    /// Which of them the Sim was last handed, once it has been.
+    /// Each flier's plane as this seat's Sim last held it (S494), as `kept` for the cars.
+    kept_planes: Vec<Option<Flight>>,
+    /// Which of them the Sim was last handed, once it has been, and whether it was handed the planes.
     handed: Option<Vec<bool>>,
+    planes_handed: bool,
 }
 
 impl InPlay {
@@ -3164,7 +3170,7 @@ impl InPlay {
                 Some((kind, p))
             })
             .collect();
-        InPlay { parked, fliers: std::sync::Arc::default(), kept: Vec::new(), handed: None }
+        InPlay { parked, ..InPlay::default() }
     }
 
     /// **The same with the fliers of `spots`** (F80): each helicopter or plane settled with nobody
@@ -3178,8 +3184,8 @@ impl InPlay {
         self.fliers = (spots.iter().enumerate())
             .filter(|(_, (slot, m, _))| m.car_kind().is_none() && !flying.get(*slot).copied().unwrap_or(false))
             .filter_map(|(i, &(_, m, spot))| {
-                let (body, hull) = parked_flier(m, spot, ground_heights.get(i).copied().unwrap_or(true), read, world, tables)?;
-                Some((m.kind()?, hull.mesh, body))
+                let (body, hull, flight) = parked_flier(m, spot, ground_heights.get(i).copied().unwrap_or(true), read, world, tables)?;
+                Some((m.kind()?, hull.mesh, body, flight))
             })
             .collect();
         self
@@ -3204,7 +3210,7 @@ impl InPlay {
 
     /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
     pub fn fresh(&self) -> InPlay {
-        InPlay { parked: std::sync::Arc::clone(&self.parked), fliers: std::sync::Arc::clone(&self.fliers), kept: Vec::new(), handed: None }
+        InPlay { parked: std::sync::Arc::clone(&self.parked), fliers: std::sync::Arc::clone(&self.fliers), ..InPlay::default() }
     }
 
     /// **`sim`'s parked cars** ([`Sim::park_cars`], P380): every one but those a player is up on
@@ -3213,17 +3219,25 @@ impl InPlay {
     /// changes; a ride that parks nothing leaves the Sim alone. The fliers' hulls follow the cars'
     /// in [`Sim::parked`] (F80, [`Sim::park_cars_and_fliers`]), but for a flier whose kind a player
     /// is up on.
+    ///
+    /// On a one-seat ride (`driven` one long) the shown planes go to [`Sim::park_planes`] too (S494),
+    /// as the Sim last held them, as for the cars. Split screen's seats each step their own Sim, and
+    /// a plane in each would drift apart, so theirs stay the AI riders' hulls only.
     pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
         if self.parked.is_empty() && self.fliers.is_empty() {
             return;
         }
         let cars = self.parked.len();
         let shown: Vec<bool> = (self.parked.iter().map(|(kind, _)| kind).chain(self.fliers.iter().map(|(kind, ..)| kind))).map(|kind| !driven.contains(kind)).collect();
-        if self.handed.as_ref() == Some(&shown) {
+        let planes = driven.len() == 1;
+        if self.handed.as_ref() == Some(&shown) && self.planes_handed == planes {
             return;
         }
         if self.kept.len() != self.parked.len() {
             self.kept = self.parked.iter().map(|(_, p)| p.clone()).collect();
+        }
+        if self.kept_planes.len() != self.fliers.len() {
+            self.kept_planes = self.fliers.iter().map(|(.., f)| f.clone()).collect();
         }
         // What the Sim did to the cars it held since it was last handed them, kept for their return.
         if let Some(was) = &self.handed {
@@ -3233,10 +3247,20 @@ impl InPlay {
                     self.kept[k] = p;
                 }
             }
+            // And to the planes (S494).
+            let held: Vec<usize> = (0..self.fliers.len()).filter(|&k| self.planes_handed && was[cars + k] && self.kept_planes[k].is_some()).collect();
+            if held.len() == sim.parked_planes.len() {
+                for (k, p) in held.into_iter().zip(std::mem::take(&mut sim.parked_planes)) {
+                    self.kept_planes[k] = Some(p);
+                }
+            }
         }
-        let fliers = (self.fliers.iter().zip(&shown[cars..])).filter(|(_, on)| **on).map(|((_, hull, body), _)| game_sim::ai::parked_hull(hull.clone(), body));
+        let fliers = (self.fliers.iter().zip(&shown[cars..])).filter(|(_, on)| **on).map(|((_, hull, body, _), _)| game_sim::ai::parked_hull(hull.clone(), body));
         sim.park_cars_and_fliers((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect(), fliers);
+        let handed = (self.kept_planes.iter().zip(&shown[cars..])).filter(|(_, on)| planes && **on).filter_map(|(p, _)| p.clone()).collect();
+        sim.park_planes(handed);
         self.handed = Some(shown);
+        self.planes_handed = planes;
     }
 }
 

@@ -110,7 +110,8 @@ fn the_parked_fliers_settle_where_the_originals_stand() {
             let (at, _) = vehicle::flier_spot(world, spot.at, ground_height, lift).expect("ground under the spot");
             println!("{}: stored {:?}, port {:?}", f.track, [stored.x(), stored.y(), stored.z()], [at.x(), at.y(), at.z()]);
             assert!(far(at, stored) <= f.spot_within, "{}: stored at {at:?}, the original {stored:?}", f.track);
-            let (body, hull) = vehicle::parked_flier(f.machine, spot, ground_height, read, world, &tables).expect("settled");
+            let (body, hull, flight) = vehicle::parked_flier(f.machine, spot, ground_height, read, world, &tables).expect("settled");
+            assert_eq!(flight.is_some(), f.machine == Machine::Biplane, "{}: only the plane's flight is kept (S494)", f.track);
             let got = body.position;
             println!("{}: image body {:?}, port body {:?}", f.track, [want.x(), want.y(), want.z()], [got.x(), got.y(), got.z()]);
             assert!(far(got, want) <= f.body_within, "{}: settled at {got:?}, the original {want:?}", f.track);

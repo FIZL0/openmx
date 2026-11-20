@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars, parked_planes } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -158,7 +158,41 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         PARKED.put(&mut out);
         parked_put(parked_cars, &mut out);
     }
+    // The parked planes (S494) the same way, behind theirs.
+    if !parked_planes.is_empty() {
+        PARKED_PLANES.put(&mut out);
+        parked_planes.put(&mut out);
+    }
     out
+}
+
+/// What begins [`encode`]'s parked planes section.
+const PARKED_PLANES: u64 = u64::from_le_bytes(*b"S494plan");
+
+/// The Sim's parked planes in [`encode`]'s codec, which the state's hash walks as one blob (S494).
+pub(crate) fn parked_planes_bytes(planes: &[crate::flight::Flight]) -> Vec<u8> {
+    let mut out = Vec::new();
+    planes.to_vec().put(&mut out);
+    out
+}
+
+/// [`encode`]'s parked planes onto `here`'s, as many as here or an error: what a plane keeps off the
+/// wire (its ray probe, bike mesh, hull, wreck, game and skin) stays this machine's, as the flown
+/// plane's does.
+fn parked_planes_take(r: &mut Reader<'_>, here: &[crate::flight::Flight]) -> Result<Vec<crate::flight::Flight>, String> {
+    let mut planes: Vec<crate::flight::Flight> = Wire::take(r)?;
+    if planes.len() != here.len() {
+        return Err(format!("{} parked planes in the state, {} here", planes.len(), here.len()));
+    }
+    for (p, h) in planes.iter_mut().zip(here) {
+        p.rays = h.rays.clone();
+        p.bike = h.bike.clone();
+        p.hull = h.hull.clone();
+        p.wreck = h.wreck.clone();
+        p.mxvatv = h.mxvatv;
+        p.skin = h.skin;
+    }
+    Ok(planes)
 }
 
 /// What begins [`encode`]'s parked cars section.
@@ -287,7 +321,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE, PARKED].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE, PARKED, PARKED_PLANES].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -442,6 +476,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     } else if !sim.parked_cars.is_empty() {
         return Err(format!("no parked cars in the state, {} here", sim.parked_cars.len()));
     }
+    // The parked planes (S494) the same.
+    let mut parked_planes = Vec::new();
+    if r.bytes.get(r.at..r.at + 8) == Some(&PARKED_PLANES.to_le_bytes()[..]) {
+        r.at += 8;
+        parked_planes = parked_planes_take(&mut r, &sim.parked_planes)?;
+    } else if !sim.parked_planes.is_empty() {
+        return Err(format!("no parked planes in the state, {} here", sim.parked_planes.len()));
+    }
     // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
     // this seat drives the same car here; otherwise left empty for the shell to put back.
     if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
@@ -543,6 +585,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         parked: parked_cars.as_ref().and_then(|cars| Sim::parked_over(&sim.parked, cars)).unwrap_or_else(|| Arc::clone(&sim.parked)),
         // The parked cars (S486), as the state has them.
         parked_cars: parked_cars.unwrap_or_default(),
+        // The parked planes (S494), as the state has them.
+        parked_planes,
     };
     Ok(())
 }

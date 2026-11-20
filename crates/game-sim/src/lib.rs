@@ -185,6 +185,11 @@ pub struct Sim {
     /// had before — steps and hashes as it did. On the wire behind their own tag since S486, the
     /// `.phy`, hull and ray probe kept this machine's ([`snapshot::encode`]).
     pub parked_cars: Vec<car::Parked>,
+    /// The parked planes as the riders' bikes meet them (S494, [`parked_plane`]): free10's biplane
+    /// with nobody aboard, stepped every frame, its hull in the bikes' list after the parked cars'
+    /// and its body pushed. Empty — what every ride had before — steps and hashes as it did. On the
+    /// wire behind their own tag, the ray probe, hull and wreck kept this machine's.
+    pub parked_planes: Vec<flight::Flight>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -301,6 +306,7 @@ impl Sim {
             tracks: None,
             parked: Arc::default(),
             parked_cars: Vec::new(),
+            parked_planes: Vec::new(),
         }
     }
 
@@ -431,8 +437,9 @@ impl Sim {
     /// own pad holds ([`Sim::step_all`]; a player with no pad of their own holds nothing). A caller
     /// that has every player's controls — online play, a fixture of several — calls `step_all`.
     pub fn step(&mut self, dt: F, controls: &Controls, world: &mut dyn World) -> crate::rider::Frame {
-        // A lone rider among parked cars rides `step_all` too, which strikes them (S485).
-        if (!self.others.is_empty() || !self.parked_cars.is_empty()) && self.plane.is_none() {
+        // A lone rider among parked cars rides `step_all` too, which strikes them (S485), and among
+        // parked planes (S494).
+        if (!self.others.is_empty() || !self.parked_cars.is_empty() || !self.parked_planes.is_empty()) && self.plane.is_none() {
             let mut all = self.pad_controls();
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
@@ -856,7 +863,7 @@ impl Sim {
     pub fn step_all_posed(&mut self, dt: F, controls: &[Controls], world: &mut dyn World,
                           pose: &mut dyn FnMut(usize, &mut rider::Rider, &Controls)) -> Vec<crate::rider::Frame> {
         assert_eq!(controls.len(), self.players(), "one set of controls per player");
-        if (self.others.is_empty() && self.parked_cars.is_empty()) || self.plane.is_some() {
+        if (self.others.is_empty() && self.parked_cars.is_empty() && self.parked_planes.is_empty()) || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
         }
         // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]); every
@@ -874,12 +881,15 @@ impl Sim {
         let mut rode = controls.to_vec();
         // The parked cars a bike woke, stepped ahead of the bikes (S485).
         let resting = self.parked_cars_frame(dt, world);
+        // And the parked planes, every frame (S494).
+        self.parked_planes_frame(dt, world);
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy. The parked
-        // cars' hulls are in the same list (S485): one a bike strikes is woken.
+        // cars' hulls are in the same list (S485): one a bike strikes is woken. The parked planes'
+        // after them (S494).
         let (mut lists, parked) = self.bike_contacts_parked(dt, &*world);
         self.parked_struck(&parked);
-        let first = self.players() + self.parked_cars.len();
+        let first = self.players() + self.parked_cars.len() + self.parked_planes.len();
         // And every bike's body rays against the cars (S137), from the same tick's places.
         let mut cars: Vec<Vec<contact::Contact>> = Vec::with_capacity(self.players());
         for i in 0..self.players() {
@@ -894,8 +904,10 @@ impl Sim {
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
                 .map(|l| {
                     let mut b = self.bump_in(i, l, &*world);
-                    // The parked cars' bodies, which its resolve pushes (S485).
+                    // The parked cars' bodies, which its resolve pushes (S485), and the parked
+                    // planes' after them (S494).
                     b.planes = self.parked_flown(i, &*world);
+                    b.planes.extend(self.parked_planes_flown(i, &*world));
                     b
                 });
             if let Some(b) = bump.as_mut() {
@@ -1187,6 +1199,7 @@ impl Clone for Sim {
             tracks: self.tracks.clone(),
             parked: self.parked.clone(),
             parked_cars: self.parked_cars.clone(),
+            parked_planes: self.parked_planes.clone(),
         }
     }
 }
@@ -1618,6 +1631,9 @@ pub mod wreck_plane;
 /// A downed rider's wreck bike meets the parked cars (S486): their hulls in its search, their bodies
 /// on its resolve.
 pub mod parked_wreck;
+
+/// The parked plane in the riders' world (S494): stepped every frame, struck and pushed by the bikes.
+pub mod parked_plane;
 
 /// Knockable props (S80): the `.toy`'s physics collections, the `.pco` each reads, the scene models
 /// they claim, and each prop's body at rest where its model stands.

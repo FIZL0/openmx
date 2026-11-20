@@ -818,13 +818,19 @@ impl crate::Sim {
     /// each car's mirrors, in [`crate::Sim::parked_cars`]' order. With no parked car, the bikes'
     /// lists as [`crate::Sim::bike_contacts_in`] finds them, and no mirrors.
     #[allow(clippy::type_complexity)]
+    ///
+    /// The parked planes' hulls follow the cars' (S494, [`crate::parked_plane`]): an entry on one
+    /// names `players + cars + k`, and its mirrors follow the cars'.
     pub fn bike_contacts_parked(&self, dt: F, world: &dyn World) -> (Option<Vec<Vec<Contact>>>, Vec<Vec<Contact>>) {
-        if self.parked_cars.is_empty() {
+        if self.parked_cars.is_empty() && self.parked_planes.is_empty() {
             return (self.bike_contacts_in(dt, world), Vec::new());
         }
         let riders: Vec<(&Rider, bool)> = (0..self.players()).map(|i| (self.rider_of(i), true)).collect();
         let n = riders.len();
-        let hulls: Vec<Hull<'_>> = self.parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)).collect();
+        let cars = self.parked_cars.len();
+        let hulls: Vec<Hull<'_>> = (self.parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)))
+            .chain(self.parked_planes.iter().enumerate().filter_map(|(k, p)| p.hull(n + cars + k)))
+            .collect();
         match contacts_met(&riders, &hulls, dt, world) {
             Some((lists, mirrors)) => (Some(lists), mirrors),
             None => (None, Vec::new()),
@@ -849,9 +855,22 @@ impl crate::Sim {
         self.parked_cars.iter().enumerate().map(|(k, p)| p.flown(n + k, from, world)).collect()
     }
 
-    /// What a bike's resolve did to the parked cars' bodies, written back (S485).
+    /// The parked planes' bodies in player `me`'s bump, after the parked cars' (S494,
+    /// [`crate::parked_plane`]): each one the copy nearest `me`'s bike.
+    pub fn parked_planes_flown(&self, me: usize, world: &dyn World) -> Vec<Flown> {
+        let from = self.rider_of(me).ride.transform().0[3];
+        let first = self.players() + self.parked_cars.len();
+        self.parked_planes.iter().enumerate().map(|(k, p)| p.flown(first + k, from, world)).collect()
+    }
+
+    /// What a bike's resolve did to the parked cars' bodies, written back (S485), and to the parked
+    /// planes' after them (S494).
     pub fn parked_pushed(&mut self, bump: &Bump) {
         for (p, f) in self.parked_cars.iter_mut().zip(&bump.planes) {
+            p.pushed(f);
+        }
+        let cars = self.parked_cars.len();
+        for (p, f) in self.parked_planes.iter_mut().zip(bump.planes.iter().skip(cars)) {
             p.pushed(f);
         }
     }

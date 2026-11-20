@@ -15682,6 +15682,100 @@ fn without_the_parked_truck_the_bike_rides_through_its_spot() {
     assert!(port.iter().all(|p| !p.wrecked), "the bike wrecked with nothing parked");
 }
 
+// S494: bikes strike a parked plane. research/s494/flier.sh moves the bike 40 ft short of free10's
+// parked biplane (its own savestate, research/s494/index.md says how) and holds the gas, logging the
+// plane's body a row a frame (context/capture/s494/plane1.csv): the bike stops dead on the plane's
+// hull ~13 ft short of its body, and the body, awake all along, goes from 0.02 to 1.5 ft/s on the
+// strike (vz 1.35 along the bike's heading, vy 0.26), slows over ~100 frames and has moved 1.6 ft.
+
+/// **S494: a bike ridden into a parked plane stops on its hull and pushes its body** (the comment
+/// above). S485's ride, with the plane parked where free09's truck is (nose to the bike, settled
+/// 150 frames with nobody aboard as the shell parks free10's) instead of the truck: free10's own
+/// ride is not in the port's replay kit, so this is the same strike on another map, held to the
+/// capture's shape rather than its numbers.
+#[test]
+fn a_bike_ridden_into_a_parked_plane_stops_and_pushes_it() {
+    let parts = {
+        let Ok(mut disc) = game_render::disc::Disc::open_configured() else {
+            println!("no disc: S494's plane is unchecked");
+            return;
+        };
+        let res = disc.res("machine.res").expect("machine.res");
+        let plane = game_sim::phy::Plane::read_bytes(&res.read(game_sim::phy::BIPLANE_PHY).expect("the plane's phy"));
+        let rays = game_sim::track::Rays::parse(&res.read(game_sim::flight_search::BIPLANE_RAYS).expect("its rays")).expect("its rays parse");
+        let hull = game_sim::track::Mesh::parse(&res.read(game_sim::flight::HULL).expect("its hull")).expect("its hull parses");
+        let lift = game_sim::flight::spawn_lift(&res.read(game_sim::flight::BIPLANE_MODEL).expect("its model")).expect("its lift");
+        (plane, rays, hull, lift)
+    };
+    let mut plane: Vec<(Vf, Vf)> = Vec::new();
+    let mut before: Option<Sim> = None;
+    let ride = s485_ride_with(120, false, |t, sim, world| {
+        if t == 1 {
+            let (plane, rays, hull, lift) = &parts;
+            let (on, up) = world.ground(Vf::new(S485_TRUCK[0], S485_TRUCK[1] + 50.0, S485_TRUCK[2], 1.0));
+            let at = game_sim::flight::bay_spot(Vf::new(S485_TRUCK[0], on.y(), S485_TRUCK[2], 1.0), *lift);
+            let mut flight = game_sim::flight::Flight::new(plane).with_rays(game_sim::flight_search::Rays::of(rays)).with_hull(hull.clone());
+            flight.reset_body(at, Vf::new(0.0, 0.0, -1.0, 0.0), up, &sim.tables.ride.acos);
+            flight.attitude.flown = false;
+            let tables = Arc::clone(&sim.tables);
+            for _ in 0..150 {
+                flight.frame(F(game_sim::car::LOAD_DT), game_sim::biplane::Pad::default(), world, &tables.ride);
+            }
+            sim.park_planes(vec![flight]);
+            assert_eq!(sim.parked_planes.len(), 1, "the plane has a hull and rays");
+            before = Some(sim.clone());
+        }
+        // A resync carries the plane: sent while it is pushed, decoded onto the state from before.
+        if t == 70 {
+            let bytes = game_sim::snapshot::encode(sim);
+            let mut there = before.clone().expect("the state from before the strike");
+            game_sim::snapshot::decode(&mut there, &bytes).expect("the state decodes");
+            assert_eq!(there.hash(), sim.hash(), "the decoded state's hash");
+            assert_eq!(game_sim::snapshot::encode(&there), bytes, "sent back");
+            let mut bare = there.clone();
+            bare.parked_planes.clear();
+            assert!(game_sim::snapshot::decode(&mut bare, &bytes).is_err(), "a ride with no parked plane took the state");
+            let mut without = sim.clone();
+            without.parked_planes.clear();
+            assert!(game_sim::snapshot::decode(&mut there, &game_sim::snapshot::encode(&without)).is_err(), "the plane's ride took a state without it");
+        }
+        let b = sim.parked_planes[0].body;
+        plane.push((b.position, b.velocity));
+    });
+    let Some(ride) = ride else { return };
+    let rest = plane[0].0;
+    let speed = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    let struck = plane.iter().position(|(_, v)| speed(*v) > 0.3).expect("the bike never moved the plane");
+    let peak = plane.iter().map(|(_, v)| *v).max_by(|a, b| speed(*a).total_cmp(&speed(*b))).unwrap();
+    let last = plane.last().unwrap().0;
+    let bike = ride[struck].bike;
+    println!(
+        "struck on tick {}: bike at z {:.2} ({:.2} ft short of the plane's body), plane's peak v ({:+.2},{:+.2},{:+.2}), moved ({:+.2},{:+.2},{:+.2})",
+        struck + 1,
+        bike.z(),
+        rest.z() - bike.z(),
+        peak.x(),
+        peak.y(),
+        peak.z(),
+        last.x() - rest.x(),
+        last.y() - rest.y(),
+        last.z() - rest.z()
+    );
+    // Before the strike the settled plane holds still, stepped every tick.
+    assert!(plane[..struck.saturating_sub(1)].iter().all(|(p, _)| far3(*p, rest) < 0.05), "the plane crept before the strike");
+    // The bike stops on the hull, short of the body: it never rides through.
+    assert!(ride.iter().all(|r| r.bike.z() < rest.z()), "the bike rode through the plane");
+    // The push is along the bike's heading, of the capture's size (1.5 ft/s), and moves the plane.
+    assert!(peak.z() > 0.3 && peak.z() > peak.x().abs(), "the plane's peak velocity {peak:?} is not along the bike's heading");
+    assert!(speed(peak) < 10.0, "the plane was flung at {peak:?}");
+    assert!(last.z() - rest.z() > 0.1, "the plane moved {:?}", last.sub(rest));
+}
+
+/// The most two places differ along any axis.
+fn far3(a: Vf, b: Vf) -> f32 {
+    [a.x() - b.x(), a.y() - b.y(), a.z() - b.z()].iter().fold(0.0f32, |m, d| m.max(d.abs()))
+}
+
 /// S485's ride with free09's barrel (the props' `SH_Barrel` collection) put `gap` ft along `x` of
 /// the parked truck's middle and 3 ft along `z` (in line with a wheel: at the middle it rolls under
 /// the body), 2 ft over the ground on the first tick, and rolled at the truck at 25 ft/s from the
