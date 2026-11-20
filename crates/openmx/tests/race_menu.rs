@@ -10,7 +10,7 @@ use std::process::Command;
 
 /// Ride sx01 headless for five seconds with these arguments, or `None` with no disc to ride.
 fn ride(args: &[&str]) -> Option<String> {
-    ride_for("5", args)
+    ride_for("5", &[args, &["--race-seed", "0"]].concat())
 }
 
 /// [`ride`] for `seconds` of the steady clock.
@@ -160,7 +160,7 @@ fn a_two_seat_race_has_one_grid_and_one_lap_line() {
 /// race times, the human's card among them; then the outro's wait runs out.
 #[test]
 fn a_race_with_ai_riders_laps_to_its_results() {
-    let Some(said) = ride_for("95", &["--race", "--laps", "1", "--racers", "4", "--race-bot"]) else { return };
+    let Some(said) = ride_for("95", &["--race", "--laps", "1", "--racers", "4", "--race-bot", "--race-seed", "0"]) else { return };
     assert!(line(&said, "race: 3 AI riders, skills ").is_some(), "no AI riders:\n{said}");
     assert!(line(&said, "race: player 1 rides on a brain").is_some(), "no bot on the human:\n{said}");
     assert!(line(&said, "race: 4 cards, 3 computer").is_some(), "{said}");
@@ -183,4 +183,30 @@ fn a_race_with_ai_riders_laps_to_its_results() {
     assert_eq!(rows.iter().filter(|r| r.contains(" Player 1 ")).count(), 1, "{results}");
     assert_eq!(rows.iter().filter(|r| r.contains(" Rider ")).count(), 3, "{results}");
     assert!(line(&said, "race: outro over").is_some(), "the outro never ran out:\n{said}");
+}
+
+/// P381: each race is seeded off the clock, as the original's, so two races of sx01 with the same
+/// racers dress their AI riders differently (P374's gear, bike, name and number). A race's tape
+/// records its seed, and played back dresses them as the ride it was; `--race-seed` pins one.
+#[test]
+fn every_race_is_drawn_afresh_and_its_tape_keeps_the_draw() {
+    let seed = |said: &str| line(said, "race: seed 0x").unwrap_or_else(|| panic!("no race seed:\n{said}")).to_string();
+    let dressed = |said: &str| -> Vec<String> { said.lines().filter(|l| l.starts_with("race: AI rider ") && l.contains(" is ")).map(str::to_string).collect() };
+    let tape = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p381-race.tape");
+    let Some(first) = ride_for("1", &["--race", "--racers", "4", "--record", tape.to_str().expect("a utf-8 path")]) else { return };
+    let Some(second) = ride_for("1", &["--race", "--racers", "4"]) else { return };
+    assert_eq!(dressed(&first).len(), 3, "{first}");
+    assert_eq!(dressed(&second).len(), 3, "{second}");
+    assert_ne!(seed(&first), seed(&second), "two races on one seed");
+    assert_ne!(dressed(&first), dressed(&second), "two races dressed alike");
+
+    let text = std::fs::read_to_string(&tape).expect("the race's tape");
+    let recorded = seed(&first)["race: seed ".len()..].to_string();
+    assert!(text.lines().any(|l| l == format!("race_seed {recorded}")), "the tape has no race_seed {recorded}");
+    let Some(played) = ride_for("1", &["--race", "--racers", "4", "--play", tape.to_str().expect("a utf-8 path")]) else { return };
+    assert_eq!(seed(&played), seed(&first));
+    assert_eq!(dressed(&played), dressed(&first), "the tape's race dressed otherwise");
+
+    let Some(pinned) = ride_for("1", &["--race", "--racers", "4", "--race-seed", &recorded]) else { return };
+    assert_eq!(dressed(&pinned), dressed(&first), "--race-seed {recorded} dressed otherwise");
 }

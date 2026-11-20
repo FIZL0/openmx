@@ -2069,6 +2069,24 @@ fn a_tape_names_its_sim_and_the_other_sim_warns() {
     assert_eq!(replay::Recorder::new("live").tape.native_sim, ps2_float::NATIVE, "the recorder stamps this build's sim");
 }
 
+/// P381: a race's tape carries its generator's seed, and reads it back; a ride that was no race (and
+/// every tape before P381) has no `race_seed` line.
+#[test]
+fn a_race_tape_carries_its_seed() {
+    let mut ride = PadTape::new("ride");
+    ride.push(PadFrame::of_buttons(replay::CAPPED_DT, 0));
+    assert!(!ride.to_text().contains("race_seed"), "a ride that was no race says nothing");
+    assert_eq!(PadTape::parse(&ride.to_text()).expect("a ride").race_seed, None);
+    let mut race = ride.clone();
+    race.race_seed = Some(0xdead_beef);
+    let text = race.to_text();
+    assert!(text.lines().any(|l| l == "race_seed 0xdeadbeef"));
+    assert_eq!(PadTape::parse(&text).expect("a race tape"), race);
+    assert_eq!(PadTape::parse("format 1\nrace_seed 7\n").unwrap().race_seed, Some(7));
+    assert!(PadTape::parse("format 1\nrace_seed\n").is_err());
+    assert!(PadTape::parse("format 1\nrace_seed 0x100000000\n").is_err(), "wider than the generator's seed");
+}
+
 /// A tape as a human would type one: the mask form, the bytes form, `-` for an absent pad, and a `dt`
 /// written as a decimal.
 #[test]

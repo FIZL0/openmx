@@ -3336,6 +3336,9 @@ struct Args {
     /// `--race-bot` (P313): a race's first human rides on an AI brain, so a headless race laps to
     /// its end with nobody at the pad. The port's own, for the tests; off, the race is the original's.
     race_bot: bool,
+    /// `--race-seed N` (P381): the race generator's seed, which lays out the grid and dresses the AI
+    /// riders. The port's own, for the tests; without it a race is seeded as [`race_seed`] says.
+    race_seed: Option<u32>,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -6302,8 +6305,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (Vf::new(x, on.y(), z, 1.0), Vf::new(h.sin(), 0.0, h.cos(), 0.0))
         }
     };
-    // The race's own draws are seeded as the session's are (`Sim::with_rider(0, …)`), apart from them.
-    const RACE_SEED: u32 = 0;
+    // P381: the race's own draws, apart from the session's, on a seed of their own each race.
+    let race_seed = args.race.as_ref().map(|_| race_seed(&args, lobby_room.as_ref()));
+    if let Some(seed) = race_seed {
+        println!("race: seed {seed:#010x}");
+    }
     // P327: a race starts on its grid, behind the closed start gate off the scene's drop-gate prop,
     // the reset's countdown to the drop drawn from the race events' start calls.
     let race_start = args.race.as_ref().and_then(|r| {
@@ -6315,7 +6321,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .unwrap_or_default();
         let prop = race_start::drop_prop(&look.models, |m| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris)));
         // P350: every local seat has a lane of the grid, so it holds at least as many riders.
-        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), (r.riders as i32).max(if args.online.is_none() { riders as i32 } else { 1 }), RACE_SEED));
+        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), (r.riders as i32).max(if args.online.is_none() { riders as i32 } else { 1 }), race_seed.unwrap_or_default()));
         if start.is_none() {
             println!("race: {} has no start gate ({} start calls, drop gate {}) — a ride from the start line", args.track, drops.len(), if prop.is_some() { "found" } else { "not found" });
         }
@@ -6886,6 +6892,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let mut recorder = Recorder::new(format!("{} on {} / {}", args.rider, args.track, args.bike));
         // A modified ride's tape carries its modifiers, so it replays on them (P55).
         recorder.tape.modifiers = mods;
+        // A race's tape carries its seed, so it replays on the same grid and AI riders (P381).
+        recorder.tape.race_seed = race_seed;
         // and a ride with Air Wrecks off says so before its first frame (P138)
         if !args.air_wrecks {
             recorder.air_wrecks(false);
@@ -15780,6 +15788,28 @@ fn ride_modifiers(args: &Args, room: Option<&openmx_net::room::Room>) -> Result<
     Ok(args.modifiers)
 }
 
+/// P381: the seed a race's generator starts on, which lays out its grid and dresses its AI riders.
+/// The original seeds it off the wall clock, so every race is drawn afresh, and so does a race here,
+/// unless it has to be the same ride somewhere else: `--race-seed`'s, a played tape's (the one it
+/// recorded, 0 on a tape from before P381, when every race was), an online room's (the host's seed,
+/// which every machine has), or 0 on a `--online` ride (whose machines share no seed).
+fn race_seed(args: &Args, room: Option<&openmx_net::Room>) -> u32 {
+    if let Some(seed) = args.race_seed {
+        return seed;
+    }
+    if let Some(path) = &args.play {
+        return read_tape(path, args.phase).ok().and_then(|t| t.race_seed).unwrap_or(0);
+    }
+    if let Some(room) = room {
+        return room.seed;
+    }
+    if args.online.is_some() {
+        return 0;
+    }
+    let t = clock::SystemTime::now().duration_since(clock::UNIX_EPOCH).unwrap_or_default();
+    (t.as_secs() as u32).wrapping_mul(0x9e37_79b9) ^ t.subsec_nanos()
+}
+
 fn read_tape(path: &std::path::Path, phase: TickPhase) -> Result<PadTape, String> {
     let named = |e: std::io::Error| format!("{}: {e}", path.display());
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("p2m2")) {
@@ -16612,6 +16642,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         menu: false,
         race: None,
         race_bot: false,
+        race_seed: None,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -16680,6 +16711,14 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
             }
             "--race-bot" => args.race_bot = true,
+            "--race-seed" => {
+                let n = next("a number")?;
+                let seed = match n.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16),
+                    None => n.parse(),
+                };
+                args.race_seed = Some(seed.map_err(|e| format!("{a}: {e}"))?);
+            }
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),
             "--where" => args.where_only = true,

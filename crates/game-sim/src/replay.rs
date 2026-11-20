@@ -1175,12 +1175,16 @@ pub struct PadTape {
     /// other it drifts, so the shell warns ([`PadTape::sim_warning`]). False for an exact ride, which is
     /// every tape before P262 and every `.p2m2` (the original is the exact sim).
     pub native_sim: bool,
+    /// P381: the seed the race's generator started on (the original's comes off the wall clock), which
+    /// lays out the grid and dresses the AI riders: a replay seeds its race the same. None for a ride
+    /// that was no race, and for every tape before P381 (whose races were all seeded 0).
+    pub race_seed: Option<u32>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new(), native_sim: false }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new(), native_sim: false, race_seed: None }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1338,6 +1342,7 @@ impl PadTape {
     /// modifiers_from 600 gravity=100            # P98: frames 600 on ride on these (empty: the original's)
     /// switch 900 biplane                        # P102: the first player is put on this before frame 900
     /// sim native                                # P262: ridden on the native sim (no line: the exact one)
+    /// race_seed 0x5a17c0de                      # P381: the race generator's seed (no line: no race)
     /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
     /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
     /// ```
@@ -1376,6 +1381,11 @@ impl PadTape {
                     Some("native") => tape.native_sim = true,
                     Some("exact") => tape.native_sim = false,
                     _ => return err(n, "sim wants 'native' or 'exact'"),
+                },
+                // P381: the race generator's seed.
+                "race_seed" => match (word.next().and_then(parse_u64), word.next()) {
+                    (Some(seed), None) if seed <= u32::MAX as u64 => tape.race_seed = Some(seed as u32),
+                    _ => return err(n, "race_seed wants one 32-bit number"),
                 },
                 // The game modifiers the ride was made with (P55), in their own text form.
                 "modifiers" => {
@@ -1491,6 +1501,10 @@ impl PadTape {
         // Only a native-sim ride says so (P262), so an exact build's tapes are the bytes they always were.
         if self.native_sim {
             let _ = writeln!(s, "sim native");
+        }
+        // Only a race says so (P381).
+        if let Some(seed) = self.race_seed {
+            let _ = writeln!(s, "race_seed {seed:#010x}");
         }
         // Only a modified ride says so, so the original's tapes are the bytes they always were.
         if !self.modifiers.is_original() {
