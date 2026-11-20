@@ -5606,6 +5606,9 @@ vehicle_fx_track_update boot 0x003d7ff0 last = tire while the strip is ended; d 
 #                                     in = f FadeIn; else f = (FadeIn - in)/FadeIn, in -= d, out = f FadeOut.
 #                                     a = f (Base + clamp01((comp-MinC)/(MaxC-MinC)) (1-Base)): above 0.005
 #                                     strip vt +0x78 (add), else vt +0x7c (end)
+# R49: after off a marking frame has f = 0 (d = 0 while ended) and lays nothing; the first live frame
+#   that does not mark sets in = 0 (f = out/FadeOut = 0), then marking lays at f = 1. Both ports do
+#   this; game-sim tests/tire_track_fade.rs runs the original beside the port (64 random cases too).
 vehicle_fx_track_off  boot 0x003d82c0 strip end, out = 0, in = FadeIn (vt +0x18 0x003d8310 the same and
 #                                     the enable bit cleared; vt +0x24 0x003d8270 resets flags and the ring)
 track_strip_init      boot 0x003d8cb0 the strip and its ring: NumberOfStrips batches of 16 vertex slots

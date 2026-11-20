@@ -35,6 +35,11 @@
 //!   when `MinSpeed > 1`, `in = f · FadeIn`.
 //! - **Strength:** `a = f · (Base + clamp01((c − MinC) / (MaxC − MinC)) · (1 − Base))`.
 //!
+//! A track switched off (all of the fade-in to go, its strip ended, so `d` is 0) lays nothing while it
+//! marks; its first live frame that does not mark sets `in = 0`, and the next marking frame lays at
+//! full strength (R49, `tests/tire_track_fade.rs` against the original). After a jump or a wreck that
+//! is the first frame back on with the tyre at or under its threshold, or the bike under its speed.
+//!
 //! # A strip's row (`track_strip_add`)
 //!
 //! The alpha byte is `a · 128`, truncated. An ended strip starts again at the tyre when the byte is

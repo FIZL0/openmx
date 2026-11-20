@@ -220,9 +220,9 @@ impl Params {
 /// A rider's tracks for the Sim (V135): `list`'s entries, each as its constructor leaves it, on the
 /// bike's snapshot `snap` as it stands. No tyre's zone is known yet (0xff), so the manager's first
 /// pass sets each track's from its tyre's. The manager's first pass reads `snap`, and a tyre with no
-/// contact there would switch its tracks off, which a track never fades back in from (the port's
-/// fade-in needs the tyre to move while its strip is ended, which it never sees). A bike set down on
-/// the grid has not swept its wheels yet, so a tyre with neither contact is taken as on the ground.
+/// contact there would switch its tracks off, dropping the constructor's fade-out (a track off lays
+/// again only from its first live frame that does not mark, R49). A bike set down on the grid has not
+/// swept its wheels yet, so a tyre with neither contact is taken as on the ground.
 pub fn sim_rider(list: &[Params], mut snap: game_sim::tire_track::Snapshot) -> game_sim::tire_track::RiderTracks {
     for t in &mut snap.tyres {
         t.ground |= !t.object;
