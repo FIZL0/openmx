@@ -1,0 +1,176 @@
+# r63-split-car.toml — R63: watch/r22-split-car.toml with the seats swapped: in the original's split
+# screen, player 2's bike rides into player 1's buggy (free09, the front end's Freestyle setup with
+# Machine 2 the Dune Buggy as R22's, player 1 switched into it from the pause menu, the buggy put on
+# player 2's way by research/r63/place_save.sh).
+#
+# The addresses are that state's (context/states/r63/s34.ram, research/r22/riders.py and machines.py):
+# player 2's ridden vehicle 0x00db5a50 (player +0x30 = 1), its chassis 0x00dfedd0 and collision record
+# 0x00da3110; the buggy's actor 0x017ea7e0 (world machine list entry 3, kind 3), its body 0x01394710,
+# its collision record 0x017e57d0 (actor +0x170). Columns keep R22's names but p2_player.
+# research/r22/capture.sh writes the tape and plays it while `kit record` runs.
+
+[watch]
+name        = "r63-split-car"
+description = "R63: a split-screen seat-1 bike into player 1's buggy: the bike's record and the car"
+every       = 1
+frames      = 600
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "p2_player"            # player +0x30: 1 for player 2
+addr = "0x00db5a50 + 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "bike_clock"           # +0x13fc: the player update's last store
+addr = "0x00db5a50 + 0x13fc"
+type = "f32"
+
+[[field]]
+name = "wreck_reason"         # +0x748
+addr = "0x00db5a50 + 0x748"
+type = "u32"
+
+[[field]]
+name = "ch_cofg"              # chassis +0x60
+addr = "0x00dfedd0 + 0x60"
+type = "f32x3"
+
+[[field]]
+name = "ch_vel"               # chassis +0x260
+addr = "0x00dfedd0 + 0x260"
+type = "f32x3"
+
+[[field]]
+name = "ch_impact"            # chassis +0x170: the frame's shock
+addr = "0x00dfedd0 + 0x170"
+type = "f32x3"
+
+[[field]]
+name = "rec_count"            # record +0x100: contacts in the list
+addr = "0x00da3110 + 0x100"
+type = "u32"
+
+[[field]]
+name = "rec_struck"           # record +0x40..+0x4c: raised when another record mirrors a hit in
+addr = "0x00da3110 + 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "rec_relative"         # record +0x1e0: the last entry's relative velocity
+addr = "0x00da3110 + 0x1e0"
+type = "f32x4"
+
+[[array]]
+name   = "c"                  # the bike record's contact list: *(record+0x108), 0x80-byte entries
+addr   = "0x00da3110 + 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"                 # +0x00: 0 own ray, 1 mirrored in
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "end"                  # +0x20
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"               # +0x30
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"                # +0x40
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"                # +0x74: the other side's collision record, 0 = scenery
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"                # +0x78
+off  = 0x78
+type = "u32"
+
+# --- the buggy
+
+[[field]]
+name = "car_pos"              # body +0x60
+addr = "0x01394710 + 0x60"
+type = "f32x3"
+
+[[field]]
+name = "car_vel"              # body +0x70
+addr = "0x01394710 + 0x70"
+type = "f32x3"
+
+[[field]]
+name = "car_spin"             # body +0x90
+addr = "0x01394710 + 0x90"
+type = "f32x3"
+
+# The buggy's collision record, 0x017e57d0 (its actor +0x170): the record every bike entry names at
+# +0x74 in the strike. Its kind-0 entries are the car's own rays (naming the bike's record 0x00da3110),
+# its kind-1 the mirrors of the bike's.
+[[field]]
+name = "car_rec_count"
+addr = "0x017e57d0 + 0x100"
+type = "u32"
+
+[[field]]
+name = "car_rec_struck"
+addr = "0x017e57d0 + 0x40"
+type = "bytes:16"
+
+[[array]]
+name   = "k"                  # the car record's contact list
+addr   = "0x017e57d0 + 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"
+off  = 0x78
+type = "u32"

@@ -1,0 +1,8 @@
+# R63: player 2 waits a second for the parked buggy to settle, then holds the gas (Cross) straight on
+# into its tail.
+release
+sleep 30t
+down cross
+sleep 150t
+up cross
+sleep 300t

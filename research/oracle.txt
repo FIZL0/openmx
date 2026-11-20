@@ -14572,6 +14572,37 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   car collision's mass 77.63975 (record +0x64 is 155.2795, which gives the wrong force), gives the
 #   car body +0x70/+0x90/+0xc0/+0x190/+0x1b0/+0x1e0 and the bike chassis +0x260/+0x290/+0x170/+0x180
 #   bit for bit (bike 46.16146 -> 4.2808557 ft/s).
+# R63 — R22 with the seats swapped: player 1 (seat 0) in the buggy, player 2 (seat 1) on a bike into it
+#   (tests/ai/split_seats.rs r63_the_seat_0_buggy_steps_before_the_seat_1_bike_that_strikes_it; capture
+#   research/r63/r63-split-car.toml; journal research/journal/2026-11-20-r63-split-seats-swapped).
+#   Route, all by two-pad tape from context/recordings/split/splitscreen2_shortcolision.p2m2's state
+#   (research/r63/step.sh, fe/*.pad): P1 pause > Quit > Yes; Freestyle > Montauk Plains; setup as R22's
+#   (Machine 1 Monster Truck, Machine 2 right x3 Dune Buggy); P2 "No"; both Start. P1's pause: down once
+#   "Switch To Machine", right once (Monster Truck -> Dune Buggy), cross cross: P1 drives the buggy.
+#   (research/r63/boot.py, R22's boot2.py with ev+0x11c poked, hangs on the loading screen at frame 0.)
+#   Buggy put on P2's line by research/c34/place.py (research/r63/place_save.sh) at (4178.5, 142.0, 3721.0),
+#   quat (0, -0.5165, 0, 0.8563); P1 holds square, P2 cross (research/r63/p1_brake.pad, p2_ride.pad).
+#   State: states/r63/pre.ram, frame 9729 (its row in capture/r63/strike.csv equal). World machine list:
+#   0 P2's ridden bike 0x00db5a50 (player +0x30 1), chassis 0x00dfedd0, record 0x00da3110; 1 P1's parked
+#   bike 0x0189fb90, chassis 0x0135ddb0, rider record 0x01360c00; 2 truck kind 4 actor 0x01a68e00, record
+#   0x00c6b110; 3 buggy kind 3 actor 0x017ea7e0, body 0x01394710, record (actor +0x170) 0x017e57d0.
+#   Pads: port 0 at 0x0047a980, port 1 at 0x0047ad80 (+0x400), each two halves 0x80 apart, stamps +0x58.
+#   Level node 0x01a6af50: records truck 0x00c6b110, car 0x017e57d0, 0x01362d30, bike 0x00da3110.
+#   0x01362d30 is pointed to from 0x013614c0..0x01362afc, among P1's parked bike's structures (not proved
+#   whose); P2's bike knocks it on frames 9716..9728 (k1 then k0 entries naming it) on the way.
+#   Each tick, in order (returns logged), 9730..9738:
+#   - collide 0x002708a0 on the node's 4 records, node order;
+#   - node dynamics world 0x01a6afc8: car_preforce truck then buggy; 4 x (resolve car record, resolve
+#     0x01362d30); car_measure (buggy);
+#   - player updates 0x0027c890: P2's ridden bike 0x00db5a50 first (the bike record's 2 resolves inside),
+#     then P1's parked bike 0x0189fb90; then bike world 0x007c1d70.
+#   So the seat-0 car steps before the seat-1 bike, and the riders run last seat first: F77's pass_order.
+#   (In R22 too P2's update ran before P1's.)
+#   Strike, frame 9735 (capture and interpreter equal bit for bit): bike record [k1->car, k1->car,
+#   k0->car], car record [k0->bike, k0->bike, k1->bike], both struck [1, 1, 0, 1]. The car's first
+#   resolve (in its own step) takes the bike chassis from 26.568 to 2.383 ft/s and the car to 1.995 ft/s;
+#   9735's row: car v (-0.9455, 0.1083, 0.5273). 9736..9745 two of each. Two captures of the tape from
+#   slot 34 (try1.csv, strike.csv, frames 9657..9896) equal on every column but dt.
 # C43 — the Kiowa strikes a knockable prop on free09, captured live (research/c43/README.md; journal
 #   research/journal/2026-11-18-b34c-kiowa-strikes-props/2-c43-kiowa-strike-capture-FINAL.md). For S471.
 #   From C14's state (context/recordings/c43/strike.p2m2, its _SaveState.p2s C14's): climb, R1 9 ticks (nose

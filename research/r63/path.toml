@@ -1,0 +1,36 @@
+# R63: player 2's bike's way on the gas from context/states/r63/in.ram (slot 33): its chassis centre and
+# velocity, and the buggy's body, one row a tick. To place the buggy on the bike's line (research/c34/place.py).
+
+[watch]
+name        = "r63-path"
+description = "R63: player 2's bike's way and the buggy"
+every       = 1
+frames      = 300
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "ch_cofg"
+addr = "0x00dfedd0 + 0x60"
+type = "f32x3"
+
+[[field]]
+name = "ch_vel"
+addr = "0x00dfedd0 + 0x260"
+type = "f32x3"
+
+[[field]]
+name = "car_pos"
+addr = "0x01394710 + 0x60"
+type = "f32x3"
+
+[[field]]
+name = "car_vel"
+addr = "0x01394710 + 0x70"
+type = "f32x3"

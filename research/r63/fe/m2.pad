@@ -1,0 +1,15 @@
+release
+sleep 10t
+down right
+sleep 6t
+up right
+sleep 24t
+down right
+sleep 6t
+up right
+sleep 24t
+down right
+sleep 6t
+up right
+sleep 24t
+sleep 60t
