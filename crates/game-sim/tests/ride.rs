@@ -6669,3 +6669,123 @@ fn s410_a_pack_trick_grows_in_its_hold_window() {
     let ticks = grew.len() as f32;
     assert!((held[start + 69].total - (1000.0 + ticks * 1000.0 / 60.0)).abs() < 2.0, "1000 a second held: {}", held[start + 69].total);
 }
+
+// --- R19: a woken truck's wheel-owner listeners ---------------------------------------------------
+
+/// R19: what `bike_wheel_contacts` tells a woken `HasPhysics` truck a wheel stands on. Per record
+/// contact with an owner (the struck collidable's `+0x80`) it calls slot `+0xc` with `(0, 0)` on
+/// every element of `*(owner+0x1f8)`'s `+0xf4` list (count `+0xf4`, array `+0xfc`). On s89-along's two
+/// free06 trucks, woken by the car's own wake (S208), and again when the woken truck's body has come
+/// to rest under the world node's update (S186): the owner is the physics object's collision object,
+/// its `+0x1f8` the `f.col` itself, and the list is the physics object's struck listener alone
+/// (`object+0x48`, `+0xc` → `physics_object_struck`), which enables the object (vt `+0x124`,
+/// `0x0015b790`) when its `+0x58` is set, and it is set on a truck. Woken, the call changes no word
+/// of the car, the physics object, its body, collision object or `f.col`. At rest (the body off, the
+/// `f.col`'s nearby bit still set, so the wheel's search still meets it) it turns the body back on:
+/// body `+0` 1, object `+0x1b0` (fresh) 1, `+0x28` gains bit 2, the `f.col`'s frames re-seated, the
+/// countdown and the car untouched; a second call changes nothing. The same listener is what the
+/// wheel's search tells on the hit (the props' S210 path, args ignored), so the port wakes a struck
+/// truck after its search (`truck_wheel::search`) and the distributor's call stays uncounted
+/// (`chassis::Contact::listeners` 0, as on a prop's, R15).
+#[test]
+fn r19_a_wheel_on_a_woken_truck_wakes_it_at_rest() {
+    use ps2_oracle::{Ee, Kit, addr, skip};
+    const BUDGET: u64 = 50_000_000;
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let path = [kit.root.join("context/states/s89-along.eeMemory.bin"), kit.ctx("states/s89-along.eeMemory.bin")]
+        .into_iter()
+        .find(|p| p.exists());
+    let Some(path) = path else {
+        skip("s89-along.eeMemory.bin is not there: S89's free06 state");
+        return;
+    };
+    let mut ee = Ee::from_ram(path).expect("the RAM image");
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    ee.set_f32(app + 0x348, 30.0);
+    ee.set_f32(app + 0x344, 1.0 / 30.0);
+    let vtable = addr("physics_car_vtable").unwrap();
+    let wake = addr("physics_car_wake").unwrap();
+    let cars: Vec<u32> = (0x0010_0000u32..0x0200_0000).step_by(16).filter(|&o| ee.u32_at(o + 8) == vtable).collect();
+    assert_eq!(cars.len(), 2, "free06 has two HasPhysics trucks (S127)");
+
+    // The listeners `bike_wheel_contacts` would call for a wheel on `mesh`, called as it calls them.
+    let tell = |ee: &mut Ee, mesh: u32| -> Vec<(u32, u32)> {
+        let owner = ee.u32_at(mesh + 0x80);
+        let held = ee.u32_at(owner + 0x1f8);
+        let n = ee.u32_at(held + 0xf4);
+        let array = ee.u32_at(held + 0xfc);
+        (0..n)
+            .map(|i| {
+                let l = ee.u32_at(array + 4 * i);
+                let slot = ee.u32_at(ee.u32_at(l) + 0xc);
+                ee.call(slot, &[u64::from(l), 0, 0], &[], BUDGET);
+                (l, slot)
+            })
+            .collect()
+    };
+    for &car in &cars {
+        let object = ee.u32_at(car + 0x698);
+        let mesh = ee.u32_at(object + 0x128);
+        let body = ee.u32_at(object + 0x110);
+        let owner = ee.u32_at(mesh + 0x80);
+        assert_eq!(owner, ee.u32_at(object + 0x120), "{car:#x}: the f.col's owner is the physics object's collision object");
+        assert_eq!(ee.u32_at(owner + 0x1f8), mesh, "{car:#x}: the owner's +0x1f8 is the f.col");
+        let owned: [(u32, u32, &str); 5] =
+            [(car, 0x6a0, "car"), (object, 0x1e0, "physics object"), (body, 0x200, "body"), (owner, 0x200, "collision object"), (mesh, 0x250, "f.col")];
+        let words = |ee: &Ee| -> Vec<Vec<u32>> { owned.iter().map(|&(a, len, _)| (0..len / 4).map(|w| ee.u32_at(a + 4 * w)).collect()).collect() };
+        // The distributor's call, and every word it changed as (name, offset, before, after).
+        let check = |ee: &mut Ee, when: &str| -> Vec<(&str, u32, u32, u32)> {
+            let before = words(ee);
+            let told = tell(ee, mesh);
+            assert_eq!(told.len(), 1, "{car:#x} {when}: one listener: {told:x?}");
+            assert_eq!(told[0].0, object + 0x48, "{car:#x} {when}: the physics object's struck listener");
+            assert_eq!(told[0].1, 0x0015_c280, "{car:#x} {when}: its +0xc is the thunk to physics_object_struck");
+            assert_eq!(ee.u32_at(object + 0x58), 1, "{car:#x} {when}: the object's struck switch");
+            assert_eq!(ee.u32_at(ee.u32_at(object + 0x38) + 0x124), 0x0015_b790, "{car:#x} {when}: its enable");
+            let mut changed = Vec::new();
+            for (&(a, _, name), was) in owned.iter().zip(&before) {
+                for (w, &v) in was.iter().enumerate() {
+                    let now = ee.u32_at(a + 4 * w as u32);
+                    if now != v {
+                        changed.push((name, 4 * w as u32, v, now));
+                    }
+                }
+            }
+            changed
+        };
+        ee.call(wake, &[u64::from(car)], &[], BUDGET);
+        assert_eq!(ee.u32_at(car + 0x588), 1, "{car:#x}: the wake did not wake it");
+        assert_eq!(ee.u32_at(body), 1, "{car:#x}: the woken body is on");
+        let woken = check(&mut ee, "woken");
+        assert!(woken.is_empty(), "{car:#x} woken: the call changed {woken:x?}");
+        let node = ee.u32_at(object + 0x134);
+        let mut rested = false;
+        for _ in 0..120 {
+            ee.call(0x0026_f800, &[u64::from(node)], &[1.0 / 30.0], 2_000_000_000);
+            if ee.u32_at(body) == 0 {
+                rested = true;
+                break;
+            }
+        }
+        assert!(rested, "{car:#x}: the woken truck's body never came to rest");
+        assert_eq!(ee.u32_at(car + 0x588), 1, "{car:#x}: at rest, still physical");
+        assert_eq!(ee.u8_at(mesh + 0x31) & 1, 1, "{car:#x}: at rest, the f.col's nearby bit is still set");
+        let (countdown, flags) = (ee.u32_at(object + 0x1bc), ee.u32_at(object + 0x28));
+        let rested = check(&mut ee, "at rest");
+        assert_eq!(ee.u32_at(body), 1, "{car:#x} at rest: the call turns the body back on");
+        assert_eq!(ee.u32_at(object + 0x1b0), 1, "{car:#x} at rest: fresh");
+        assert_eq!(ee.u32_at(object + 0x28), flags | 2, "{car:#x} at rest: +0x28 gains bit 2");
+        assert_eq!(ee.u32_at(object + 0x1bc), countdown, "{car:#x} at rest: the countdown is left");
+        let other: Vec<_> = rested
+            .iter()
+            .filter(|&&(name, w, _, _)| {
+                !matches!((name, w), ("body", 0) | ("physics object", 0x28 | 0x1b0)) && !(name == "f.col" && (0x1e0..0x220).contains(&w))
+            })
+            .collect();
+        assert!(other.is_empty(), "{car:#x} at rest: the call changed more than the enable: {other:x?}");
+        let again = check(&mut ee, "again");
+        assert!(again.is_empty(), "{car:#x}: a second call changed {again:x?}");
+        eprintln!("truck {car:#x}: owner {owner:#x}, one listener {:#x}; woken nothing, at rest re-enabled ({} words)", object + 0x48, rested.len());
+    }
+}

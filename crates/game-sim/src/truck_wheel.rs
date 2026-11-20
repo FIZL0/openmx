@@ -20,8 +20,14 @@
 //!    [`handle`], the car's place with [`OWNER`] set, which no prop's word ([`crate::prop_wheel::handle`])
 //!    reaches.
 //!
-//! The `f.col` has no struck listener of the car's (the init puts that on the path mesh and the ray
-//! probe, S127) and its object's own listener is off, so a wheel on a woken truck wakes nothing.
+//! 3. the `f.col`'s one listener told of the hit (R19, `tests/ride.rs`
+//!    `r19_a_wheel_on_a_woken_truck_wakes_it_at_rest`): the physics object's struck listener
+//!    (`object+0x48`, `physics_object_struck`), whose switch (`+0x58`) is on, so it enables the body
+//!    (`0x0015b790`, [`crate::prop_world::Collection::enable`]): nothing while the body is on, and a
+//!    truck lying out its `ResetTime` at rest is put back in its world's lists, fresh, its countdown
+//!    left as it was. The car's own struck listener (the wake) is not on the `f.col` (the init puts
+//!    it on the path mesh and the ray probe, S127). The distributor tells the owner's listeners
+//!    again (owner `+0x1f8` is the `f.col`), which then changes nothing.
 //!
 //! **Not 1:1.** The original's `f.col` is filed from the wake to the put-away, and the port takes it
 //! in reach for the same span ([`PhysicsCar::physical`]); whether the bit drops while the body lies
@@ -123,6 +129,8 @@ struct Wheels<'a> {
     posed: &'a [Posed<'a>],
     facets: Vec<Option<Vec<Facet>>>,
     ray: ray_probe::Record,
+    /// The posed trucks whose `f.col` listener heard a hit, in the order they heard it.
+    heard: Vec<usize>,
 }
 
 impl Narrow for Wheels<'_> {
@@ -157,7 +165,13 @@ impl Narrow for Wheels<'_> {
 
     fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
 
-    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, _struck: usize, _probe: usize) {}
+    /// The `f.col`'s one listener, the physics object's struck listener (R19): the body is woken
+    /// after the search.
+    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, struck: usize, _probe: usize) {
+        if !self.heard.contains(&(struck - 1)) {
+            self.heard.push(struck - 1);
+        }
+    }
 
     fn on_hit(&mut self, _objects: &mut [Collidable], _callback: usize, _probe: usize, _other: usize) {}
 
@@ -176,8 +190,9 @@ fn distance(a: Vf, b: Vf) -> F {
 /// `ray`, the wheel probe's record as the scene's and the props' searches left it: each truck's `f.col`
 /// within the probe's reach of its sphere, in the cars' order, its contacts kept by the record's
 /// one-a-segment rule. Answers which of the record's contacts are on a truck, with its owner word and
-/// its mesh's material ([`crate::prop_wheel::Found`]'s form).
-pub fn search(rays: &Rays, at: &Mat4, trucks: &Trucks, ray: &mut ray_probe::Record) -> Vec<(usize, u32, u8)> {
+/// its mesh's material ([`crate::prop_wheel::Found`]'s form). Every truck struck is woken if its body
+/// lies at rest ([`crate::prop_world::Collection::enable`], R19), in the order it was first struck.
+pub fn search(rays: &Rays, at: &Mat4, trucks: &mut Trucks, ray: &mut ray_probe::Record) -> Vec<(usize, u32, u8)> {
     let posed: Vec<Posed<'_>> = trucks
         .physical()
         .filter_map(|(car, p)| {
@@ -214,6 +229,7 @@ pub fn search(rays: &Rays, at: &Mat4, trucks: &Trucks, ray: &mut ray_probe::Reco
         category: crate::prop_world::COLLIDABLE,
         collides_with: crate::prop_world::COLLIDES_WITH,
         categories: Categories { mode: 1, list: Vec::new() },
+        listeners: vec![0],
         ..Collidable::default()
     }));
     let found = posed
@@ -221,17 +237,35 @@ pub fn search(rays: &Rays, at: &Mat4, trucks: &Trucks, ray: &mut ray_probe::Reco
         .enumerate()
         .map(|(k, p)| Candidate { object: 1 + k, distance: distance(centre, p.centre) - p.radius })
         .collect();
-    let mut wheels = Wheels { rays, at: *at, posed: &posed, facets: (0..posed.len()).map(|_| None).collect(), ray: std::mem::take(ray) };
+    let mut wheels = Wheels {
+        rays,
+        at: *at,
+        posed: &posed,
+        facets: (0..posed.len()).map(|_| None).collect(),
+        ray: std::mem::take(ray),
+        heard: Vec::new(),
+    };
     world_search::search_nearby(&mut objects, 0, &Nearby { found, prepare: false }, &mut wheels);
     *ray = std::mem::take(&mut wheels.ray);
-    ray.contacts
+    let on = ray
+        .contacts
         .iter()
         .enumerate()
         .filter_map(|(i, c)| {
             let p = posed.get(c.object.checked_sub(FIRST)? as usize)?;
             Some((i, handle(p.car), p.mesh.surface.map_or(0, |s| s as u8)))
         })
-        .collect()
+        .collect();
+    let heard: Vec<usize> = wheels.heard.iter().map(|&k| posed[k].car).collect();
+    drop(posed);
+    // The physics object's struck listener (`physics_object_struck`, `+0x58` set on a truck): the body
+    // enabled again when it lies at rest, nothing while it is on (R19).
+    for k in heard {
+        if let Some(p) = trucks.cars.get_mut(k).and_then(Option::as_mut) {
+            p.set.enable(0);
+        }
+    }
+    on
 }
 
 /// **What a wheel whose owner word is `owner` stands on** (S208): the truck's body's velocity and its
