@@ -54,3 +54,32 @@ Probe: an Ee from C33's image (`capture/c33/free09-ai4.ee.bin`) stepped beside t
   riding body's own step after the restart at 120 (part 3 leads it).
 - Test: `s490_c33s_bodies_posed_in_the_frame_follow_the_original` (race4.rs) holds ai0's parts
   within 0.1 ft through 130, posed in the frame on the copy's holds.
+
+## R54
+
+- **Cause: the main bone is set with last frame's rest.** Before the step, the original sets the main
+  bone's quat to the request's quat times the main part's rest (0x24ce88–0x24cee0: `actor+0x488`
+  `+0x190` times the joint record `actor+0x234 + 0x60*joint + 0x50`, joint from `actor+0x2f4 +0x40`,
+  stored to that part's body `+0x170`). The normalise call that writes this frame's rests into those
+  records runs *after* the set. So the set reads the rest the record kept from the frame before.
+  The port (`ragdoll_body.rs:451`) uses this frame's `skeleton.main_rest`.
+- **Why 120.** The rest only moves a little frame to frame (0.003 in the quat at 119). At 120, the
+  landing, the clip changes (35→30) and the main rest jumps (x −0.071 → −0.045). The set then differs
+  by 0.026, and the bodies part from there. The joint torques use this frame's rests; they agree.
+- **How it was found.** Inside the copy's `rider_body_update` hook: seed the port's actor from the
+  image at entry (`s483_riding_of`), call the original, then run `Actor::tick` with the points and
+  rests the original's own otp/normalise calls made that frame, on a flat world far below. Compare
+  every bone after. With this frame's rest: 0.002 ft at 111–119, 0.013 at 120 (main bone velocity
+  0.38 ft/s off), up to 0.033 at 127. With the rest read from the record at entry: **bit-exact** on
+  every tick to 130, except 4 (the seed's first entry has no history) and 15–17 (feet off the pegs;
+  the probe's world has no ground).
+- **Ruled out on the way**, all from the same entry state: the request (agrees to 1 ulp), the
+  actor's pose damping/spring, hold velocity, hold targets, bike frame and box (all exact after the
+  tick), the bike box hold (no change with it off), the Carrier spin (z only is right; adding the x
+  and y rates makes 120 twenty times worse), substeps (the riding world runs one, three passes, as
+  the original's single integrate store shows), and the integrate and joint passes (they move the
+  main quat by the same amount on both sides; only the starting set differs).
+- **The fix, tried and reverted.** Keeping each `Riding`'s main rest from its last tick and setting
+  with that: the S490 replay's worst part through 130 goes from 0.0834 ft to 0.0069 ft. Bone 17
+  stays within 0.004 ft at 120–130 (was 0.049 at 129) and no longer touches at 130, so the early
+  foot dust should go too (not run). Filed as B42.
