@@ -15086,6 +15086,210 @@ fn r59_recording2_s_image_pose_is_a_stopped_rider_s() {
     assert!(fits[1].0 > 0.2, "a second clip fits too: {}", fits[1].1);
 }
 
+/// What an R60 variant changes in the strike tick's riding step: the ride as the step reads it, and
+/// in its `riding` the body as strike-1 left it; then how many steps, and their `dt` in ticks.
+type R60Change<'a> = (&'a dyn Fn(&mut Rider), usize, f32);
+
+/// R58's drawn ride with the animated body ([`r58_port_ride`] with [`R58Skeleton::Animated`]), and on
+/// its strike tick (the truck's first awake tick) the riding step run again from strike-1's body,
+/// skeleton and holds, once per `changes` on the ride it reads. Per change: every riding body's
+/// velocity after the step; the first is the step as the tick ran it.
+fn r60_strike_steps(changes: &[R60Change]) -> Option<(Vec<Vec<Vf>>, Vec<Vf>)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes.into_iter().find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix(FREERIDE_PHY).is_ok()))?;
+    let bike = disc.res(&bike).ok()?;
+    let sub = bike.find_suffix(".sub")?.name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
+    let mut chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let root = chassis.nodes.root.expect("a chassis root");
+    let dt = F(1.0 / 30.0);
+    let mut draw = |r: &game_sim::rider::Rider| {
+        let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = chassis.riding_under(r, want);
+        chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
+        let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(&chassis) else { panic!("the chassis lacks a hold") };
+        let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+        game_sim::ragdoll_riding::Holds { root: Mat4(chassis.world[root].0.map(Vf)), hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] }
+    };
+    let (mut body, doll) = r24_body()?;
+    let mut was: Option<(Rider, Mat4, (bool, bool), i32)> = None;
+    let mut out = None;
+    s485_ride_from(S486C_BIKE, 62, true, |t, sim, world| {
+        let truck_awake = |sim: &Sim| sim.parked_cars.first().is_some_and(|p| p.awake());
+        if out.is_none() && truck_awake(sim) {
+            if let Some((r0, before, table, clip)) = was.take() {
+                let kit = r0.ragdoll_kit.clone().expect("a kit");
+                let holds = r0.holds.clone().expect("holds");
+                let tick = sim.rider.riding.as_ref().map(|rd| rd.actor.ragdoll.bones.iter().map(|b| b.body.velocity).collect::<Vec<_>>());
+                let mut got = Vec::new();
+                for &(change, steps, ticks) in changes {
+                    let mut rider = sim.rider.clone();
+                    rider.skeleton = r0.skeleton.clone();
+                    rider.riding = r0.riding.clone();
+                    change(&mut rider);
+                    let mut riding = rider.riding.take().expect("a riding body");
+                    for _ in 0..steps {
+                        riding.ride(&kit, &rider, &holds, &before, table, clip, F(ticks / 30.0), world);
+                    }
+                    got.push(riding.actor.ragdoll.bones.iter().map(|b| b.body.velocity).collect());
+                }
+                out = tick.map(|t| (got, t));
+            }
+        }
+        if t == 1 {
+            r59_as_the_shell(&mut sim.rider);
+        }
+        let gas = game_sim::ride::Controls { gas: F::ONE, ..game_sim::ride::Controls::default() };
+        body.ride(dt, &mut sim.rider, &gas, game_sim::rider::Gate::default());
+        sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(&doll)));
+        let h = draw(&sim.rider);
+        sim.rider.holds = Some(Arc::new(h));
+        let veh = &sim.rider.body.veh;
+        was = Some((sim.rider.clone(), sim.rider.ride.transform(), (veh.from_table, veh.holding), veh.state));
+    })?;
+    out
+}
+
+/// **R60: the original's downward kick on the strike is none of the bike's inputs to the riding
+/// step** (R59's follow-up; research/s484/index.md, R60). On R58's drawn ride with the animated body
+/// the strike tick's riding step is run again from strike-1's body, skeleton and holds, with one
+/// thing changed each time, beside the original's velocities on row 58
+/// (context/capture/s484/ride2_bones.csv).
+///
+/// * Both feet switches fire on the strike: the stopped bike (2 ft/s, under the stand speed) lets the
+///   feet off their holds with their collisions on. That is row 58's two collisions on, not a read
+///   across the wreck entry (R57), so the wreck's hand-over is not in row 58.
+/// * The bike turned nose up or down (to 0.2 rad), its velocity (vy ±3, vz 0 or 54), its pitch rate,
+///   its contact speed, the skeleton's feet moved 0.3-0.6 ft, a longer or doubled step: none brings
+///   the feet near theirs (-7.4 ft/s) with the main bone free of the bike box.
+/// * Six times the gravity for that tick lands the knees, feet and hands on theirs, the torso 1.5-2.7
+///   ft/s too far down: the original's bodies fall as if pulled down hard for one tick, the legs most.
+#[test]
+fn r60_the_strike_s_downward_kick() {
+    let Some((head, rows)) = r57_capture() else { return };
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let theirs = 58;
+    // Nose up by `d` radians: the held node's up and forward rows turned about its side.
+    let pitch = |d: f32| move |r: &mut Rider| {
+        let (s, c) = d.sin_cos();
+        let [_, up, fwd] = r.ride.node;
+        let mix = |a: Vf, b: Vf, ka: f32, kb: f32| Vf::new(a.x() * ka + b.x() * kb, a.y() * ka + b.y() * kb, a.z() * ka + b.z() * kb, a.w());
+        r.ride.node[2] = mix(fwd, up, c, s);
+        r.ride.node[1] = mix(up, fwd, c, -s);
+    };
+    let (p1, p2, p3, p4, p5) = (pitch(0.05), pitch(0.1), pitch(0.2), pitch(-0.05), pitch(-0.1));
+    let vy = |v: f32| move |r: &mut Rider| r.ride.chassis.vel.0[1] = v;
+    let (v1, v2) = (vy(-3.0), vy(3.0));
+    let vz = |v: f32| move |r: &mut Rider| r.ride.chassis.vel.0[2] = v;
+    let (z1, z2) = (vz(0.0), vz(54.0));
+    let rate = |w: f32| move |r: &mut Rider| {
+        let m = r.ride.transform();
+        let side = m.0[0];
+        r.ride.chassis.world_ang_vel = Vf::new(side.x() * w, side.y() * w, side.z() * w, 0.0);
+    };
+    let (w1, w2) = (rate(3.0), rate(-3.0));
+    let speed = |s: f32| move |r: &mut Rider| r.ride.air.contact_vel.0[2] = s;
+    let s1 = speed(54.0);
+    // The skeleton's bones `which` moved by `d` in the bike's frame: where the pose spring pulls them.
+    let moved = |which: &'static [usize], d: [f32; 3]| move |r: &mut Rider| {
+        let mut p = (**r.skeleton.as_ref().expect("a skeleton")).clone();
+        for &b in which {
+            for i in 0..3 {
+                p.bones[b].at.0[i] += d[i];
+            }
+        }
+        r.skeleton = Some(Arc::new(p));
+    };
+    let (f1, f2, f3, f4, f5) = (
+        moved(&[14, 17], [0.0, -0.3, 0.0]),
+        moved(&[14, 17], [0.0, -0.6, 0.0]),
+        moved(&[13, 14, 16, 17], [0.0, -0.3, 0.0]),
+        moved(&[14, 17], [0.0, 0.0, 0.3]),
+        moved(&[14, 17], [0.0, 0.0, -0.3]),
+    );
+    let actor = |f: fn(&mut game_sim::ragdoll_body::Actor)| move |r: &mut Rider| f(&mut r.riding.as_mut().expect("a riding body").actor);
+    let (g1, g2, d1, d2, d3, k1) = (
+        actor(|a| a.gravity_scale = F(3.0)),
+        actor(|a| a.gravity_scale = F(6.0)),
+        actor(|a| a.pose_damping_base = a.pose_damping_base.mul(Vf::splat(0.5))),
+        actor(|a| a.pose_damping_base = a.pose_damping_base.mul(Vf::splat(2.0))),
+        actor(|a| a.stand_speed = F::ZERO),
+        actor(|a| a.pose_spring = a.pose_spring.mul(Vf::splat(4.0))),
+    );
+    let names = [
+        "as run", "pitch +0.05", "+0.1", "+0.2", "-0.05", "-0.1", "vy -3", "vy +3", "vz 0", "vz 54", "pitch rate +3", "-3", "speed 54", "feet -0.3 y", "feet -0.6 y",
+        "legs -0.3 y", "feet +0.3 z", "feet -0.3 z", "gravity x3", "gravity x6", "damper x0.5", "damper x2", "feet held", "spring x4",
+    ];
+    let once: Vec<&dyn Fn(&mut Rider)> =
+        vec![&|_| {}, &p1, &p2, &p3, &p4, &p5, &v1, &v2, &z1, &z2, &w1, &w2, &s1, &f1, &f2, &f3, &f4, &f5, &g1, &g2, &d1, &d2, &d3, &k1];
+    let mut changes: Vec<R60Change> = once.into_iter().map(|c| (c, 1, 1.0)).collect();
+    let same: &dyn Fn(&mut Rider) = &|_| {};
+    changes.extend([(same, 1, 2.0), (same, 1, 1.5), (same, 2, 1.0)]);
+    let names: Vec<&str> = names.into_iter().chain(["dt 2 ticks", "dt 1.5 ticks", "stepped twice"]).collect();
+    let Some((got, tick)) = r60_strike_steps(&changes) else { return };
+    // Bones: main, neck, head, knee, foot, hand.
+    const SHOWN: [usize; 6] = [0, 2, 3, 13, 14, 6];
+    let r = &rows[theirs];
+    let want = SHOWN.map(|n| r[col(&format!("b{n}_vy"))]);
+    let show = |v: [f32; 6]| v.map(|x| format!("{x:6.2}")).join(" ");
+    let vys = |v: &[Vf]| SHOWN.map(|n| v[n].y());
+    println!("strike vy (bones 0 2 3 13 14 6), and the main bone's vz");
+    println!("{:16} {}", "the tick", show(vys(&tick)));
+    for (n, g) in names.iter().zip(&got) {
+        println!("{n:16} {}  vz {:5.2}", show(vys(g)), g[0].z());
+    }
+    println!("{:16} {}  vz {:5.2}", "the original's", show(want), r[col("b0_vz")]);
+    // The step run again is the tick's, to 0.003 ft/s (it reads the rider as the tick left it, not
+    // as the step did): nothing next to the 6 ft/s looked for.
+    let off = got[0].iter().zip(&tick).map(|(a, b)| (0..3).map(|i| (a.0[i] - b.0[i]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+    println!("the step run again is off the tick's by {off:e} ft/s");
+    assert!(off < 0.01, "the strike's step run again is {off} ft/s off the tick's");
+    // No change of the bike's (its pitch, velocity, rates, contact speed), of where the skeleton puts
+    // the feet, or of the step's length brings the feet down to -4 ft/s with the main bone still free
+    // of the bike box (vz over 20): the kick is not one of those.
+    let kicked = |g: &[Vf]| g[14].y() < -4.0 && g[0].z() > 20.0;
+    let gravity6 = names.iter().position(|n| *n == "gravity x6").unwrap();
+    for (n, g) in names.iter().zip(&got) {
+        if *n != "gravity x6" {
+            assert!(!kicked(g), "{n}: the feet kicked down to {} with the main bone at vz {}", g[14].y(), g[0].z());
+        }
+    }
+    // What does look like it: six times the gravity for the one tick. The knees, feet and hands land
+    // within 0.7 ft/s of theirs; the main bone, neck and head overshoot theirs by over 1 ft/s.
+    let g6 = vys(&got[gravity6]);
+    assert!([3, 4, 5].iter().all(|&i| (g6[i] - want[i]).abs() < 0.7), "gravity x6: the legs and hands at {g6:?}, theirs {want:?}");
+    assert!([0, 1, 2].iter().all(|&i| g6[i] < want[i] - 1.0), "gravity x6: the torso at {g6:?}, theirs {want:?}");
+
+    // The feet switch: the bike stopped under the stand speed lets both feet off their holds and
+    // turns their collisions (bones 14 and 17, the first two) on, on the strike tick, as the
+    // original's row 58 reads them on with the rest still off (not a read across the wreck entry).
+    let mut log = Vec::new();
+    let Some((port, _)) = r58_port_ride(R58Skeleton::Animated, |_, sim| {
+        let r = &sim.rider;
+        log.push(r.riding.as_ref().map(|rd| {
+            let d = &rd.actor.ragdoll;
+            (d.holds, d.collisions.iter().map(|c| c.enabled).collect::<Vec<_>>(), r.ride.air.contact_vel.z())
+        }));
+    }) else {
+        return;
+    };
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    let on_t = |k: usize| R57_BONES.map(|b| rows[k][col(&format!("b{b}_on"))] != 0.0).to_vec();
+    for k in [-1i32, 0] {
+        let (holds, on, speed) = log[(ours as i32 + k) as usize].clone().expect("the riding body");
+        println!("strike{k:+}: speed {speed:.2}, holds {holds:?}, collisions on {on:?} / {:?}", on_t((theirs as i32 + k) as usize));
+        assert_eq!(on, on_t((theirs as i32 + k) as usize), "strike{k:+}: the collisions on");
+        assert_eq!(holds, if k == 0 { [true, true, false, false] } else { [true; 4] }, "strike{k:+}: the holds");
+    }
+}
+
 /// S485's control: without the parked truck the same ride goes on through its spot.
 #[test]
 fn without_the_parked_truck_the_bike_rides_through_its_spot() {
