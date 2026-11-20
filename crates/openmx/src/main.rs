@@ -279,6 +279,7 @@ mod music_packs;
 mod worlds;
 mod world_dress;
 mod paint_stream;
+mod phy_editor;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]

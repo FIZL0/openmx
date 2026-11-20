@@ -167,6 +167,37 @@ impl Ini {
     pub(crate) fn from_parts(names: Vec<String>, pairs: Vec<(usize, String, String)>) -> Ini {
         Ini { names, pairs }
     }
+
+    /// The same file with each pair's value put through `f(section, key, value)`: `Some` is the new
+    /// value, `None` keeps it (P387's physics editor, which edits a bike's `.phy` as text and lets
+    /// the loader read the result).
+    pub fn with_values(&self, mut f: impl FnMut(&str, &str, &str) -> Option<String>) -> Ini {
+        let pairs = self
+            .pairs
+            .iter()
+            .map(|(s, k, v)| {
+                let v = f(&self.names[*s], k, v).map_or_else(|| v.clone(), |n| squeeze(&n));
+                (*s, k.clone(), v)
+            })
+            .collect();
+        Ini { names: self.names.clone(), pairs }
+    }
+
+    /// The file as text that [`Ini::parse`] reads back to the same sections and pairs (P387): every
+    /// section in file order with its pairs under it, a value with a space in quotes.
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (i, name) in self.names.iter().enumerate() {
+            out.push_str(&format!("[{name}]\n"));
+            for (_, k, v) in self.pairs.iter().filter(|(s, _, _)| *s == i) {
+                match v.contains([' ', '\t']) {
+                    true => out.push_str(&format!("{k} = \"{v}\"\n")),
+                    false => out.push_str(&format!("{k} = {v}\n")),
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Whitespace out, quotes out — except between `[` and `]`, where the reader keeps spaces so that a
