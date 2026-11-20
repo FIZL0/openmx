@@ -247,3 +247,70 @@ needs a capture on the original. Filed as a follow-up:
   - the bike's transform (the rows next to veh+0x1b0);
   - the body actor's request (velocity, rates, speed, the gravity scale);
   - the bones' orientations.
+
+## The strike's kick is the riding force's y lane (R60a)
+
+The kick is in the force the riding step sums. It is not a torn row, and it is not any of the
+inputs the port gives that force. Test: `r60a_the_strike_s_kick_is_the_riding_force_s_y_lane` in
+crates/game-sim/tests/replay.rs.
+
+### The captures
+
+`truck.sh` has two new modes, passed as its sixth argument (ride.py's docstring lists the columns):
+
+- `full`: R57's `bones` columns, plus per row:
+  - the bike's drawn transform (veh+0x180, `bike_m<r><c>`);
+  - the request (actor+0x488): frame, velocity, rates, pitch, speed, centre, quat, reason;
+  - the actor's gravity scale (+0x2d0) and mode (+0x47c);
+  - every R57 bone's whole dynamics body (`b<n>_<field><lane>`).
+- `actor`: `full`, plus the actor's words +0x400..+0x6ff (`a<off>`).
+
+Runs, on copy 3 (`KIT_PCSX2=3 ./kit pcsx2 with -- bash research/s484/truck.sh <pid> 4594 3778 240
+context/capture/s484/<name>.csv <mode>`):
+
+- `r60a_bodies1.csv`, `r60a_bodies2.csv` (`full`): equal to the bit on all 852 columns.
+- `r60a_actor1.csv` (`actor`): equal to both on those 852 columns.
+- `r60a_full1/2.csv`: an earlier, narrower `full`. Superseded.
+- Run 1 equals R57's `ride2_bones.csv` on all 106 shared columns.
+
+So row 58 is not torn: three runs agree, and the frame counter is the same before and after each row.
+
+### Where the kick is
+
+- The riding step is one integration of the whole tick: each bone's step h is 0.03333.
+- On the strike the feet are off their holds. Their vy change is exactly accel × h
+  (−205.6 lb × inv mass / 30: −0.55 → −7.40). So the kick is a force, not a constraint.
+- On strike−1 the port's force on every bone is the original's to 0.5 lb.
+- On the strike, x and z still match. y is lower on theirs:
+
+  | bones | y force gap (lb) | as a carried velocity (ft/s) | as a pose point (ft) |
+  |---|---|---|---|
+  | feet 14, 17; knees 13, 16 | −27 to −28 | −8.0 | −0.92 |
+  | main 0 | −23.7 | −6.9 | −0.79 |
+  | neck 2 | −22.8 | −6.6 | −0.76 |
+  | head 3 | −19.2 | −5.6 | −0.64 |
+  | hands 6, 10 | −13.5 / −15.6 | −4.0 / −4.6 | −0.47 / −0.54 |
+
+  "As a carried velocity" is the gap through the pose damper; "as a pose point", through the
+  spring; each in the bone's frame, as the force is.
+- It is not gravity: the head (inv mass 100) has −19 lb, so the gap does not follow the mass.
+- It is not a shock or a collision: shock and shock peak are zero on every bone.
+
+### What matches the port on the strike
+
+- The request: velocity (0.003, 0.217, 1.732), down from (0.014, 0.001, 54.8); rates about
+  (−0.032, 0, 0); speed 2.09; pitch 0.5. The drawn transform equals the request's frame.
+- The gravity scale is 1. The mode is 1 (riding) on the strike, 2 (reason 1) after it.
+- The pose spring (actor+0x650) is (80, 30, 30). The damper (+0x660) is (5.49, 3.43, 3.43), the
+  speed-scaled base (3.2, 2, 2). The port's is (5.51, 3.44).
+- The hold targets (+0x4d0..+0x50c) barely move. The hold velocity (+0x530) is 0.8 × the request's
+  velocity, as the port's is. The foot points (+0x510, +0x520) do not change.
+- Two words, +0x638 and +0x63c, go from −0.033 to 0.5 on the strike. What they do is not known.
+
+### What is left
+
+Two terms are left: the pose points the skeleton hands the spring, and the carried velocity's
+spin. A carried velocity plus a spin fits the gaps poorly (rms 1.07 ft/s), and so does a rigid move.
+The gap grows down the body, the legs most. To name the term, the original's force listener
+(0x0024d6e0) has to be run on the strike from a save state at strike−1, reading its pose point
+and carried velocity per bone. Filed as R62.
