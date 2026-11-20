@@ -151,3 +151,114 @@ fn a_built_rider_draws_when_its_emitter_moves() {
     }
     assert_eq!(draws, [0, 0, 2, 2], "switched on at 0, still at 1, 60 ft/s at 2 and 3");
 }
+
+/// A psg node: `name` under `parent`, `at` from it.
+fn node(name: &str, parent: Option<usize>, at: [f32; 3]) -> game_render::psg::Node {
+    let mut local = M4::IDENTITY;
+    local.0[3] = [at[0], at[1], at[2], 1.0];
+    game_render::psg::Node { name: name.to_string(), local, parent, center: v3(0.0, 0.0, 0.0), half_extents: v3(0.0, 0.0, 0.0), radius: 0.0 }
+}
+
+fn model(nodes: Vec<game_render::psg::Node>) -> game_render::psg::Model {
+    game_render::psg::Model { nodes, materials: Vec::new(), meshes: Vec::new(), groups: 0, group_distance: Vec::new() }
+}
+
+/// A list on the rig's three nodes and one on a node of the frame: a rear and a front generic, an
+/// exhaust, and a generic fixed to `Seat`.
+fn rigged() -> PlaneFx {
+    let list = biplane::emitters(
+        "[Rear]\nType = Generic\nAttachedToSoultree = RearTire_Particle01\nEmitter = smoke.emt\n\
+         [Front]\nType = Generic\nAttachedToSoultree = FrontTire_Particle01\nEmitter = smoke.emt\n\
+         [Pipe]\nType = Exhaust\nMaxSpeed = 15\nAttachedToSoultree = 250_Exhaust_Particle01\nEmitter = smoke.emt\n\
+         [Seat]\nType = Generic\nAttachedToSoultree = Seat\nEmitter = smoke.emt\n",
+    );
+    let emt = "[General Info]\nParticleGroupName=\"Smoke\"\nMinimumEmitRate=60\nMaximumEmitRate=60\nMinimumEmissionSpeed=1\nMinParticlesPerFrame=1\n";
+    let read = |name: &str| (name == "smoke.emt").then(|| emt.as_bytes().to_vec());
+    let sheet = "[General Info]\nNumFrames=1\nNumGroups=1\n[Group0]\nName=\"Smoke\"\nFirstFrame=0\nLastFrame=0\n\
+                 [Frame0]\nUVLeft=0\nUVRight=8\nUVTop=0\nUVBottom=8\n";
+    PlaneFx::new(&list, Atlas::parse(sheet, 8, 8), read)
+}
+
+/// S420a: the tyres' and the exhaust's emitters hang on the Sim's node rigs off the bike's model:
+/// each starts on its node's point, the rear one moves with the rear compression and the front one
+/// with the fork's, and an emitter on a frame node stays fixed in the chassis.
+#[test]
+fn the_tyres_and_the_pipe_ride_the_rigs() {
+    let fx = rigged();
+    assert_eq!(fx.entries.len(), 4, "every entry built");
+    let chassis = model(vec![
+        node("Bike", None, [0.0, 0.0, 0.0]),
+        node("SwingArm", Some(0), [0.0, 1.5, -0.5]),
+        node("RearTire_Particle01", Some(1), [0.0, -0.4, -2.0]),
+        node("Handlebars", Some(0), [0.0, 3.0, 1.5]),
+        node("Shocks", Some(3), [0.0, -1.0, 0.6]),
+        node("FrontTire_Particle01", Some(4), [0.0, -1.2, 0.4]),
+        node("Seat", Some(0), [0.0, 2.5, -0.3]),
+    ]);
+    let pipe = model(vec![node("Pipe", None, [9.0, 9.0, 9.0]), node("250_Exhaust_Particle01", Some(0), [0.3, 1.8, -1.9])]);
+    let bike = bike_at([10.0, 2.0, -40.0]);
+    let world = |name: &str| {
+        let i = chassis.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+        let p = chassis.world(i).point(v3(0.0, 0.0, 0.0));
+        Some(Vf([p.x + 10.0, p.y + 2.0, p.z - 40.0, 1.0]))
+    };
+    let mut rider = particles::sim_rider(&fx, |n| world(n).or(Some(Vf([10.3, 3.8, -41.9, 1.0]))), &bike);
+    let axis = game_sim::tire::steering_axis(Vf::new(0.0, 3.0, 1.5, 1.0), Vf::new(0.0, 2.0, 2.1, 1.0));
+    particles::sim_rig(&mut rider, &fx, &chassis, &[&pipe], Vf::new(0.0, 0.8, -2.4, 1.0), axis, &bike);
+    let places: Vec<dust::Place> = rider.entries.iter().map(|e| e.emitter.place).collect();
+    assert_eq!(&places[..3], [dust::Place::Rear, dust::Place::Front, dust::Place::Exhaust]);
+    assert!(matches!(places[3], dust::Place::Chassis(_)), "the seat's stays fixed");
+    let rear = rider.rear.expect("a rear rig");
+    let front = rider.front.expect("a front rig");
+    let exhaust = rider.exhaust.expect("an exhaust rig");
+    assert_eq!(rear.pivot.0, [0.0, 1.5, -0.5, 1.0], "SwingArm's place");
+    assert_eq!(rear.mount.0, [0.0, 0.8, -2.4, 1.0], "the Sim's mount");
+    assert_eq!(front.rest.0, [0.0, 2.0, 2.1, 1.0], "Shocks in the Bike frame");
+    let near = |a: Vf, b: [f32; 3]| (0..3).all(|k| (a.0[k] - b[k]).abs() < 1e-4);
+    assert!(near(front.point(&bike), [10.0, 2.0 + 0.8, -40.0 + 2.5]), "the front node at the bind: {:?}", front.point(&bike));
+    assert!(near(exhaust.point(), [10.3, 3.8, -41.9]), "the pipe's node under Bike's world, its root's own local dropped: {:?}", exhaust.point());
+    assert_eq!(rider.entries[1].emitter.pos.0, front.point(&bike).0, "starts on its node");
+    let (low, high) = (rear.point(&bike, F(0.0)), rear.point(&bike, F(0.5)));
+    assert!((high.0[1] - low.0[1]).abs() > 0.05, "the rear node swings with the compression: {low:?} {high:?}");
+    // The fork slides up its axis with the front compression, on the next drive.
+    let mut slid = front;
+    let curve = game_sim::camera::CurveTable::build();
+    slid.drive(&bike, &dust::Feed { front_compression: F(0.5), ..dust::Feed::default() }, &curve);
+    assert!(slid.point(&bike).0[1] > front.point(&bike).0[1] + 0.3, "compressed, the front node rides up");
+}
+
+/// A one-entry list: a collision model with a 20 ft/s gate.
+fn struck() -> PlaneFx {
+    let list = biplane::emitters("[Dust]\nType = CollisionModel\nEmitter = smoke.emt\n");
+    let emt = "[General Info]\nParticleGroupName=\"Smoke\"\nMinimumEmitRate=60\nMaximumEmitRate=60\nMinimumEmissionSpeed=20\nMinParticlesPerFrame=1\n";
+    let read = |name: &str| (name == "smoke.emt").then(|| emt.as_bytes().to_vec());
+    let sheet = "[General Info]\nNumFrames=1\nNumGroups=1\n[Group0]\nName=\"Smoke\"\nFirstFrame=0\nLastFrame=0\n\
+                 [Frame0]\nUVLeft=0\nUVRight=8\nUVTop=0\nUVBottom=8\n";
+    PlaneFx::new(&list, Atlas::parse(sheet, 8, 8), read)
+}
+
+/// S420a: a collision model's particles go to the contacts its Sim twin drew at, whatever their own
+/// speed gate says, and to no other.
+#[test]
+fn the_sim_hits_pick_the_contacts() {
+    const DT: f32 = 1.0 / 30.0;
+    let run = |hits: Option<u32>| {
+        let mut fx = struck();
+        for _ in 0..6 {
+            let frame = PlaneFrame {
+                ground_contacts: vec![v3(0.0, 0.0, 0.0), v3(100.0, 0.0, 0.0)],
+                ground_zones: vec![0, 0],
+                contact_vel: Some(v3(1.0, 0.0, 0.0)),
+                sim_hits: hits.map(|h| vec![h]),
+                ..PlaneFrame::default()
+            };
+            fx.step(&frame, DT);
+        }
+        let near = fx.particles.iter().filter(|p| p.at.x < 50.0).count();
+        (near, fx.particles.len() - near)
+    };
+    assert_eq!(run(None), (0, 0), "own gate: 1 ft/s is under 20");
+    let (near, far) = run(Some(0b10));
+    assert!(near == 0 && far > 0, "the Sim drew at contact 1 only: {near} {far}");
+    assert_eq!(run(Some(0)), (0, 0), "the Sim drew at none");
+}

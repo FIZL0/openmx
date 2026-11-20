@@ -868,7 +868,7 @@ fn c33_dust_seed(ee: &Ee, sim: &Sim) -> dust::Dust {
             // S482b: the bone collisions the foot dust reads next, as the image's body left them.
             let spheres = (0..ee.u32_at(m + 0x34)).map(|i| ee.u32_at(ee.u32_at(m + 0x3c) + 4 * i)).find(|&e| ee.u32_at(e + 0x10) == SPHERES);
             let balls = spheres.map(|e| super::wreck_dust::seed(ee, e).2.balls).unwrap_or_default();
-            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls, wrecked: false })
+            (c33_player(ee, k), RiderDust { entries, feed, rear: Some(rear), front: Some(front), exhaust: Some(exhaust), balls, wrecked: false, hits: Vec::new() })
         })
         .collect();
     riders.sort_by_key(|r| r.0);

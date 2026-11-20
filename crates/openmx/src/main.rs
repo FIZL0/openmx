@@ -8319,11 +8319,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let p = m.point(v3(0.0, 0.0, 0.0));
                         Some(Vf([p.x, p.y, p.z, 1.0]))
                     };
-                    particles::sim_rider(fx, world, &rider.ride.transform())
+                    let bike = rider.ride.transform();
+                    let mut dust = particles::sim_rider(fx, world, &bike);
+                    // S420a: the tyres' and the exhaust's emitters ride the Sim's node rigs, off the
+                    // bike's model, the rider's rear mount and steering axis.
+                    if let Some(chassis) = assets.models.get(CHASSIS) {
+                        let parts: Vec<_> = rig.parts.iter().filter_map(|p| assets.models.get(p.model.as_str())).map(|l| &l.model).collect();
+                        particles::sim_rig(&mut dust, fx, &chassis.model, &parts, rider.ride.rear.w.mount, rider.ride.front.steer_axis, &bike);
+                    }
+                    dust
                 })
                 .collect();
             let built = riders.first().map_or(0, |r| r.entries.iter().filter(|e| e.kind != game_sim::dust::Kind::Quiet).count());
             println!("bike: particles: the race's Sim draws {} players' emitters, {built} of {} entries built", riders.len(), fx.entries.len());
+            if let Some(r) = riders.first() {
+                use game_sim::dust::Place;
+                let on = |p: Place| r.entries.iter().filter(|e| e.emitter.place == p).count();
+                println!("bike: particles: on the Sim's rigs {} rear, {} front, {} exhaust", on(Place::Rear), on(Place::Front), on(Place::Exhaust));
+            }
             sim.dust = Some(Box::new(game_sim::dust::Dust { riders, view: None }));
         }
     }
@@ -11367,6 +11380,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             ridden.push(rider);
             stages.mark(stages::Stage::Camera);
         }
+        // S420a: a race's emitters' view tests measure from the first seat's camera as this tick drew
+        // it (eye `+0x140`, forward `+0x150`), which the next tick's test reads. Online the Sim is
+        // the session's, which no one machine's picture may steer: none, the bike's own point.
+        if online.is_none()
+            && let (Some(c), Some(dust)) = (cameras.first(), world.seats.first_mut().and_then(|s| s.sim.dust.as_deref_mut()))
+        {
+            let f = c.at.sub(c.eye).norm();
+            dust.view = Some(game_sim::dust::View { at: Vf::new(c.eye.x, c.eye.y, c.eye.z, 1.0), forward: Vf::new(f.x, f.y, f.z, 0.0) });        }
         // The animated toys that step only when drawn (V76): whether this tick's picture draws each,
         // in any view, which the next tick's step reads, as the original's update reads the draw
         // after it. Every seat's copy of the toys is told the same. Online the toys are the
@@ -11403,7 +11424,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     _ => particles::PlaneFrame::default(),
                 };
                 // S420: a race's emitters emit when the Sim's drew.
-                frame.sim_draws = seat.sim.dust.as_deref().and_then(|d| d.riders.first()).map(|r| r.entries.iter().map(|e| e.draws).collect());                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+                frame.sim_draws = seat.sim.dust.as_deref().and_then(|d| d.riders.first()).map(|r| r.entries.iter().map(|e| e.draws).collect());
+                // S420a: and its collision entries at the contacts the Sim's drew at.
+                frame.sim_hits = seat.sim.dust.as_deref().and_then(|d| d.riders.first()).map(|r| sim_contact_hits(fx, r, &seat.sim.rider));
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
         // The Kiowas' (V114): a frame for each seat flying one, off its flight after the tick. A seat
@@ -16176,6 +16200,31 @@ fn bike_fx_frame(fx: &particles::PlaneFx, rider: &Rider, rig: &Rig, assets: &Ass
         _ => {}
     }
     frame
+}
+
+/// The rider's bone collisions as the ParticleCollisionConstraint entries read them (P74, P152): each
+/// one's ground and scene flags (the manager sets the two on their own, so a sphere on both is an
+/// object contact too, which every rider entry's Disable turns off), the point it was pushed from,
+/// its bone's velocity, and the surface byte its own ground query last wrote (P186), which the
+/// The contacts each of a racer's collision entries drew at in the Sim's dust (S420a), as
+/// [`particles::PlaneFrame::sim_hits`] reads them: a bone collision entry's from the Sim's balls
+/// ([`game_sim::dust::FEED_BONES`]' order) to the shell's spheres (the ragdoll kit's, which
+/// [`constraint_frames`] keeps) by bone; a collision model's as they are, by the object's contacts.
+fn sim_contact_hits(fx: &particles::PlaneFx, dust: &game_sim::dust::RiderDust, rider: &Rider) -> Vec<u32> {
+    let spheres = rider.ragdoll_kit.as_ref().map_or(&[][..], |k| &k.spheres[..]);
+    fx.entries
+        .iter()
+        .zip(&dust.hits)
+        .map(|(e, &hits)| match e.kind {
+            particles::Kind::Constraint { .. } => spheres
+                .iter()
+                .take(32)
+                .enumerate()
+                .filter(|(_, s)| game_sim::dust::FEED_BONES.iter().position(|&b| b == s.bone).is_some_and(|k| hits >> k & 1 != 0))
+                .fold(0, |m, (i, _)| m | 1 << i),
+            _ => hits,
+        })
+        .collect()
 }
 
 /// The rider's bone collisions as the ParticleCollisionConstraint entries read them (P74, P152): each
