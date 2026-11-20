@@ -2148,7 +2148,7 @@ const UNTAMED_ORBIT_DISTANCE: f32 = 3.0;
 /// How far over the ground under it the eye keeps (`FUN_003a9e80`).
 pub const UNTAMED_EYE_FLOOR: f32 = 2.5;
 /// The field of view a preset that blends to none is given (`0x429a0000`).
-const UNTAMED_NO_FOV: f32 = 77.0;
+pub const UNTAMED_NO_FOV: f32 = 77.0;
 
 /// One end of an Untamed preset's blend: what it asks for at or below its slow speed, or at or above
 /// its fast one. A preset's [`UntamedPreset::blend`] is one of these too, between the two, with

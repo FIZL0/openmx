@@ -1211,6 +1211,119 @@ pub fn reframe(cam: &mut game_sim::camera::Race, presets: &[game_sim::camera::Pr
     }
 }
 
+// --- the player's framing on the Untamed quad camera (MD256) ---------------------------------------
+
+/// A seat's Untamed quad camera (MD251) and the presets its file has (`disc`), which the player's
+/// framing is laid over afresh each time it changes ([`untamed_seat_presets`]).
+#[derive(Clone, Debug, Default)]
+pub struct UntamedCamera {
+    pub follow: game_sim::camera::UntamedFollow,
+    pub disc: Vec<game_sim::camera::UntamedPreset>,
+}
+
+impl UntamedCamera {
+    pub fn new(presets: Vec<game_sim::camera::UntamedPreset>) -> Self {
+        UntamedCamera { follow: game_sim::camera::UntamedFollow::new(presets.clone()), disc: presets }
+    }
+}
+
+/// One end of an Untamed preset as `framing` has it, as [`framed`] frames an MX Unleashed preset:
+/// the eye's leg behind the target point and its leg above scaled apart, and the distance and pitch
+/// made again from them; the field of view moved by the offset. A distance below zero (the look-back
+/// camera's, the eye in front) keeps its sign, so the camera still runs that preset's springs the
+/// look-back's way round. A field of view of zero, which the camera draws at
+/// [`game_sim::camera::UNTAMED_NO_FOV`], moves from that.
+fn untamed_pace(p: game_sim::camera::Pace, framing: Framing) -> game_sim::camera::Pace {
+    let mut p = p;
+    let (d, pitch) = (p.follow_distance.0, p.angle_x.0);
+    if d != 0.0 {
+        let behind = d.abs() * pitch.cos() * framing.distance;
+        let above = d.abs() * pitch.sin() * framing.height;
+        p.angle_x = F(above.atan2(behind));
+        p.follow_distance = F(behind.hypot(above).copysign(d));
+    }
+    if framing.fov != 0.0 {
+        let fov = if p.fov.0 == 0.0 { game_sim::camera::UNTAMED_NO_FOV } else { p.fov.0 };
+        p.fov = F(fov + framing.fov);
+    }
+    p
+}
+
+/// An Untamed preset as `framing` has it (MD256): both its slow and its fast end
+/// ([`untamed_pace`]), and the blend made again at the speed it was last blended at. At
+/// [`Framing::ORIGINAL`] the preset is the file's, untouched.
+pub fn untamed_framed(p: &game_sim::camera::UntamedPreset, framing: Framing) -> game_sim::camera::UntamedPreset {
+    let mut p = p.clone();
+    if framing.is_original() {
+        return p;
+    }
+    p.slow = untamed_pace(p.slow, framing);
+    p.fast = untamed_pace(p.fast, framing);
+    p.blend_at(p.blend.speed);
+    p
+}
+
+/// A seat's Untamed presets (MD256): [`seat_presets`]' list for the same `presets`, `all`, `own` and
+/// `mine_only`, in the same order, so the stand-ins' camera (which [`seat_presets`] frames) and the
+/// Untamed one stay on the same preset by its place.
+pub fn untamed_seat_presets(
+    presets: &[game_sim::camera::UntamedPreset],
+    all: Framing,
+    own: &[Own],
+    mine_only: bool,
+) -> Vec<game_sim::camera::UntamedPreset> {
+    let named = |o: &&Own, n: &str| o.name.eq_ignore_ascii_case(n);
+    let mut out: Vec<game_sim::camera::UntamedPreset> = presets
+        .iter()
+        .map(|p| {
+            let framing = own.iter().find(|o| o.base.eq_ignore_ascii_case(o.name) && named(o, &p.name)).map_or(all, |o| o.framing);
+            untamed_framed(p, framing)
+        })
+        .collect();
+    let mut mine = 0;
+    for o in own.iter().filter(|o| !o.base.eq_ignore_ascii_case(o.name)) {
+        let Some(base) = presets.iter().find(|p| p.name.eq_ignore_ascii_case(o.base)) else { continue };
+        let mut p = untamed_framed(base, o.framing);
+        p.name = o.name.to_string();
+        p.cycle_thru_this_preset = true;
+        p.is_look_back_cam = false;
+        out.push(p);
+        mine += 1;
+    }
+    if mine_only && mine > 0 {
+        for p in &mut out[..presets.len()] {
+            p.cycle_thru_this_preset = false;
+        }
+    }
+    out
+}
+
+/// The Untamed camera onto `presets`, a framing's (MD256), on preset `at` (the stand-ins' camera's
+/// after its [`reframe`]): the springs chase the new eye and look-at as they do a preset change, and
+/// `ease` carries the view from the field of view it showed, as [`reframe`] does MX Unleashed's (the
+/// Untamed camera has no lag on its field of view, so the change would jump). A camera that snaps on
+/// its next frame has nothing to ease from.
+pub fn untamed_reframe(cam: &mut game_sim::camera::UntamedFollow, presets: Vec<game_sim::camera::UntamedPreset>, at: usize, ease: &mut FovEase) {
+    if presets.is_empty() {
+        return;
+    }
+    let was = cam.presets.get(cam.current.min(cam.presets.len().saturating_sub(1))).map(|p| (shown_pace(p.blend) + ease.offset, p.blend.speed));
+    cam.presets = presets;
+    cam.current = at.min(cam.presets.len() - 1);
+    ease.offset = 0.0;
+    let Some((was, speed)) = was.filter(|_| !cam.snap) else { return };
+    let p = &mut cam.presets[cam.current];
+    p.blend_at(speed);
+    // Eased from inside the new preset's span, as [`reframe`] eases from inside its limits.
+    let (slow, fast, fov) = (shown_pace(p.slow), shown_pace(p.fast), shown_pace(p.blend));
+    ease.offset = was.clamp(slow.min(fast).min(fov), slow.max(fast).max(fov)) - fov;
+}
+
+/// The field of view one end of an Untamed preset draws.
+fn shown_pace(p: game_sim::camera::Pace) -> f32 {
+    if p.fov == 0.0 { game_sim::camera::UNTAMED_NO_FOV } else { p.fov.0 }
+}
+
 // --- a marker's ride out (P112) --------------------------------------------------------------------
 
 /// The follow camera as it would be riding along at `vel` (P112), for the frame a marker's Up puts

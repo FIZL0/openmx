@@ -1521,8 +1521,9 @@ struct Rig {
     car_cameras: Vec<(Kind, Race)>,
     /// MX vs. ATV Untamed's follow camera for a quad whose pack's `Cam\FC_ATVDefault.pb` is in
     /// Untamed's slow/fast layout (MD251). It draws the quad's view; the quad's entry in
-    /// `car_cameras` still holds the preset, the look-back and the stick ([`chase::untamed_follow`]).
-    untamed_camera: Option<game_sim::camera::UntamedFollow>,
+    /// `car_cameras` still holds the preset, the look-back and the stick ([`chase::untamed_follow`]);
+    /// the framing reaches it in [`frame_cars`] (MD256).
+    untamed_camera: Option<chase::UntamedCamera>,
     /// The camera the screen switches to while this player's rider is down (V31).
     wreck_camera: chase::WreckCamera,
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
@@ -7026,7 +7027,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         car_presets.push((Kind::Atv, bytes));
     }
     // An Untamed quad's on its slow/fast file (MD251), which every seat starts a copy of.
-    let untamed_camera = atv_files.as_ref().filter(|o| !o.untamed.is_empty()).map(|o| game_sim::camera::UntamedFollow::new(o.untamed.clone()));
+    let untamed_camera = atv_files.as_ref().filter(|o| !o.untamed.is_empty()).map(|o| chase::UntamedCamera::new(o.untamed.clone()));
     // And the MX vs. ATV car's (MD82d), on its pack's own copy of its kind's camera file.
     let car_camera_file = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_camera(&args, c));
     // And its engine (MD157), off its pack's `carengine.aud`.
@@ -11400,7 +11401,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // An Untamed quad on its own slow/fast file is followed as SLUS-21701 follows it (MD251).
                 let untamed = rig.untamed_camera.as_mut().filter(|_| up == Kind::Atv && mod_follows);
                 let mut view = match untamed {
-                    Some(u) => chase::untamed_follow(u, follow, dt, &rider, &mut world.place),
+                    Some(u) => chase::untamed_follow(&mut u.follow, follow, dt, &rider, &mut world.place),
                     None => step(
                         follow,
                         dt,
@@ -14003,6 +14004,12 @@ fn frame_cars(rig: &mut Rig, cars: &[(Kind, Vec<Preset>)]) {
             })
             .collect();
         chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.0);
+        // The Untamed quad camera (MD256) on the same framing over its own slow/fast presets, on the
+        // preset the stand-ins' camera is now on; its ease replaces the stand-ins', which never run.
+        if let Some(u) = rig.untamed_camera.as_mut().filter(|_| *kind == Kind::Atv) {
+            let framed = chase::untamed_seat_presets(&u.disc, rig.framing.0, &laid, mine_only);
+            chase::untamed_reframe(&mut u.follow, framed, cam.cam.preset, &mut rig.fov_ease.0);
+        }
     }
 }
 
