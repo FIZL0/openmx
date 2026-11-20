@@ -388,3 +388,18 @@ All nine bones are within 0.03 ft/s of theirs, and the bike box still lets the m
   tick's pose. At a steady speed that is invisible. A sudden change of band (a stop, a strike, a
   landing) shows it.
 - Filed as B43: feed the riding step the skeleton posed off the same tick.
+
+## B43: the body posed inside the step
+
+- The shell now lends each seat's body, and each race AI rider's, to its rider for the tick
+  (`Rider::poser`). The rider's frame poses it after the rider's own steps and just before the
+  riding ragdoll's step, so the step pulls to the tick's own pose.
+- S253's parent-before-the-move and S257's last-tick hold-gate words are unchanged; the holds are
+  still drawn after the tick.
+- The ride as a whole now gives the strike's kick (not just a step run again):
+  `b43_posed_in_the_step_the_strike_s_kick_is_the_original_s`, all nine bones within 0.03 ft/s.
+- R58's drawn ride posed in the step: the main bone enters at 29.6 ft/s (29.9 theirs; 28.8 a tick
+  late), the legs within 0.8 ft of theirs on +20. The head still leaves the hull a tick early, and
+  the truck's +12 wake is still missing.
+- A lent body cannot go to the sim thread (N23a): the picture drawn during the flight needs it. Ticks
+  with one stay on the loop.

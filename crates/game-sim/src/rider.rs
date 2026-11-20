@@ -208,6 +208,35 @@ impl PutBack {
     }
 }
 
+/// **The body posed inside the rider's tick** (B43): the shell's holder of the body's clip table
+/// (Body::ride, its riding skeleton), lent to the rider for one step, so the riding ragdoll's step
+/// pulls to the skeleton posed off this tick's band, as the original's body actor poses its skeleton
+/// in the tick before its ragdoll step (R62), and not to the one the shell posed after the last tick.
+/// [`Rider::frame_posed`] calls it, with the controls the bike rode, wherever the Sim steps the rider.
+pub trait Poser: std::any::Any + Send {
+    /// Pose the body off the tick the rider has just stepped, and hand the rider its skeleton.
+    fn pose(&mut self, rider: &mut Rider, c: &Controls, dt: F);
+    /// Back to the lender, who downcasts it to take what it lent.
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+}
+
+/// [`Rider::poser`]'s slot: lent for one step and taken back after it, so not state — a copy of the
+/// rider (a snapshot) has none.
+#[derive(Default)]
+pub struct PoserSlot(pub Option<Box<dyn Poser>>);
+
+impl Clone for PoserSlot {
+    fn clone(&self) -> Self {
+        PoserSlot(None)
+    }
+}
+
+impl std::fmt::Debug for PoserSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "PoserSlot(lent)" } else { "PoserSlot(None)" })
+    }
+}
+
 /// A bike with somebody on it.
 ///
 /// `Clone` because it is most of a [`crate::Sim`], and a snapshot of the simulation is a copy of
@@ -380,6 +409,9 @@ pub struct Rider {
     pub ragdoll_shown: Option<Box<Down>>,
     /// The rider's points (S79): the combo being scored and the total banked.
     pub score: Score,
+    /// The body's poser the shell lends for a step (B43, [`Poser`]); none, the shell poses after the
+    /// step and the riding step reads last tick's skeleton.
+    pub poser: PoserSlot,
 }
 
 impl Rider {
@@ -517,6 +549,7 @@ impl Rider {
             cut_put_back: false,
             ragdoll_shown: None,
             score: Score::default(),
+            poser: PoserSlot::default(),
         }
     }
 
@@ -1434,8 +1467,12 @@ impl Rider {
         poser(self);
         let (before, table, clip) = riding_from;
         let before = if out.respawned { self.ride.transform() } else { before };
+        // B43: a lent poser poses the body before the riding step, off this tick's band (R62). The
+        // wreck's entry and a cut put-back keep the shell's old order, the body posed after them:
+        // neither steps the riding body, and both change what the body's machine reads.
         if out.wreck.is_none() && Self::entry_waits(&self.state, self.crash.as_ref(), self.ragdoll.as_ref(), self.riding.as_deref(), out.respawned) {
             out.separated |= self.enter_late(dt, world);
+            self.lent_pose(c, dt);
         } else if out.respawned && self.cut_put_back {
             // A put-back that cuts (P270) starts the body at nothing: it is placed next tick off the
             // skeleton the shell poses after this one, which the hold shows straight on, and not off
@@ -1456,10 +1493,20 @@ impl Rider {
             // the rider held to them back from the trick at the new spot.
             self.motion.ramp = F::ZERO;
             self.animation.blend = self.animation.blend.unramped();
+            self.lent_pose(c, dt);
         } else {
+            self.lent_pose(c, dt);
             self.riding_tick(&before, table, clip, dt, world);
         }
         out
+    }
+
+    /// The shell's lent [`Poser`] run on this tick (B43), and put back for the shell to take.
+    fn lent_pose(&mut self, c: &Controls, dt: F) {
+        if let Some(mut p) = self.poser.0.take() {
+            p.pose(self, c, dt);
+            self.poser.0 = Some(p);
+        }
     }
 
     /// **The rider is down and the body actor has not entered the wreck yet** (B19): a wreck body

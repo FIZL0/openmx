@@ -823,6 +823,7 @@ impl Wire for Rider {
             body_rates,
             idles,
             lent_rng: _,
+            poser: _,
             body_clocked,
             feet,
             body_request,
@@ -909,6 +910,7 @@ impl Wire for Rider {
             ragdoll_shown: None,
             score: Wire::take(r)?,
             lent_rng: false,
+            poser: Default::default(),
         })
     }
 }
