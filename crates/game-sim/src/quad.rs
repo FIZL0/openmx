@@ -1887,6 +1887,13 @@ pub struct Among<'a, R> {
 ///
 /// [`Ride::step_quads`] steps one quad's whole frame among the others instead.
 pub fn step_together<R: Moto + Default>(quads: &mut [Among<'_, R>], dt: F, world: &mut dyn crate::world::World) {
+    step_together_met(quads, &[], dt, world);
+}
+
+/// [`step_together`] among the riders' bikes too (N29): `mets[i]`, the mirrors of their strikes on
+/// quad `i`'s hull, filed on its held list after its refill, as [`Ride::step_met`] files them after
+/// its own. A quad past the end of `mets`, or `None`, meets no bike.
+pub fn step_together_met<R: Moto + Default>(quads: &mut [Among<'_, R>], mets: &[Option<&crate::flight::Met>], dt: F, world: &mut dyn crate::world::World) {
     let none = crate::ride::Controls::default();
     for a in quads.iter_mut() {
         let c = if a.ride.down() { &none } else { &a.controls };
@@ -1927,6 +1934,9 @@ pub fn step_together<R: Moto + Default>(quads: &mut [Among<'_, R>], dt: F, world
             whose.push(j);
         }
         quads[i].ride.record_hold(bodies, &named);
+        if let Some(m) = mets.get(i).copied().flatten() {
+            quads[i].ride.file_mirrors(m);
+        }
         others.push(whose);
     }
     {
