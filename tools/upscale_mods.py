@@ -20,7 +20,9 @@ with the same chain in chaiNNer's window (or make it a texture pack, `mods/<name
     python3 tools/upscale_mods.py MODEL.pth --disc mods/upscaled-disc [--xbox mods/xbox-textures] [--check]
 
 `--xbox` (P383) upscales the Xbox disc's picture of a texture in place of the PS2 one wherever that pack
-(`tools/xbox_textures.py pack`) has it; the result is still named by the PS2 texture's key.
+(`tools/xbox_textures.py pack`) has it; the result is still named by the PS2 texture's key. Both packs then
+name the same textures: with neither in settings.txt's `texture_packs`, the one whose folder sorts first is
+on top (`upscaled-disc` over `xbox-textures`, the upscale over its source); order them there otherwise.
 
 Slow (~2.5 s an image whatever its size)? chaiNNer 0.25.1 starts each node's work from a worker thread without
 waking its event loop. In `resources/src/api/lazy.py` `Lazy.from_coroutine`, replace the `create_task` + polling
@@ -159,9 +161,6 @@ def run(a):
 
 def disc(a):
     """--disc: the disc's textures upscaled into a texture pack; with --check only how many are left."""
-    a.disc.mkdir(parents=True, exist_ok=True)
-    if not (a.disc / 'mod.json').exists():
-        (a.disc / 'mod.json').write_text(json.dumps({'standard': 1, 'kind': 'textures', 'id': a.disc.name, 'name': 'Upscaled disc textures'}) + '\n')
     jobs = list(disc_todo(a.src, a.disc, a.xbox))
     if a.check is not None:
         print(f'{len(jobs)} disc textures to upscale into {a.disc}')
@@ -172,6 +171,9 @@ def disc(a):
         return
     if a.model is None:
         sys.exit('the model is required unless --check')
+    a.disc.mkdir(parents=True, exist_ok=True)
+    if not (a.disc / 'mod.json').exists():
+        (a.disc / 'mod.json').write_text(json.dumps({'standard': 1, 'kind': 'textures', 'id': a.disc.name, 'name': 'Upscaled disc textures'}) + '\n')
     done = 0
     for k in range(0, len(jobs), a.batch):
         done += upscale(jobs[k:k + a.batch], a)

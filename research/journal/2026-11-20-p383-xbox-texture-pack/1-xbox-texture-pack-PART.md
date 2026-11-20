@@ -24,6 +24,8 @@ Task P383. 2026-11-20.
 - `crates/openmx/src/textures.rs` needed no change: a `"kind": "textures"` pack in `mods/xbox-textures/`
   already stacks on top.
 - Recipe in `research/mxu-xbox.md` "The texture pack (P383)".
+- Spec review fixes: `--disc --check` writes nothing; a rerun of `pack` drops pictures it no longer keeps;
+  the docstring says which pack is on top when both name a key (`upscaled-disc` sorts over `xbox-textures`).
 - opentennis: nothing to take (no other-platform texture source there).
 
 ## What the original does

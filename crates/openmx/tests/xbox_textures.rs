@@ -135,6 +135,11 @@ fn the_pack_keeps_the_bigger_xbox_picture_under_the_ps2_key() {
     assert_eq!(code, Some(0), "{said}");
     assert!(said.contains("2 Xbox pictures kept"), "{said}");
     assert!(pack.join(format!("textures/Tracks/free06/tracks/free06/rock-{rk}.png")).exists());
+    // and a run without it drops the rock it kept before
+    let (code, said) = python(&[&tool("xbox_textures.py"), &"pack", &src, &xbox, &pack]);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains(&format!("dropped textures/Tracks/free06/tracks/free06/rock-{rk}.png")), "{said}");
+    assert!(!pack.join(format!("textures/Tracks/free06/tracks/free06/rock-{rk}.png")).exists() && kept.exists());
 
     // The disc's upscale: all three to do; once sources.json names the Xbox grass's SHA-1 as grass's
     // source, grass is done and the other two still are not (the PS2 grass's would leave it stale).
@@ -158,7 +163,7 @@ fn the_pack_keeps_the_bigger_xbox_picture_under_the_ps2_key() {
     write(&up.join("textures/upscaled/sources.json"), format!("{{\"{rel}\": \"{}\"}}", sha(&src.join(&rel))));
     let (_, said) = check();
     assert!(said.contains("3 disc textures to upscale"), "the PS2 grass is not the source with --xbox: {said}");
-    assert!(std::fs::read_to_string(up.join("mod.json")).unwrap().contains("\"kind\": \"textures\""));
+    assert!(!up.join("mod.json").exists(), "--check writes nothing");
 }
 
 /// The task's own check: a pack PNG named by free06_grass's PS2 key (decoded off the disc as a ride

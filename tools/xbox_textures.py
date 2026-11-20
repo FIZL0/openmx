@@ -131,7 +131,7 @@ def pack(src, xd, out, keep=()):
                 p = os.path.join(root, f)
                 xbox[os.path.relpath(p, xd)[:-4].replace(os.sep, "/").lower()] = p
     keep = {k.lower() for k in (*KEEP, *keep)}
-    rows, kept, alone = [], 0, 0
+    rows, kept, alone, wrote = [], 0, 0, set()
     for root, _, fs in os.walk(src):
         for f in sorted(fs):
             stem, _, k = f[:-4].rpartition("-")
@@ -151,7 +151,13 @@ def pack(src, xd, out, keep=()):
             if why:
                 p = os.path.join(out, "textures", f"{rel}-{k}.png")
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                write_png(p, np.ascontiguousarray(b, np.uint8)); kept += 1
+                write_png(p, np.ascontiguousarray(b, np.uint8)); kept += 1; wrote.add(os.path.abspath(p))
+    # a picture an earlier run kept that this one did not (KEEP shrank, a texture changed) goes
+    for root, _, fs in os.walk(os.path.join(out, "textures")):
+        for f in fs:
+            p = os.path.abspath(os.path.join(root, f))
+            if f.lower().endswith(".png") and p not in wrote:
+                os.remove(p); print("dropped", os.path.relpath(p, out))
     os.makedirs(out, exist_ok=True)
     mj = os.path.join(out, "mod.json")
     if not os.path.exists(mj):
