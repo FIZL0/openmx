@@ -192,3 +192,58 @@ animated body with the shell's rates.
   the face instead (+5..+9), and the truck's +12 wake is lost.
 - The head's first touch is a frame late on every skeleton (+2, theirs +1).
 - Filed as a follow-up.
+
+## The strike's downward kick is none of the bike's inputs (R60)
+
+Test: `r60_the_strike_s_downward_kick` (tests/replay.rs). On R58's drawn ride with the animated
+body, the strike tick's riding step is run again from strike-1's body, skeleton and holds
+(`r60_strike_steps`), with one thing changed each time. The run again matches the tick to 0.003 ft/s.
+
+### Row 58 is the feet switch, not the wreck's hand-over
+
+- On the strike the bike is at 2 ft/s, under the stand speed (7.3). The feet switch
+  (`Actor::feet`) lets both feet off their holds and turns their collisions on.
+- The port does this on the strike tick, the same tick as the original. Row 58's on words are
+  exactly that: the two feet's collisions (bones 14, 17) on, the other seven off.
+- R57 called these "a read across the wreck entry". Wrong: the wreck enters on row 59. So the
+  wreck's hand-over is not what row 58 shows, and is not the kick.
+- The feet's touched word is cleared before the step, so row 58's zeros are real: nothing pushed
+  the feet.
+
+### What was tried on the strike step
+
+vy after the step (main, neck, head, knee, foot, hand = bones 0, 2, 3, 13, 14, 6), and the main
+bone's vz (over 20 means the bike box let it go, as theirs):
+
+| change | 0 | 2 | 3 | 13 | 14 | 6 | vz |
+|---|---|---|---|---|---|---|---|
+| none (the port) | -0.86 | 0.92 | 1.52 | -1.53 | -1.37 | 1.35 | 28.8 |
+| bike nose up 0.05 / 0.1 rad | -1.07 / -3.70 | 0.92 / 1.20 | 1.46 / -0.14 | -1.35 / -1.16 | -1.18 / -1.27 | 1.34 / 1.21 | 28.5 / 1.7 |
+| bike nose down 0.1 rad | -0.47 | 0.93 | 1.62 | -1.85 | -1.72 | 1.36 | 29.3 |
+| bike vy -3 | -2.52 | -0.93 | -0.26 | -3.34 | -3.21 | -1.04 | 28.8 |
+| skeleton's legs 0.3 ft lower | -1.36 | 0.89 | 1.41 | -2.40 | -2.29 | 1.34 | 28.8 |
+| gravity x6 | -6.23 | -4.44 | -3.85 | -6.89 | -6.74 | -0.52 | 28.8 |
+| **the original's** | **-3.50** | **-2.46** | **-2.39** | **-6.48** | **-7.39** | **-0.35** | **29.9** |
+
+- **Not it:** the bike's pitch (±0.2 rad), its velocity (vy ±3, vz 0 or 54), its pitch rate
+  (±3 rad/s), its contact speed, and the skeleton's feet moved 0.3-0.6 ft. Also not a step 1.5 or
+  2 ticks long, or two steps: those all let the bike box catch the main bone.
+- Pitching the nose up 0.1 rad pulls the main bone down, but the box then catches it (vz 1.7).
+- The pose damper and spring scaled (x0.5 to x4) move the torso up, not down.
+- **What it looks like:** a hard pull down for that one tick, on the legs most. Six times the
+  gravity puts the knees, feet and hands within 0.7 ft/s of theirs. It puts the torso 1.5-2.7 ft/s
+  too far down.
+- The port's actor has nothing like it. No request field is a force; the gravity scale is 1 and
+  nothing writes it.
+
+### What is left
+
+Either the original's riding step on the strike reads something these changes do not cover, or
+row 58 is read part-way through a later write (PINE reads while the game runs). To tell which, it
+needs a capture on the original. Filed as a follow-up:
+
+- Record S484's ride twice, to the bit, so a torn row shows as a difference between the two runs.
+- Add on each row:
+  - the bike's transform (the rows next to veh+0x1b0);
+  - the body actor's request (velocity, rates, speed, the gravity scale);
+  - the bones' orientations.
