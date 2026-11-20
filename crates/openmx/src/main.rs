@@ -2328,6 +2328,11 @@ impl<P: sim_world::World> Game for World<P> {
         // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
         // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
         let dt = self.played_dt.unwrap_or(dt);
+        // P378: every seat's Sim holds the parked machines nobody is up on.
+        let driven: Vec<Kind> = self.seats.iter().map(|s| s.garage.up).collect();
+        for s in &mut self.seats {
+            s.garage.in_play.hand_to(&mut s.sim, &driven);
+        }
         // Writing one: the pass's own `dt` and the reports it is about to read, which is what a
         // replay of this tape will be handed (`game_sim::replay::Recorder`).
         // A tape is the first player's, so a pass where they wait for their pad is not on it: the
@@ -5813,6 +5818,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         names.into_iter().filter_map(|n| Some((n.clone(), res.read(&res.find_suffix(&n)?.name).ok()?))).collect()
     });
     lot.cars = vehicle::car_kit(&mut |name: &str| car_files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()));
+    // And the machines the original parks in play (P378, [`vehicle::in_play`]): a world's each tile's,
+    // moved by its offset.
+    lot.in_play = match (&world_mod, &machines) {
+        (None, Some((_, b))) => vehicle::in_play(b),
+        (Some(_), _) => (tile_machines.iter())
+            .flat_map(|(_, b, at)| {
+                let at = *at;
+                vehicle::in_play(b).into_iter().map(move |(i, m, s)| (i, m, vehicle::Spawn { at: Vf::new(s.at.x() + at[0], s.at.y(), s.at.z() + at[1], 1.0), ..s }))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     // And each car's bay on the ground under it (S245): free07's file parks its bajas at 0.
     {
         let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
@@ -8504,6 +8521,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let computers = laps.cards.iter().filter(|e| e.card.lap.flags & game_sim::race::card_flags::PLAYER == 0).count();
         println!("race: {} cards, {} computer", laps.cards.len(), computers);
     }
+    // P378: the machines the original parks on the ride ([`vehicle::in_play`], free09's monster truck)
+    // settled where they come to rest, every seat's Sim handed their hulls for its AI riders'
+    // feelers, but for a machine a player is up on.
+    {
+        let flying: Vec<bool> = seats.iter().map(|s| s.garage.up == Kind::Biplane).collect();
+        // Off `machine.res` itself: the ride's cars are built without their collision files.
+        let machine_res = (!lot.in_play.is_empty()).then(|| member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok())).flatten();
+        let read = &mut |n: &str| machine_res.as_ref()?.read_suffix(n).ok();
+        let in_play = vehicle::InPlay::settled(&lot.in_play, &flying, read, &mut sim, &tables.ride);
+        for k in 0..in_play.len() {
+            let (kind, at) = in_play.at(k).expect("in range");
+            println!("parked: {} at rest at {:.1}, {:.2}, {:.1}, its hull in the AI riders' world", kind.name(), at.x(), at.y(), at.z());
+        }
+        let driven: Vec<Kind> = seats.iter().map(|s| s.garage.up).collect();
+        for s in &mut seats {
+            s.garage.in_play = in_play.fresh();
+            s.garage.in_play.hand_to(&mut s.sim, &driven);
+        }
+    }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at
     // the biplane's cruise.
@@ -9762,6 +9798,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         garage.heli = lot.heli_for(i);
                         garage.atv = world.seats[0].garage.atv.clone();
                         garage.mxvatv_car = world.seats[0].garage.mxvatv_car.clone();
+                        garage.in_play = world.seats[0].garage.in_play.fresh();
                         garage.modify(&lot, &mods, i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),

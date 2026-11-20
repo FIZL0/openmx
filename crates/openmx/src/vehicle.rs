@@ -704,6 +704,9 @@ pub struct Lot {
     /// The models the helicopter is drawn in, one a seat: its pick, a pack's (MD80e) or the disc's
     /// in the livery picked (P315, P315b, P315h).
     pub mxvatv_kiowa: Vec<String>,
+    /// The machines the original parks on the ride, by player slot ([`in_play`], P378), moved as
+    /// the lot's are; what each seat's [`InPlay`] is settled from.
+    pub in_play: Vec<(usize, Machine, Spawn)>,
 }
 
 impl Lot {
@@ -717,7 +720,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: Vec::new(), ground_heights: Vec::new(), cars: Vec::new(), kiowa: Vec::new(), online_cars: Vec::new(), mxvatv_kiowa: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: Vec::new(), ground_heights: Vec::new(), cars: Vec::new(), kiowa: Vec::new(), online_cars: Vec::new(), mxvatv_kiowa: Vec::new(), in_play: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -1434,6 +1437,8 @@ pub struct Garage {
     /// This player's MX vs. ATV car (MD39c), where `--mxvatv-car` picks one off a car pack
     /// ([`MxvatvCarRide`]).
     pub mxvatv_car: Option<MxvatvCarRide>,
+    /// The machines the original parks on the ride, which this seat's Sim is handed (P378, [`InPlay`]).
+    pub in_play: InPlay,
 }
 
 /// How far above a machine's origin the ground under it is looked for when the other is spawned
@@ -1576,7 +1581,7 @@ impl Garage {
         if up.car().is_some() || up == Kind::Kiowa || up == Kind::Atv || up == Kind::MxvatvCar {
             return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to it from the pause", up.name()));
         }
-        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None })
+        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None, in_play: InPlay::default() })
     }
 
     /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
@@ -2171,7 +2176,7 @@ pub fn switch_lane_quad(
         },
         None => quad.filter(|_| to == Kind::Atv).cloned(),
     };
-    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv, mxvatv_car: None };
+    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv, mxvatv_car: None, in_play: InPlay::default() };
     let result = garage.switch(to, sim, world);
     // Refused, the seat stays on what it was on, the lane as it was.
     let now = garage.up;
@@ -2403,7 +2408,7 @@ pub fn settle_lane(sim: &mut Sim, mut plane: Plane, ready: Readied) -> bool {
 /// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
-        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None }.spot(sim, world),
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None, in_play: InPlay::default() }.spot(sim, world),
         None => match &sim.car {
             // In a car (S249), [`CarRide::spot`]'s: on the ground under it, upright, stopped.
             Some(car) => car_spot(&car.machine, world),
@@ -2906,6 +2911,106 @@ impl Lot {
                 Some(car)
             })
             .collect()
+    }
+}
+
+// --- the machines parked in play (P378) -----------------------------------------------------------
+
+/// **The machines the original parks on a ride** (P378), in its order: its machine placement
+/// (`research/oracle.txt`'s `machine_placement`) walks the first `[Machines] NumberOfMachines`
+/// players, and player `i` on the plane is stood at `[Biplane<i+1>]` as their own; anyone else's
+/// slot parks `[Machine<i+1>]`, its `Type` the machine. Every freeride track's file says 1, so a ride
+/// on the bike parks one machine: free09's `[Machine1]` monster truck, the one recording2's moving
+/// list holds (S461), not the `[<Type><n>]` bays a [`Lot`] stands, which the original spawns only for
+/// a switch. Each with its slot `i`, which [`InPlay::settled`] leaves empty for a player starting on
+/// the plane. A `Type` that is no machine is left out.
+pub fn in_play(machine_txt: &[u8]) -> Vec<(usize, Machine, Spawn)> {
+    let ini = Ini::parse_bytes(machine_txt);
+    let n = ini.section("Machines").int("NumberOfMachines").unwrap_or(0).max(0) as usize;
+    (0..n)
+        .filter_map(|i| {
+            let name = format!("Machine{}", i + 1);
+            let word = ini.section(&name).text("Type")?.trim().to_string();
+            let machine = Machine::ALL.into_iter().find(|m| m.section().eq_ignore_ascii_case(&word))?;
+            Some((i, machine, Spawn::section(&ini, &name)?))
+        })
+        .collect()
+}
+
+/// **The parked machines' hulls in a seat's Sim** (P378): each machine [`in_play`] parks, its `f.col`
+/// where its body fell asleep, and which machine it is; [`InPlay::hand_to`] gives a Sim
+/// ([`Sim::parked`], what its AI riders' feelers sweep) those nobody drives.
+///
+/// Only the cars have a rest pose ([`game_sim::car::Parked::settled`], S484), so a file whose
+/// `[Machine1]` is the plane or the helicopter (free06, free10) parks nothing here yet.
+#[derive(Clone, Debug, Default)]
+pub struct InPlay {
+    parked: std::sync::Arc<[(Kind, std::sync::Arc<game_sim::track::Mesh>, game_sim::math::Mat4)]>,
+    /// Which of them the Sim was last handed, once it has been.
+    handed: Option<Vec<bool>>,
+}
+
+impl InPlay {
+    /// The cars of `spots` ([`in_play`]) settled where they are parked, built off `machine.res`
+    /// (`read` answers a member's bytes by name, [`CarRide::new`]) in the file's livery: spawned over
+    /// `world`'s ground and stepped with nobody in them until their bodies sleep, as the load leaves
+    /// them ([`game_sim::car::Parked::settled`]). A slot whose player starts on the plane (`flying`)
+    /// parks nothing; a car without its files, its `m.col` or its `f.col` is left out, as are the
+    /// fliers.
+    pub fn settled(
+        spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
+        tables: &game_sim::ride::Tables,
+    ) -> InPlay {
+        let parked = spots
+            .iter()
+            .filter(|(slot, ..)| !flying.get(*slot).copied().unwrap_or(false))
+            .filter_map(|&(_, m, spot)| {
+                let kind = m.car_kind()?;
+                let c = CarRide::new(m, 0, None, read).map_err(|e| eprintln!("parked: {e}")).ok()?;
+                let (Some(rays), Some(hull)) = (c.rays, c.hull) else {
+                    eprintln!("parked: {} has no collision files, not parked", m.section());
+                    return None;
+                };
+                let car = std::sync::Arc::new(c.car);
+                let p = game_sim::car::Parked::settled(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve);
+                Some((kind, p.hull, p.rest))
+            })
+            .collect();
+        InPlay { parked, handed: None }
+    }
+
+    /// How many machines are parked.
+    pub fn len(&self) -> usize {
+        self.parked.len()
+    }
+
+    /// Where machine `k` rests: its node's origin.
+    pub fn at(&self, k: usize) -> Option<(Kind, Vf)> {
+        self.parked.get(k).map(|(kind, _, rest)| (*kind, rest.0[3]))
+    }
+
+    /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
+    pub fn fresh(&self) -> InPlay {
+        InPlay { parked: std::sync::Arc::clone(&self.parked), handed: None }
+    }
+
+    /// **`sim`'s parked machines** ([`Sim::parked`], [`game_sim::ai::parked_hull`]): every one but those
+    /// a player is up on (`driven`, every seat's machine), which the original's player has taken out of
+    /// its spot, and back once they leave it. Only when that changes; a ride that parks nothing leaves
+    /// the Sim alone.
+    pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
+        if self.parked.is_empty() {
+            return;
+        }
+        let shown: Vec<bool> = self.parked.iter().map(|(kind, ..)| !driven.contains(kind)).collect();
+        if self.handed.as_ref() == Some(&shown) {
+            return;
+        }
+        sim.parked = (self.parked.iter().zip(&shown))
+            .filter(|(_, on)| **on)
+            .map(|((_, hull, rest), _)| game_sim::world::Prop::on((**hull).clone(), rest))
+            .collect();
+        self.handed = Some(shown);
     }
 }
 
@@ -4762,5 +4867,63 @@ mod tests {
         assert_eq!(Kind::parse("Biplane"), Ok(Kind::Biplane));
         assert_eq!(Kind::parse("helicopter"), Ok(Kind::Kiowa));
         assert!(Kind::parse("tank").is_err());
+    }
+}
+
+#[cfg(test)]
+mod in_play_tests {
+    use super::*;
+
+    /// free09's `machine.txt`, cut to its placement header, one race slot and two freeride bays.
+    const FREE09: &str = "[Machines]\nNumberOfMachines = 1\n\n[Machine2]\nType      = Biplane\n\
+        Position  = 2754.95, 179.32, 2870.41\nDirection = -0.296, -0.042, 0.954\n\n[Machine1]\nType      = Monster\n\
+        Position  = 4594.0, 135.0, 3838.0\nDirection = 0.00, 0.00, -1.0\nMachineRacer = TRUE\n\n\
+        [Biplane1]\nType      = Biplane\nPosition  = 4632.0, 135.0, 3451.0\nDirection = 1.0, 0.0, 0.0\n\n\
+        [Buggy1]\nType      = Buggy\nPosition  = 4659.0, 135.0, 3600.0\nDirection = 0.0, 0.0, 1.0\n";
+
+    /// P378: the original parks `[Machine1]` alone, NumberOfMachines being 1: free09's monster truck,
+    /// not its `[Machine2]` plane nor the freeride bays.
+    #[test]
+    fn free09_parks_its_machine1_truck_alone() {
+        let parked = in_play(FREE09.as_bytes());
+        assert_eq!(parked.len(), 1, "{parked:?}");
+        let (slot, m, s) = parked[0];
+        assert_eq!((slot, m), (0, Machine::Monster));
+        assert_eq!((s.at.x(), s.at.y(), s.at.z()), (4594.0, 135.0, 3838.0));
+        assert_eq!((s.facing.x(), s.facing.y(), s.facing.z()), (0.0, 0.0, -1.0));
+        assert!(in_play(b"[Machine1]\nType = Monster\nPosition = 1, 2, 3\n").is_empty(), "no NumberOfMachines, nothing parked");
+    }
+
+    /// P378: the truck settled on a floor, its hull handed to a Sim, dropped while a seat drives a
+    /// monster truck and back once it leaves it; nothing parked for a first player on the plane.
+    #[test]
+    fn the_parked_truck_leaves_the_sims_list_while_driven() {
+        use game_render::disc::Disc;
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let read = &mut |n: &str| machines.read_suffix(n).ok();
+        let tables = game_sim::ride::Tables::build();
+        let spots = in_play(FREE09.as_bytes());
+        let mut floor = game_sim::world::Flat { y: F(135.0), ..Default::default() };
+        assert_eq!(InPlay::settled(&spots, &[true], read, &mut floor, &tables).len(), 0, "the first player's slot is their plane");
+        let mut parked = InPlay::settled(&spots, &[false], read, &mut floor, &tables);
+        assert_eq!(parked.len(), 1);
+        let (kind, at) = parked.at(0).unwrap();
+        assert_eq!(kind, Kind::Monster);
+        assert!((at.x() - 4594.0).abs() < 1.0 && (at.z() - 3838.0).abs() < 1.0, "the truck rests at {at:?}");
+        // Dropped from its spawn (the floor plus the model's bounds centre, 141.39) onto its tires; the
+        // node is the model's origin, which hangs under the body.
+        assert!(at.y() > 130.0 && at.y() < 140.0, "the truck's node rests at y {}, on the floor at 135", at.y());
+        let mut sim = Sim::new(0x378);
+        parked.hand_to(&mut sim, &[Kind::Bike]);
+        assert_eq!(sim.parked.len(), 1, "nobody drives it");
+        parked.hand_to(&mut sim, &[Kind::Bike, Kind::Monster]);
+        assert_eq!(sim.parked.len(), 0, "the second seat drives a truck");
+        parked.hand_to(&mut sim, &[Kind::Buggy, Kind::Bike]);
+        assert_eq!(sim.parked.len(), 1, "back once nobody drives a truck");
     }
 }
