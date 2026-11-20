@@ -208,6 +208,31 @@ impl PutBack {
     }
 }
 
+/// **What poses the body inside the rider's frame** (B43, [`Rider::pose_hook`]): a shell that holds
+/// the clip table runs the body's machine and writes [`Rider::skeleton`] here, so the riding step
+/// pulls to the skeleton posed off this tick's band, as the original's body actor poses its skeleton
+/// before its ragdoll step (R62). `c` is the controls the bike rode and `dt` the frame's.
+pub trait Pose: std::any::Any + Send {
+    fn pose(&mut self, rider: &mut Rider, c: &Controls, dt: F);
+}
+
+/// [`Rider::pose_hook`]'s slot. Not state: never hashed or sent, and a clone holds none, so a copy of
+/// the Sim (a snapshot, the picture's stand-in) poses nothing in its frames.
+#[derive(Default)]
+pub struct PoseHook(pub Option<Box<dyn Pose>>);
+
+impl Clone for PoseHook {
+    fn clone(&self) -> PoseHook {
+        PoseHook(None)
+    }
+}
+
+impl std::fmt::Debug for PoseHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "PoseHook(set)" } else { "PoseHook(None)" })
+    }
+}
+
 /// A bike with somebody on it.
 ///
 /// `Clone` because it is most of a [`crate::Sim`], and a snapshot of the simulation is a copy of
@@ -281,6 +306,12 @@ pub struct Rider {
     /// input like [`Rider::skeleton`]: a shell that draws the chassis writes it every frame, it is
     /// never sent, and `None` runs no riding ragdoll.
     pub holds: Option<Arc<Holds>>,
+    /// **B43:** poses the body inside the frame, just before the riding step rides, when the step
+    /// will ride: [`Pose::pose`] writes [`Rider::skeleton`] off this tick's band (R62). The step's
+    /// other inputs stay as they were: the bike's transform from before the move (S253) and the
+    /// clip-table words from the top of the tick (S257); the holds the shell drew after the last tick.
+    /// Empty, the step pulls to the skeleton the shell posed after the last tick, as before.
+    pub pose_hook: PoseHook,
     /// The rider's wreck sounds, as far as the pick goes: which was played last, so that the next
     /// wreck draws as the original does ([`wreck_sound`]).
     pub wreck_sounds: wreck_sound::Emitter,
@@ -490,6 +521,7 @@ impl Rider {
             drawn: Vec::new(),
             riding: None,
             holds: None,
+            pose_hook: PoseHook::default(),
             wreck_sounds: wreck_sound::Emitter::retail(),
             wreck_kit: wreck_sound::Kit::default(),
             wreck_clocks: wreck_sound::Clocks::default(),
@@ -624,7 +656,7 @@ impl Rider {
     /// bike as it stood at the top of the tick (`before`), and the vehicle animation's clip-table words
     /// (`table`: `from_table`, `holding`) and clip as they were then. Only while the rider is up and has a kit and holds; started afresh
     /// when there is none yet or the bike has gone, between ticks, where the bones did not ([`Riding::strayed`]).
-    fn riding_tick(&mut self, before: &crate::math::Mat4, table: (bool, bool), clip: i32, dt: F, world: &mut dyn World) {
+    fn riding_tick(&mut self, before: &crate::math::Mat4, table: (bool, bool), clip: i32, c: &Controls, dt: F, world: &mut dyn World) {
         // The verdict's tick is still ridden by a body whose entry waits (B19).
         let up = (self.state.wreck.is_none() && self.crash.is_none() || Self::entry_waits(&self.state, self.crash.as_ref(), None, self.riding.as_deref(), false))
             && self.ragdoll.is_none();
@@ -632,6 +664,11 @@ impl Rider {
             self.riding = None;
             return;
         };
+        // B43: the body posed off this tick before its step, as the original's actor poses it (R62).
+        if let Some(mut hook) = self.pose_hook.0.take() {
+            hook.pose(self, c, dt);
+            self.pose_hook.0 = Some(hook);
+        }
         // Strayed from the bike as it stood at the top of the tick, where the last tick left the
         // bones: a teleport or a reset between ticks, not this tick's own travel (B22: a windmill's
         // throw carries the bike 10.8 ft off the bones in its one tick, and a fresh body has no
@@ -1457,7 +1494,7 @@ impl Rider {
             self.motion.ramp = F::ZERO;
             self.animation.blend = self.animation.blend.unramped();
         } else {
-            self.riding_tick(&before, table, clip, dt, world);
+            self.riding_tick(&before, table, clip, c, dt, world);
         }
         out
     }

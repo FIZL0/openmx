@@ -386,3 +386,21 @@ All nine bones are within 0.03 ft/s of theirs, and the bike box still lets the m
   tick's pose. At a steady speed that is invisible. A sudden change of band (a stop, a strike, a
   landing) shows it.
 - Filed as B43: feed the riding step the skeleton posed off the same tick.
+
+## B43: the body posed inside the frame
+
+- The rider has a pose hook (`Rider::pose_hook`). The riding step runs it just before it rides, so
+  the frame poses the body off this tick's band. S253's under-before transform and S257's last-tick
+  from_table/holding are taken at the top of the frame as before, so the hook does not move them.
+- The shell lends the seat's body, and the AI riders' bodies, to the hook. A tick where the riding
+  step did not run (put-back, wreck entry) still poses after the tick.
+- Only on a ride that never ticks on the sim thread: one seat, `--sim-thread` not on. A threaded
+  tick (N23a) draws with the body while the sim steps, so it cannot lend it; and a ride must be the
+  same on either thread (F25). So split-screen and `--sim-thread on` rides still pose a tick late.
+  Filed as B46.
+- Test `b43_the_strike_s_kick_posed_in_the_frame_is_the_original_s`: on R58's drawn ride, every
+  riding bone's vy on the strike is the original's to 0.03 ft/s (posed after the tick: 6.02).
+- R58's test rides it as "animated body posed in the frame": main bone enters at 29.6 ft/s
+  (theirs 29.9, posed after the tick 28.8), the hull met as theirs on +2..+4, legs on +20 within
+  0.74 ft (was 0.83). The truck still wakes only on +10, not +12: the neck, not the head, lies on
+  the face +5..+9, as with the body posed after the tick. S486c's wreck bike and truck holds pass.

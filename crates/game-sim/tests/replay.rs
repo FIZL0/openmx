@@ -14596,6 +14596,24 @@ enum R58Skeleton {
     /// the gas held, then Body::ragdoll_posed), with the shell's fade rates (R59,
     /// [`r59_as_the_shell`]).
     Animated,
+    /// B43: the same body posed inside the frame, just before the riding step, through the rider's
+    /// pose hook as the shell lends it ([`R58InFrame`]); posed after the tick on the ticks the step
+    /// does not ride, as the shell does.
+    InFrame,
+}
+
+/// B43's hook as the shell's `PoseInFrame`: the body and its ragdoll, and whether this tick's frame
+/// posed it.
+struct R58InFrame(Arc<std::sync::Mutex<(game_render::rider::Body, game_render::rider::Ragdolled, bool)>>);
+
+impl game_sim::rider::Pose for R58InFrame {
+    fn pose(&mut self, rider: &mut Rider, c: &game_sim::ride::Controls, dt: F) {
+        let mut lent = self.0.lock().unwrap();
+        let (body, doll, posed) = &mut *lent;
+        body.ride(dt, rider, c, game_sim::rider::Gate::default());
+        rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+        *posed = true;
+    }
 }
 
 /// One R58 variant of [`r57_port_ride`]'s drawn ride: `skel` is the skeleton the riding body is
@@ -14631,8 +14649,31 @@ fn r58_port_ride(skel: R58Skeleton, mut poke: impl FnMut(usize, &mut Sim)) -> Op
     let st = SaveState::open_either(&image)?;
     let mut posed: Option<Arc<game_sim::ragdoll_ride::Posed>> = None;
     let mut body = if matches!(skel, R58Skeleton::Kit) { None } else { Some(r24_body()?) };
+    // B43: the body lent to the rider's hook for the whole ride.
+    let lent = match (skel, body.take()) {
+        (R58Skeleton::InFrame, Some((b, doll))) => Some(Arc::new(std::sync::Mutex::new((b, doll, false)))),
+        (_, b) => {
+            body = b;
+            None
+        }
+    };
     let mut bones = Vec::new();
     let port = s485_ride_from(S486C_BIKE, 80, true, |t, sim, _| {
+        if let Some(lent) = &lent {
+            if t == 1 {
+                r59_as_the_shell(&mut sim.rider);
+            }
+            let mut g = lent.lock().unwrap();
+            let (body, doll, posed) = &mut *g;
+            if !std::mem::take(posed) {
+                let gas = game_sim::ride::Controls { gas: F::ONE, ..game_sim::ride::Controls::default() };
+                body.ride(dt, &mut sim.rider, &gas, game_sim::rider::Gate::default());
+                sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+            }
+            if t == 1 {
+                sim.rider.pose_hook = game_sim::rider::PoseHook(Some(Box::new(R58InFrame(lent.clone()))));
+            }
+        }
         if let (R58Skeleton::Animated, Some((body, doll))) = (skel, body.as_mut()) {
             if t == 1 {
                 r59_as_the_shell(&mut sim.rider);
@@ -14712,6 +14753,7 @@ fn r58_the_drawn_ride_s_thrown_rider_beside_the_original_s() {
         ("image skeleton while riding", R58Skeleton::Image(0.0), true),
         ("image skeleton 0.29 ft up", R58Skeleton::Image(0.29), false),
         ("animated body", R58Skeleton::Animated, false),
+        ("animated body posed in the frame", R58Skeleton::InFrame, false),
     ];
     for (name, skel, drop) in variants {
         // `drop`: the skeleton taken away once the rider is down, so the wreck's joints pull to the
@@ -14784,6 +14826,19 @@ fn r58_the_drawn_ride_s_thrown_rider_beside_the_original_s() {
                 let (p, t) = legs(20);
                 let p = p.expect("the bones on +20");
                 assert!((0..4).all(|i| (p[i] - t[i]).abs() < 0.9), "{name}: the legs off the face on +20: {p:?}, theirs {t:?}");
+            }
+            // B43: posed in the frame, the strike's step pulls to the stop row (R62), and the bike box
+            // still lets the main bone go: it enters at 29.6 (posed after the tick 28.8), the hull met
+            // as theirs on +2..+4, and the legs on +20 within 0.74 ft of theirs (0.83). The +12 wake
+            // is still missing: the neck, not the head, lies on the face +5..+9.
+            R58Skeleton::InFrame => {
+                assert!((b0 - vel(&rows[theirs], 0).z()).abs() < 0.5, "{name}: the main bone at {b0} ft/s on the strike");
+                for k in 2..=4 {
+                    assert_eq!(scene_p(k), scene_t(&rows[theirs + k]), "{name}: strike+{k}: the bones on the hull");
+                }
+                let (p, t) = legs(20);
+                let p = p.expect("the bones on +20");
+                assert!((0..4).all(|i| (p[i] - t[i]).abs() < 0.8), "{name}: the legs off the face on +20: {p:?}, theirs {t:?}");
             }
             // On the original's skeleton it is not caught, and the truck wakes only on +10 and +12.
             R58Skeleton::Image(_) => {
@@ -15581,6 +15636,42 @@ fn r62_the_strike_s_kick_is_the_stop_row_posed_a_tick_late() {
     println!("  most off: {was:.2} ft/s with strike-1's skeleton, {gap:.2} with the strike's");
     assert!(gap < 0.1, "with the strike's skeleton the kick is {gap} ft/s off the original's");
     assert!(now[0].z() > 20.0, "the bike box caught the main bone (vz {})", now[0].z());
+}
+
+/// **B43: the body posed inside the frame gives the strike's kick** (R62's follow-up;
+/// research/s484/index.md, B43). R58's drawn ride with the animated body lent to the rider's pose
+/// hook, as the shell lends it now: the frame poses the body just before the riding step, so the
+/// strike's step pulls to the stop row posed off the strike's own band. Every riding body's vy on the
+/// strike is the original's (posed after the tick, as before, 6 ft/s off), and the bike box still
+/// lets the main bone go.
+#[test]
+fn b43_the_strike_s_kick_posed_in_the_frame_is_the_original_s() {
+    let Some((rh, rr)) = r57_capture() else { return };
+    let rc = |name: &str| rh.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let theirs = 58;
+    let Some((port, bones)) = r58_port_ride(R58Skeleton::InFrame, |_, _| {}) else { return };
+    let Some((port_late, bones_late)) = r58_port_ride(R58Skeleton::Animated, |_, _| {}) else { return };
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    assert_eq!(port_late.iter().position(|p| p.awake), Some(ours), "posed in the frame, the bike strikes on another tick");
+    let riding = |b: &Option<(bool, Vec<(Vf, Vf)>, Vec<(bool, bool, bool)>)>| {
+        let (down, b, _) = b.as_ref().expect("a body on the strike");
+        assert!(!down, "the rider is down on the strike");
+        b.clone()
+    };
+    let (now, late) = (riding(&bones[ours]), riding(&bones_late[ours]));
+    let want: Vec<f32> = R57_BONES.iter().map(|&n| rr[theirs][rc(&format!("b{n}_vy"))]).collect();
+    let vys = |b: &[(Vf, Vf)]| R57_BONES.iter().map(|&n| b[n].1.y()).collect::<Vec<_>>();
+    let row = |v: &[f32]| v.iter().map(|x| format!("{x:6.2}")).collect::<Vec<_>>().join(" ");
+    println!("strike (tick {}) vy, bones {R57_BONES:?}", ours + 1);
+    println!("  posed after the tick  {}  vz {:5.2}", row(&vys(&late)), late[0].1.z());
+    println!("  posed in the frame    {}  vz {:5.2}", row(&vys(&now)), now[0].1.z());
+    println!("  the original's        {}  vz {:5.2}", row(&want), rr[theirs][rc("b0_vz")]);
+    let gap = |v: &[f32]| v.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    let (gap_now, gap_late) = (gap(&vys(&now)), gap(&vys(&late)));
+    println!("  most off: {gap_late:.2} ft/s posed after the tick, {gap_now:.2} posed in the frame");
+    assert!(gap_late > 4.0, "posed after the tick the kick is only {gap_late} ft/s off");
+    assert!(gap_now < 0.1, "posed in the frame the kick is {gap_now} ft/s off the original's");
+    assert!(now[0].1.z() > 20.0, "the bike box caught the main bone (vz {})", now[0].1.z());
 }
 
 /// S485's control: without the parked truck the same ride goes on through its spot.
