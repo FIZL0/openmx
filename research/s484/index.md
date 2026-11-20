@@ -123,6 +123,8 @@ It decides where the main bone rides, and that decides whether the bike box catc
 - **The port's animated body leans the other way.** Its main bone is 0.5 ft further forward, and
   its hands and knees ~0.4 ft further back. So in the shell the box catches the main bone, as on the
   kit pose.
+  - R59: wrong. The test's body had no fade rates and held its bind pose. With the shell's rates it
+    rides the original's pose (see R59 below).
 
 ### What this means for the S485/S486c tests
 
@@ -134,3 +136,59 @@ It decides where the main bone rides, and that decides whether the bike box catc
   - The undrawn ride gets the same wakes through a wedged rider.
   - The drawn ride with the kit pose adds +14.
 - Filed as T10. The animated body's pose (and a per-row capture of the original's skeleton) is R59.
+
+## The animated body's pose was the test's, not the shell's (R59)
+
+Tests: `r59_the_port_s_animated_body_rides_the_original_s_pose_at_full_gas` and
+`r59_recording2_s_image_pose_is_a_stopped_rider_s` (tests/replay.rs). R58's test now rides the
+animated body with the shell's rates.
+
+### Why R58's animated body rode 1.23 ft behind
+
+- **R58's ride never gave the body its fade rates.** `Rider::new` leaves `body_rates` at zero; the
+  shell fills them (`rider.body_rates = vehicle_params()` in main.rs, for the human and the race's
+  AI riders alike) and clears the start line.
+- With zero rates every blend keeps ramp 1, which means all snapshot. So the body held its first
+  pose (the bind pose) for the whole ride, though the machine asked for turn_riding_Mid.
+- Not the clip, not the blend, not the rig.
+- In the shell the body is posed right (`r59_as_the_shell` gives the test the same two settings).
+
+### With the shell's rates
+
+- At full gas the body plays turn_riding_Mid (state 30, two-clip blend with turn_riding_Fwd at
+  mix 1, ramp 0).
+- On strike-1 its nine riding bodies stand where the original's do, in the bike's frame, to
+  0.064 ft (the test holds 0.1). Their velocities match to ~0.5 ft/s.
+- On the drawn ride (R58's test):
+
+  | | port, animated | original's |
+  |---|---|---|
+  | main bone behind the bike, strike-1 | 1.79 ft | 1.81 |
+  | main bone vz on the strike | 28.8 | 29.9 |
+  | bones on the hull, +2..+4 | the same, bone for bone | |
+  | head on the hull | +2..+11 | +1..+12 |
+  | truck wakes again | +10 | +10, +12 |
+  | legs off the face on +20 | 3.5-4.35 ft | 4.2-4.7 |
+
+- So the legs now fall back about as fast as theirs. On the image skeleton they end 1.9-2.5 ft out.
+
+### The held image pose is a stopped rider's
+
+- recording2's joint records (what `r24_posed` reads) are turn_stop_Mid at 0.5 s: rotations to a
+  score of 0.0006 (the next clip scores 0.25), and the root's place to 0.004 ft.
+- So R58's image skeleton is the pose of a rider on a stopped bike. Its main bone happens to ride
+  1.71 ft behind (near the full-gas 1.81), which is why the bike box missed it.
+- The rest of it is wrong for full gas, which is why the legs fell back slowly on that ride. The
+  per-row capture of the original's skeleton is not needed for this: the original's bodies on
+  strike-1 match the port's animated ones.
+
+### Not matched yet: the strike's downward kick
+
+- On the strike tick the original's bodies take a downward kick: vy main bone -3.5, neck -2.5,
+  head -2.4, feet -7.4, knees -6.5. The port's: -0.9, +0.9, +1.5, -1.4, -1.5.
+- It is not the skeleton: holding it from strike-3 changes the kick by < 0.01 ft/s.
+- After it the port's body rises (main bone 0.3-0.9 ft above theirs from +2). Its head rides up
+  over the hood, up to 0.42 ft past the face's line on +4..+8 without touching. The neck lies on
+  the face instead (+5..+9), and the truck's +12 wake is lost.
+- The head's first touch is a frame late on every skeleton (+2, theirs +1).
+- Filed as a follow-up.
