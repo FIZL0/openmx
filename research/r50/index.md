@@ -34,3 +34,23 @@ Probe: an Ee from C33's image (`capture/c33/free09-ai4.ee.bin`) stepped beside t
   of the gap.
 - Moving the pose before `step_all` (joints from the rider's pre-step state) does not help: the
   joints then go off (0.42 at 4).
+
+## S490
+
+- **Hook.** `Sim::step_all_posed` / `Rider::frame_posed` run a pose callback inside each rider's
+  frame, after the rider's steps and before the riding ragdoll's tick. `step_all` passes a no-op.
+- **Posed in the frame** (the render Body's own joints, the image's holds kept), ai0's worst part
+  gap vs. an interpreter copy: 0.02 ft at 7–15 (0.04–0.13 posed after), bone 17 0.065 at 128
+  (0.43 after). The test then fails at 131: ai0's foot ball touches at 130, the original's at 131,
+  so the foot dust (which reads the bones a frame late, as the original's does) draws on 131, not 132.
+  S12e stays posed after the step, marks unchanged.
+- **Part 7 is a hand; the 24–36 stray is the test's frozen holds.** The original's grip targets move
+  apart from 18 (one up and forward, one down and back: the bars turning). The replay seeds
+  `Rider::holds` once from the image. Fed the copy's request of the same frame (rider `+0xb80`), every
+  part stays within 0.08 ft through 130. Fed the previous frame's, worse than none (up to 1.8 ft).
+- **The early touch stays** with the copy's joints *and* holds both fed: bone 17 drifts from 0.004 ft
+  at 120 to 0.049 at 129, 0.02 ft low at 130. The actor's fades, foot fades, pose damping, repose,
+  torques, gravity scale and hold pins (targets, gains) all agree 116–131. So the gap is in the
+  riding body's own step after the restart at 120 (part 3 leads it).
+- Test: `s490_c33s_bodies_posed_in_the_frame_follow_the_original` (race4.rs) holds ai0's parts
+  within 0.1 ft through 130, posed in the frame on the copy's holds.

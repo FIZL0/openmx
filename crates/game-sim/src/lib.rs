@@ -831,6 +831,15 @@ impl Sim {
     /// With one player this is [`Sim::step`] and nothing else, so a one-player hash does not move. A
     /// plane ride is one player's: with a plane up, only it is stepped, as before.
     pub fn step_all(&mut self, dt: F, controls: &[Controls], world: &mut dyn World) -> Vec<crate::rider::Frame> {
+        self.step_all_posed(dt, controls, world, &mut |_, _, _| {})
+    }
+
+    /// [`Sim::step_all`] with each rider's body posed inside its frame (S490,
+    /// [`rider::Rider::frame_posed`]): `pose(i, rider, levers)` runs for player `i` before its riding
+    /// ragdoll's tick, with the levers its bike rode. Only the walk of several riders calls it: with
+    /// one player, or a plane up, this is [`Sim::step`] and `pose` is not called.
+    pub fn step_all_posed(&mut self, dt: F, controls: &[Controls], world: &mut dyn World,
+                          pose: &mut dyn FnMut(usize, &mut rider::Rider, &Controls)) -> Vec<crate::rider::Frame> {
         assert_eq!(controls.len(), self.players(), "one set of controls per player");
         if (self.others.is_empty() && self.parked_cars.is_empty()) || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
@@ -901,11 +910,12 @@ impl Sim {
             rode[i] = *c;
             let kept = self.lend_rng(i);
             let tables = &self.tables;
+            let pose = &mut |r: &mut rider::Rider| pose(i, r, c);
             let frame = if i == 0 {
-                self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
+                self.rider.frame_posed(&self.phy, tables, c, dt, world, &rivals, bump.as_mut(), pose)
             } else {
                 let p = &mut self.others[i - 1];
-                p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
+                p.rider.frame_posed(&p.phy, tables, c, dt, world, &rivals, bump.as_mut(), pose)
             };
             self.rng_back(i, kept);
             self.props_back(i);
