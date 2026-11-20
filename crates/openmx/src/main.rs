@@ -2779,7 +2779,11 @@ impl<P: sim_world::World> World<P> {
         }
         for s in &mut self.seats {
             if slept {
-                s.sim.park_cars(cars.clone());
+                // The parked fliers' hulls after the cars' (F80) kept.
+                if let Some(parked) = game_sim::Sim::parked_over(&s.sim.parked, &cars) {
+                    s.sim.parked = parked;
+                }
+                s.sim.parked_cars.clone_from(&cars);
             } else {
                 s.sim.parked_cars.clone_from(&cars);
             }
@@ -6326,6 +6330,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .collect(),
         _ => Vec::new(),
     };
+    // And their `SetGroundHeight`s (F80), where the fliers among them are stored.
+    lot.in_play_ground = match (&world_mod, &machines) {
+        (None, Some((_, b))) => vehicle::in_play_ground_heights(b),
+        (Some(_), _) => tile_machines.iter().flat_map(|(_, b, _)| vehicle::in_play_ground_heights(b)).collect(),
+        _ => Vec::new(),
+    };
     // And each car's bay on the ground under it (S245): free07's file parks its bajas at 0.
     {
         let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
@@ -9038,6 +9048,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let machine_res = (!lot.in_play.is_empty()).then(|| member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok())).flatten();
         let read = &mut |n: &str| machine_res.as_ref()?.read_suffix(n).ok();
         let in_play = vehicle::InPlay::settled(&lot.in_play, &flying, read, &mut sim, &tables.ride);
+        // And the fliers (F80, free06's helicopter, free10's plane), for the AI riders to sweep.
+        let in_play = in_play.with_fliers(&lot.in_play, &lot.in_play_ground, &flying, read, &mut sim, &tables.ride);
         for k in 0..in_play.len() {
             let (kind, at) = in_play.at(k).expect("in range");
             println!("parked: {} at rest at {:.1}, {:.2}, {:.1}, in the riders' world", kind.name(), at.x(), at.y(), at.z());

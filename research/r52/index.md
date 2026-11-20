@@ -61,3 +61,20 @@
 - The AI walk was not run on these images (no AI riders). The fliers' hulls are their machines' and
   collidable, as the truck's that recording2's walk hands out.
 - Frames are the emulator's `frame()` count, not game ticks.
+
+## F80: the port parks the fliers
+
+- Stored spot (machine +0x50+0x90) = ground or file height, plus the model's box centre
+  (`flight::spawn_lift`). `vehicle::flier_spot`.
+  - free10 plane: `SetGroundHeight` on (default). The ground plus 3.6154737. Bit for bit.
+  - free06 helicopter: `[Machine1]` has `SetGroundHeight = FALSE`. The file's y 271 plus the lift.
+    The image's lift reads 5.88528, the model's box 5.885306: 0.00003 ft under.
+    Using the ground (269.31) put it 1.69 ft low.
+- Settle: 150 frames at `car::LOAD_DT` with nobody aboard (`vehicle::parked_heli`, `parked_plane`).
+  Bodies land within 0.15 ft of the images' (free06 0.07/0.02/0.06, free10 0.15/0.00/0.00).
+  The original never sleeps them; the port settles once and keeps them fixed.
+- Hulls go to `Sim::parked` after the cars' (`Sim::park_cars_and_fliers`), dropped while a seat
+  flies that kind. `Sim::parked_over` keeps them when a parked car sleeps.
+- Bikes do not strike them yet; filed as a follow-up.
+- Checked by openmx `tests/parked_fliers.rs` (spots and bodies against the images) and
+  `vehicle::in_play_tests::the_parked_helicopter_is_swept_but_not_while_flown`.

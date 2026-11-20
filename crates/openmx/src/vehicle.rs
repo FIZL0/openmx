@@ -707,6 +707,9 @@ pub struct Lot {
     /// The machines the original parks on the ride, by player slot ([`in_play`], P378), moved as
     /// the lot's are; what each seat's [`InPlay`] is settled from.
     pub in_play: Vec<(usize, Machine, Spawn)>,
+    /// Each of [`Lot::in_play`]'s `SetGroundHeight` (F80, [`in_play_ground_heights`]): where a flier
+    /// is stored ([`flier_spot`]).
+    pub in_play_ground: Vec<bool>,
 }
 
 impl Lot {
@@ -720,7 +723,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: Vec::new(), ground_heights: Vec::new(), cars: Vec::new(), kiowa: Vec::new(), online_cars: Vec::new(), mxvatv_kiowa: Vec::new(), in_play: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: Vec::new(), ground_heights: Vec::new(), cars: Vec::new(), kiowa: Vec::new(), online_cars: Vec::new(), mxvatv_kiowa: Vec::new(), in_play: Vec::new(), in_play_ground: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -3013,17 +3016,121 @@ pub fn in_play(machine_txt: &[u8]) -> Vec<(usize, Machine, Spawn)> {
         .collect()
 }
 
+/// How many frames a parked flier settles with nobody aboard (F80), at the load's frame time
+/// ([`game_sim::car::LOAD_DT`]): R52's images are 300 emulator frames after "in game", 150 of the
+/// game's. The original's fliers never sleep (their sleep thresholds are `0.3, 0.3, MAX..`), so they
+/// are stepped every frame; the port stands each where this many leave it.
+pub const FLIER_SETTLE_FRAMES: usize = 150;
+
+/// **Where the original stores a parked flier** (F80, R52), and its up: its body's centre on the
+/// ground under `at` (the world's ground query), or at the file's height where its section turns
+/// `SetGroundHeight` off (`ground_height`, as free06's `[Machine1]` helicopter), lifted by its
+/// model's bounds' centre ([`flight::spawn_lift`] of its `.psg`), as the machine factory raises a
+/// plane's spot (S164); the up the ground's normal there. free10's plane is stored there bit for
+/// bit; free06's helicopter 0.00003 ft under (its lift reads 5.88528 there, the model's box 5.885306).
+/// `None` with no ground under it.
+pub fn flier_spot(world: &mut dyn World, at: Vf, ground_height: bool, lift: F) -> Option<(Vf, Vf)> {
+    let (on, normal) = world.ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+    let y = if ground_height { on.y() } else { at.y() };
+    (on.y() > NO_GROUND).then(|| (flight::bay_spot(Vf::new(at.x(), y, at.z(), 1.0), lift), normal))
+}
+
+/// Each machine [`in_play`] parks, in its order: its section's `SetGroundHeight`, on unless the file
+/// says otherwise (F80, [`flier_spot`]).
+pub fn in_play_ground_heights(machine_txt: &[u8]) -> Vec<bool> {
+    let ini = Ini::parse_bytes(machine_txt);
+    let n = ini.section("Machines").int("NumberOfMachines").unwrap_or(0).max(0) as usize;
+    (0..n)
+        .filter_map(|i| {
+            let name = format!("Machine{}", i + 1);
+            let word = ini.section(&name).text("Type")?.trim().to_string();
+            Machine::ALL.into_iter().find(|m| m.section().eq_ignore_ascii_case(&word))?;
+            Spawn::section(&ini, &name)?;
+            Some(ini.section(&name).flag("SetGroundHeight", true))
+        })
+        .collect()
+}
+
+/// **A parked helicopter, settled** (F80): built with its body's centre on `body_at` along `facing`
+/// ([`KiowaRide::built`]), nobody aboard (unflown: the controller asks nothing of the rotor), and
+/// stepped `frames` frames of `dt` on its own frame ([`game_sim::kiowa::Kiowa::tick`] over
+/// [`game_sim::kiowa::Grounded`], its collision object searched first). What a crash test asks for
+/// is left undone: a helicopter set down on its skids asks for nothing.
+pub fn parked_heli(heli: &KiowaRide, body_at: Vf, facing: Vf, world: &mut dyn World, tables: &game_sim::ride::Tables, dt: F, frames: usize) -> Heli {
+    let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+    let quat = game_sim::math::mat4_to_quat(&game_sim::math::basis(body_at, facing, up, true, false));
+    let c = rotate(quat, heli.phy.mass_properties.cofg);
+    let mut h = heli.built(Vf::new(body_at.x() - c[0], body_at.y() - c[1], body_at.z() - c[2], 1.0), facing, world);
+    (h.ride.body.position, h.ride.body.last_position) = (body_at, body_at);
+    h.ride.flown = false;
+    h.collision.refresh(&h.ride.body, world);
+    for _ in 0..frames {
+        let movers = h.collision.search(&mut h.ride.body, world, dt);
+        let mut ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &heli.phy.wreck_rotor.rays, asked: Vec::new() };
+        h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, None, &tables.curve, &tables.acos, &mut h.rng, dt, &mut ground);
+    }
+    h
+}
+
+/// **A parked plane, settled** (F80): `flight` stood with its body's centre on `body_at` along
+/// `facing`, its up `up` ([`Flight::reset_body`], as its file bay stands it), nobody aboard
+/// (unflown: the controls zero the pad), and stepped `frames` frames of `dt` ([`Flight::frame`]).
+pub fn parked_plane(mut flight: Flight, body_at: Vf, facing: Vf, up: Vf, world: &mut dyn World, tables: &game_sim::ride::Tables, dt: F, frames: usize) -> Flight {
+    flight.reset_body(body_at, facing, up, &tables.acos);
+    flight.attitude.flown = false;
+    for _ in 0..frames {
+        flight.frame(dt, game_sim::biplane::Pad::default(), world, tables);
+    }
+    flight
+}
+
+/// **A flier [`in_play`] parks, settled** (F80): the helicopter or the plane off `machine.res`
+/// (`read`; its `.phy`, ray probe, hull and model), stored at its spot ([`flier_spot`]) and
+/// settled with nobody aboard ([`parked_heli`], [`parked_plane`]) for [`FLIER_SETTLE_FRAMES`]; the
+/// answer its hull where its body then stands ([`game_sim::ai::parked_hull`]), what the AI riders
+/// sweep. `None` for a car, or with a file missing or no ground under the spot.
+pub fn parked_flier(
+    m: Machine, spot: Spawn, ground_height: bool, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World, tables: &game_sim::ride::Tables,
+) -> Option<(game_sim::biplane::Body, game_sim::world::Prop)> {
+    let dt = F(game_sim::car::LOAD_DT);
+    let (model, hull) = match m {
+        Machine::Helicopter => (game_sim::kiowa::KIOWA_MODEL, game_sim::kiowa::KIOWA_HULL),
+        Machine::Biplane => (flight::BIPLANE_MODEL, flight::HULL),
+        _ => return None,
+    };
+    let lift = flight::spawn_lift(&read(model)?).map_err(|e| eprintln!("parked: {model}: {e}")).ok()?;
+    let hull = game_sim::track::Mesh::parse(&read(hull)?).map_err(|e| eprintln!("parked: {hull}: {e}")).ok()?;
+    let (at, normal) = flier_spot(world, spot.at, ground_height, lift)?;
+    let body = match m {
+        Machine::Helicopter => {
+            let heli = KiowaRide::new(&read(game_sim::kiowa::KIOWA_PHY)?, 0, None).with_rays(&read(game_sim::kiowa::KIOWA_RAYS)?);
+            parked_heli(&heli, at, spot.facing, world, tables, dt, FLIER_SETTLE_FRAMES).ride.body
+        }
+        _ => {
+            let rays = game_sim::track::Rays::parse(&read(game_sim::flight_search::BIPLANE_RAYS)?).ok()?;
+            let plane = game_sim::phy::Plane::read_bytes(&read(game_sim::phy::BIPLANE_PHY)?);
+            let flight = Flight::new(&plane).with_rays(game_sim::flight_search::Rays::of(&rays)).with_hull(hull.clone());
+            parked_plane(flight, at, spot.facing, normal, world, tables, dt, FLIER_SETTLE_FRAMES).body
+        }
+    };
+    Some((body, game_sim::ai::parked_hull(hull, &body)))
+}
+
 /// **The parked machines in a seat's Sim** (P378, P380): each car [`in_play`] parks, settled where it
 /// was parked ([`game_sim::car::Parked`]), and which machine it is; [`InPlay::hand_to`] parks those
 /// nobody drives in a Sim ([`Sim::park_cars`]): a ridden bike strikes, wakes and pushes them, and
 /// [`Sim::parked`], what its AI riders' feelers sweep, holds their hulls where they rest.
 ///
-/// Only the cars have a rest pose ([`game_sim::car::Parked::settled`], S484), so a file whose
-/// `[Machine1]` is the plane or the helicopter (free06, free10) parks nothing here yet.
+/// The fliers (free06's helicopter, free10's plane; F80, [`InPlay::with_fliers`]) are settled once
+/// ([`parked_flier`]) and their hulls handed to [`Sim::parked`] after the cars'
+/// ([`Sim::park_cars_and_fliers`]), for the AI riders only: a bike does not strike them yet.
 #[derive(Clone, Debug, Default)]
 pub struct InPlay {
     /// The cars as the load settled them.
     parked: std::sync::Arc<[(Kind, game_sim::car::Parked)]>,
+    /// The fliers as the load settled them (F80): each one's hull and its body where it came to rest
+    /// ([`game_sim::ai::parked_hull`] of the two what the Sim is handed).
+    fliers: std::sync::Arc<[(Kind, game_sim::track::Mesh, game_sim::biplane::Body)]>,
     /// Each car as this seat's Sim last held it (P380), once it has been handed one: where a car taken
     /// out of the Sim while a player drives its kind is put back from.
     kept: Vec<game_sim::car::Parked>,
@@ -3037,7 +3144,7 @@ impl InPlay {
     /// `world`'s ground and stepped with nobody in them until their bodies sleep, as the load leaves
     /// them ([`game_sim::car::Parked::settled`]). A slot whose player starts on the plane (`flying`)
     /// parks nothing; a car without its files, its `m.col` or its `f.col` is left out, as are the
-    /// fliers.
+    /// fliers ([`InPlay::with_fliers`] parks those).
     pub fn settled(
         spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
         tables: &game_sim::ride::Tables,
@@ -3057,7 +3164,25 @@ impl InPlay {
                 Some((kind, p))
             })
             .collect();
-        InPlay { parked, kept: Vec::new(), handed: None }
+        InPlay { parked, fliers: std::sync::Arc::default(), kept: Vec::new(), handed: None }
+    }
+
+    /// **The same with the fliers of `spots`** (F80): each helicopter or plane settled with nobody
+    /// aboard ([`parked_flier`]), its section's `SetGroundHeight` the same place in `ground_heights`
+    /// ([`in_play_ground_heights`]; on past them). A slot whose player starts on the plane (`flying`)
+    /// parks nothing, as for the cars; a flier without its files or ground under it is left out.
+    pub fn with_fliers(
+        mut self, spots: &[(usize, Machine, Spawn)], ground_heights: &[bool], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+        world: &mut dyn World, tables: &game_sim::ride::Tables,
+    ) -> InPlay {
+        self.fliers = (spots.iter().enumerate())
+            .filter(|(_, (slot, m, _))| m.car_kind().is_none() && !flying.get(*slot).copied().unwrap_or(false))
+            .filter_map(|(i, &(_, m, spot))| {
+                let (body, hull) = parked_flier(m, spot, ground_heights.get(i).copied().unwrap_or(true), read, world, tables)?;
+                Some((m.kind()?, hull.mesh, body))
+            })
+            .collect();
+        self
     }
 
     /// How many machines are parked.
@@ -3079,18 +3204,21 @@ impl InPlay {
 
     /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
     pub fn fresh(&self) -> InPlay {
-        InPlay { parked: std::sync::Arc::clone(&self.parked), kept: Vec::new(), handed: None }
+        InPlay { parked: std::sync::Arc::clone(&self.parked), fliers: std::sync::Arc::clone(&self.fliers), kept: Vec::new(), handed: None }
     }
 
     /// **`sim`'s parked cars** ([`Sim::park_cars`], P380): every one but those a player is up on
     /// (`driven`, every seat's machine), which the original's player has taken out of its spot, and
     /// back once they leave it, as the Sim last held it (struck, pushed or asleep). Only when that
-    /// changes; a ride that parks nothing leaves the Sim alone.
+    /// changes; a ride that parks nothing leaves the Sim alone. The fliers' hulls follow the cars'
+    /// in [`Sim::parked`] (F80, [`Sim::park_cars_and_fliers`]), but for a flier whose kind a player
+    /// is up on.
     pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
-        if self.parked.is_empty() {
+        if self.parked.is_empty() && self.fliers.is_empty() {
             return;
         }
-        let shown: Vec<bool> = self.parked.iter().map(|(kind, _)| !driven.contains(kind)).collect();
+        let cars = self.parked.len();
+        let shown: Vec<bool> = (self.parked.iter().map(|(kind, _)| kind).chain(self.fliers.iter().map(|(kind, ..)| kind))).map(|kind| !driven.contains(kind)).collect();
         if self.handed.as_ref() == Some(&shown) {
             return;
         }
@@ -3099,14 +3227,15 @@ impl InPlay {
         }
         // What the Sim did to the cars it held since it was last handed them, kept for their return.
         if let Some(was) = &self.handed {
-            let held: Vec<usize> = (0..was.len()).filter(|&k| was[k]).collect();
+            let held: Vec<usize> = (0..cars).filter(|&k| was[k]).collect();
             if held.len() == sim.parked_cars.len() {
                 for (k, p) in held.into_iter().zip(std::mem::take(&mut sim.parked_cars)) {
                     self.kept[k] = p;
                 }
             }
         }
-        sim.park_cars((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect());
+        let fliers = (self.fliers.iter().zip(&shown[cars..])).filter(|(_, on)| **on).map(|((_, hull, body), _)| game_sim::ai::parked_hull(hull.clone(), body));
+        sim.park_cars_and_fliers((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect(), fliers);
         self.handed = Some(shown);
     }
 }
@@ -5122,5 +5251,42 @@ mod in_play_tests {
         parked.hand_to(&mut sim, &[Kind::Buggy, Kind::Bike]);
         assert_eq!((sim.parked.len(), sim.parked_cars.len()), (1, 1), "back once nobody drives a truck");
         assert!(sim.parked_cars[0].awake(), "the truck came back as the Sim left it, woken");
+    }
+
+    /// F80: free06's `[Machine1]` helicopter, at the file's height (`SetGroundHeight = FALSE`), settled
+    /// on a floor and its hull handed to the Sim's [`Sim::parked`] with no parked car; dropped while a
+    /// seat flies a helicopter, and for a first player on the plane.
+    #[test]
+    fn the_parked_helicopter_is_swept_but_not_while_flown() {
+        use game_render::disc::Disc;
+        const FREE06: &str = "[Machines]\nNumberOfMachines = 1\n\n[Machine1]\nType = Helicopter\n\
+            Position = 2570.0, 271.0, 2734.0\nDirection = 0.0, 0.0, 1.0\nSetGroundHeight = FALSE\nMachineRacer = TRUE\n";
+        assert_eq!(in_play_ground_heights(FREE06.as_bytes()), [false]);
+        assert_eq!(in_play_ground_heights(FREE09.as_bytes()), [true]);
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let read = &mut |n: &str| machines.read_suffix(n).ok();
+        let tables = game_sim::ride::Tables::build();
+        let spots = in_play(FREE06.as_bytes());
+        let ground = in_play_ground_heights(FREE06.as_bytes());
+        let mut floor = game_sim::world::Flat { y: F(269.3), ..Default::default() };
+        let none = InPlay::settled(&spots, &[true], read, &mut floor, &tables).with_fliers(&spots, &ground, &[true], read, &mut floor, &tables);
+        let mut sim = Sim::new(0xf80);
+        none.fresh().hand_to(&mut sim, &[Kind::Biplane]);
+        assert!(sim.parked.is_empty(), "the first player's slot is their plane");
+        let mut parked = InPlay::settled(&spots, &[false], read, &mut floor, &tables).with_fliers(&spots, &ground, &[false], read, &mut floor, &tables);
+        assert_eq!(parked.len(), 0, "no car");
+        parked.hand_to(&mut sim, &[Kind::Bike]);
+        assert_eq!((sim.parked.len(), sim.parked_cars.len()), (1, 0), "nobody flies it");
+        let o = sim.parked[0].to_world.0[3];
+        assert!((o.x() - 2570.0).abs() < 1.0 && (o.z() - 2734.0).abs() < 1.0 && o.y() > 265.0 && o.y() < 275.0, "the helicopter stands at {o:?}");
+        parked.hand_to(&mut sim, &[Kind::Bike, Kind::Kiowa]);
+        assert!(sim.parked.is_empty(), "the second seat flies a helicopter");
+        parked.hand_to(&mut sim, &[Kind::Bike]);
+        assert_eq!(sim.parked.len(), 1, "back once nobody flies one");
     }
 }

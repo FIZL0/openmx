@@ -336,6 +336,37 @@ impl Sim {
         self.parked_cars = cars;
     }
 
+    /// **[`Sim::park_cars`] with the parked fliers** (F80): the helicopter and plane the original parks
+    /// in play, each one's hull where it settled with nobody aboard, after the cars' in
+    /// [`Sim::parked`], what the AI riders sweep. Fixed for the ride: the bikes do not strike them
+    /// yet, and nothing steps them.
+    pub fn park_cars_and_fliers(&mut self, cars: Vec<car::Parked>, fliers: impl IntoIterator<Item = world::Prop>) {
+        self.parked = cars.iter().map(car::Parked::ai_hull).chain(fliers).collect();
+        self.parked_cars = cars;
+    }
+
+    /// [`Sim::parked`] with its parked cars' hulls (its head, one a car, [`Sim::park_cars`]) stood
+    /// where `cars` rest, and what follows them (the fliers, F80) kept; `None` where `parked` is
+    /// shorter than `cars`, a list [`Sim::park`] made.
+    pub fn parked_over(parked: &[world::Prop], cars: &[car::Parked]) -> Option<Arc<[world::Prop]>> {
+        (parked.len() >= cars.len()).then(|| cars.iter().map(car::Parked::ai_hull).chain(parked[cars.len()..].iter().map(Sim::parked_copy)).collect())
+    }
+
+    /// A copy of a parked machine's hull (F80): every field but [`world::Prop::heard`], which no
+    /// tick leaves raised, lowered.
+    pub fn parked_copy(p: &world::Prop) -> world::Prop {
+        world::Prop {
+            mesh: p.mesh.clone(),
+            to_world: p.to_world,
+            from_world: p.from_world,
+            centre: p.centre,
+            radius: p.radius,
+            moving: p.moving,
+            heard: std::sync::atomic::AtomicBool::new(false),
+            stadium: p.stadium,
+        }
+    }
+
     /// The woken parked cars' frame, ahead of the bikes' (S485, [`car::Parked::frame`]): which of them
     /// stepped and are at rest, for [`Sim::parked_cars_sleep`] after the bikes.
     fn parked_cars_frame(&mut self, dt: F, world: &mut dyn World) -> Vec<bool> {
@@ -352,8 +383,8 @@ impl Sim {
             p.sleep();
             slept = true;
         }
-        if slept && self.parked.len() == self.parked_cars.len() {
-            self.parked = self.parked_cars.iter().map(car::Parked::ai_hull).collect();
+        if slept && let Some(parked) = Sim::parked_over(&self.parked, &self.parked_cars) {
+            self.parked = parked;
         }
     }
 

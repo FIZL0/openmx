@@ -539,10 +539,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         tracks: sim.tracks.take(),
         // The parked machines' hulls (S461) are this machine's, but where a parked car slept they
         // stand where the state's slept (S486, [`crate::car::Parked::rest`]).
-        parked: match &parked_cars {
-            Some(cars) if sim.parked.len() == cars.len() => cars.iter().map(crate::car::Parked::ai_hull).collect(),
-            _ => Arc::clone(&sim.parked),
-        },
+        // The parked fliers after them (F80) are this machine's.
+        parked: parked_cars.as_ref().and_then(|cars| Sim::parked_over(&sim.parked, cars)).unwrap_or_else(|| Arc::clone(&sim.parked)),
         // The parked cars (S486), as the state has them.
         parked_cars: parked_cars.unwrap_or_default(),
     };
