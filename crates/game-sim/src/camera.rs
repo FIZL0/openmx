@@ -2946,3 +2946,245 @@ impl Thrill {
         Some(View { position: eye, look_at, fov: fov.min(THRILL_WIDE_FOV) })
     }
 }
+
+// --- the first-person camera (P384) ----------------------------------------------------------------
+
+/// The four viewports' sections of `appstart\fppreset.ini`, in the original's order: the base
+/// first-person camera's reader asks for `%sPlayer` with `1`, `2h`, `2v` and `3`, and picks one by
+/// its viewport (P384).
+pub const FP_SECTIONS: [&str; 4] = ["1Player", "2hPlayer", "2vPlayer", "3Player"];
+
+/// The field of view a section without `FOV` keeps: the camera's own, which its setup hands it
+/// before the file is read.
+const FP_FOV_UNSET: f32 = 100.0;
+
+/// The reader's own degrees-to-radians factor for `MaxRoll`, which is not [`DEG_TO_RAD`]'s.
+const FP_DEG_TO_RAD: f32 = 0.017453292;
+
+/// How much of the swing-scaled yaw rate the look turns by: the frame's own literal.
+const FP_YAW_SHARE: f32 = 0.11;
+
+/// How far over the ground the eye is kept, in feet.
+const FP_OVER_GROUND: f32 = 1.5;
+
+/// One viewport's section of `appstart\fppreset.ini` (P384), with the original's defaults for a key
+/// the section does not have.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FpView {
+    /// `FOV`, and `FOVWideScreen`, which the reader takes instead on a widescreen display. Degrees,
+    /// horizontal, as the follow camera's.
+    pub fov: F,
+    pub fov_wide: F,
+    /// `OffsetFromBodyPoint`: where the eye sits off the point its rider hands it, in the rider's
+    /// own axes.
+    pub offset: Vf,
+    /// `LookFilter`: the three lags on the look direction, `x`, `y`, `z`.
+    pub look_filter: Vf,
+    /// `LookSwing`: how far the look turns with the rider's yaw rate.
+    pub look_swing: F,
+    /// `MaxRoll`, read in degrees and kept in radians. The frame does not read it.
+    pub max_roll: F,
+    /// `ObjectRollScale`: how much of the rider's roll the camera rolls by.
+    pub object_roll_scale: F,
+    /// `CameraUnrollScale`. The frame does not read it.
+    pub camera_unroll_scale: F,
+}
+
+impl Default for FpView {
+    /// The constructor's numbers, and the 0.1 the reader defaults each look lag to.
+    fn default() -> FpView {
+        FpView {
+            fov: F(FP_FOV_UNSET),
+            fov_wide: F(FP_FOV_UNSET),
+            offset: Vf::ZERO,
+            look_filter: Vf::new(0.1, 0.1, 0.1, 0.0),
+            look_swing: F::ONE,
+            max_roll: F(0.6109),
+            object_roll_scale: F::ONE,
+            camera_unroll_scale: F(0.7),
+        }
+    }
+}
+
+/// The whole of `appstart\fppreset.ini` (P384): the three lags' time constants out of `[General]`
+/// and the four viewports' sections.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FpPreset {
+    pub camera_unroll_filter: F,
+    pub object_roll_filter: F,
+    pub yaw_rate_filter: F,
+    pub views: [FpView; 4],
+}
+
+impl Default for FpPreset {
+    fn default() -> FpPreset {
+        FpPreset {
+            camera_unroll_filter: F(0.15),
+            object_roll_filter: F(0.55),
+            yaw_rate_filter: F(0.85),
+            views: [FpView::default(); 4],
+        }
+    }
+}
+
+impl FpPreset {
+    pub fn read_bytes(bytes: &[u8]) -> FpPreset {
+        FpPreset::read(&Ini::parse_bytes(bytes))
+    }
+
+    /// The two readers' keys, the base camera's and then the bike's own. A section the file does not
+    /// have keeps the defaults.
+    pub fn read(ini: &Ini) -> FpPreset {
+        let mut p = FpPreset::default();
+        let has = |name: &str| ini.names().iter().any(|n| n.eq_ignore_ascii_case(name));
+        if has("General") {
+            let g = ini.section("General");
+            p.camera_unroll_filter = g.float_or("CameraUnrollFilter", p.camera_unroll_filter);
+            p.object_roll_filter = g.float_or("ObjectRollFilter", p.object_roll_filter);
+            p.yaw_rate_filter = g.float_or("YawRateFilter", p.yaw_rate_filter);
+        }
+        for (v, name) in p.views.iter_mut().zip(FP_SECTIONS) {
+            if !has(name) {
+                continue;
+            }
+            let s = ini.section(name);
+            v.fov = s.float_or("FOV", v.fov);
+            v.fov_wide = s.float_or("FOVWideScreen", v.fov_wide);
+            v.offset = s.vector("OffsetFromBodyPoint", v.offset);
+            v.look_filter = s.vector("LookFilter", v.look_filter);
+            v.look_swing = s.float_or("LookSwing", v.look_swing);
+            if let Some(d) = s.float("MaxRoll") {
+                v.max_roll = d * F(FP_DEG_TO_RAD);
+            }
+            v.object_roll_scale = s.float_or("ObjectRollScale", v.object_roll_scale);
+            v.camera_unroll_scale = s.float_or("CameraUnrollScale", v.camera_unroll_scale);
+        }
+        p
+    }
+}
+
+/// What the first-person camera reads off its rider each frame (P384), the record its rider's
+/// interface fills: where the eye is, the rider's forward and up axes, its world yaw rate and roll,
+/// and whether it is tumbling (a flip, a spin, a wreck), which takes the swing and the roll away and
+/// snaps the look.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Onboard {
+    pub eye: Vf,
+    pub forward: Vf,
+    pub up: Vf,
+    pub yaw_rate: F,
+    pub roll: F,
+    pub tumbling: bool,
+}
+
+/// **The first-person camera** (P384): the disc's own, which the camera manager sets up beside the
+/// follow cameras from `appstart\fppreset.ini`. It looks along the rider's forward axis from the eye
+/// its rider hands it, the look swung into a turn by the yaw rate and lagged per axis, the up rolled
+/// by a share of the rider's roll, the eye kept over the ground.
+///
+/// Presentation: it reads its rider and writes only its own lags.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstPerson {
+    pub preset: FpPreset,
+    /// Which of [`FP_SECTIONS`] the viewport reads, and whether the display is wide.
+    pub viewport: usize,
+    pub wide: bool,
+    /// The three lags the bike's class adds: the unroll (set on a reset only), the roll and the yaw.
+    pub unroll: Lag,
+    pub roll: Lag,
+    pub yaw: Lag,
+    /// The look direction's three lags.
+    pub look: [Lag; 3],
+    /// The next frame snaps every lag onto its target.
+    pub reset: bool,
+}
+
+impl FirstPerson {
+    pub fn new(preset: FpPreset, viewport: usize, wide: bool) -> FirstPerson {
+        let viewport = viewport.min(FP_SECTIONS.len() - 1);
+        let v = &preset.views[viewport];
+        FirstPerson {
+            preset,
+            viewport,
+            wide,
+            unroll: Lag::new(preset.camera_unroll_filter),
+            roll: Lag::new(preset.object_roll_filter),
+            yaw: Lag::new(preset.yaw_rate_filter),
+            look: [Lag::new(F(v.look_filter.x())), Lag::new(F(v.look_filter.y())), Lag::new(F(v.look_filter.z()))],
+            reset: true,
+        }
+    }
+
+    /// Switch to a viewport's section. As the original's viewport select, the look lags take that
+    /// section's `LookFilter` times; what they hold is kept.
+    pub fn set_viewport(&mut self, viewport: usize) {
+        self.viewport = viewport.min(FP_SECTIONS.len() - 1);
+        let f = self.preset.views[self.viewport].look_filter;
+        for (lag, tau) in self.look.iter_mut().zip([f.x(), f.y(), f.z()]) {
+            lag.tau = F(tau);
+        }
+    }
+
+    /// The viewport's section.
+    pub fn view(&self) -> &FpView {
+        &self.preset.views[self.viewport]
+    }
+
+    /// The field of view, degrees: `FOVWideScreen` on a wide display.
+    pub fn fov(&self) -> F {
+        if self.wide { self.view().fov_wide } else { self.view().fov }
+    }
+
+    /// One frame. Answers the view and the camera's up, which carries the roll.
+    pub fn update(&mut self, dt: F, on: &Onboard, curve: &CurveTable, scene: &mut impl Surface) -> (View, Vf) {
+        let v = *self.view();
+        let still = !on.tumbling;
+        let yaw_target = if still { on.yaw_rate * v.look_swing * F(FP_YAW_SHARE) } else { F::ZERO };
+        let roll_target = if still { v.object_roll_scale * on.roll } else { F::ZERO };
+        if self.reset {
+            self.unroll.set_value(F::ZERO);
+            self.roll.set_value(roll_target);
+            self.yaw.set_value(yaw_target);
+        }
+        let (fw, u) = (on.forward, on.up);
+        // The rider's side, flattened, and the up with the rider's own roll taken out of it.
+        let side = cross(u, fw);
+        let side = normalize(Vf::new(side.x(), 0.0, side.z(), 0.0));
+        let unrolled = cross(fw, side);
+        let roll = self.roll.step(roll_target, dt);
+        let up = rotate(F::ZERO - roll, fw, unrolled, curve);
+        let yaw = wrap_half_turn(F(libm::fmodf(self.yaw.step(yaw_target, dt).0, TWO_PI)));
+        let mut look = normalize(rotate(yaw, up, fw, curve));
+        let lane = [look.x(), look.y(), look.z()];
+        let mut lagged = [F::ZERO; 3];
+        for k in 0..3 {
+            lagged[k] = if still && !self.reset {
+                self.look[k].step(F(lane[k]), dt)
+            } else {
+                self.look[k].set_value(F(lane[k]));
+                F(lane[k])
+            };
+        }
+        look = normalize(Vf::new(lagged[0].0, lagged[1].0, lagged[2].0, 0.0));
+        let mut eye = on.eye;
+        if scene.has_ground() {
+            let floor = F(scene.on_surface(eye).y()) + F(FP_OVER_GROUND);
+            if F(eye.y()) < floor {
+                eye = Vf::new(eye.x(), floor.0, eye.z(), eye.w());
+            }
+        }
+        let cam_up = normalize(cross(cross(look, up), look));
+        self.reset = false;
+        (View { position: eye, look_at: add3(eye, look), fov: self.fov() }, cam_up)
+    }
+
+    /// The rider's roll as [`Onboard::roll`] wants it, off its two axes: the angle about `forward`
+    /// from the unrolled up to `up`, so that a roll scale of one rolls the camera with the rider.
+    pub fn roll_of(forward: Vf, up: Vf) -> F {
+        let side = cross(up, forward);
+        let side = normalize(Vf::new(side.x(), 0.0, side.z(), 0.0));
+        let unrolled = cross(forward, side);
+        let dot = |a: Vf, b: Vf| Acc::mula(F(a.x()), F(b.x())).madda(F(a.y()), F(b.y())).madd(F(a.z()), F(b.z()));
+        F(libm::atan2f(dot(up, side).0, dot(up, unrolled).0))
+    }
+}

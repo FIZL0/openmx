@@ -1507,3 +1507,122 @@ impl PauseHold {
         }
     }
 }
+
+// --- the first-person camera (P384) ----------------------------------------------------------------
+
+/// What the camera button and `--camera` call the first-person camera.
+pub const FIRST_PERSON: &str = "First Person";
+
+/// **The port's own (P384), after MXA's onboard adjust:** the player's trim on the first-person
+/// camera's eye and field of view. Ideas only: MXA's own numbers are not on this machine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FpAdjust {
+    /// How much of the head node's sway off a still head the eye keeps: 1 rides the head, 0 pins the
+    /// eye where `OffsetFromBodyPoint` puts a still head.
+    pub bob: f32,
+    /// Feet up and forward along the bike's axes, and degrees added to the field of view.
+    pub up: f32,
+    pub forward: f32,
+    pub fov: f32,
+}
+
+impl FpAdjust {
+    /// The disc's camera untouched: the eye on the head node.
+    pub const ORIGINAL: FpAdjust = FpAdjust { bob: 1.0, up: 0.0, forward: 0.0, fov: 0.0 };
+
+    /// `BOB,UP,FORWARD,FOV`, as `--fp-adjust` takes it.
+    pub fn parse(v: &str) -> Option<FpAdjust> {
+        let n: Vec<f32> = v.split(',').map(|w| w.trim().parse().ok()).collect::<Option<_>>()?;
+        let [bob, up, forward, fov] = n[..] else { return None };
+        Some(FpAdjust { bob: bob.clamp(0.0, 2.0), up: up.clamp(-3.0, 3.0), forward: forward.clamp(-3.0, 3.0), fov: fov.clamp(-30.0, 30.0) })
+    }
+}
+
+/// A seat's first-person camera (P384) and whether it has the screen. The camera button walks onto
+/// it after the bike's last cycling preset and off it onto the first; the follow camera keeps its
+/// frame underneath, so letting go hands back a camera already where it should be.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FirstPersonCamera {
+    pub on: bool,
+    pub cam: Option<game_sim::camera::FirstPerson>,
+}
+
+impl FirstPersonCamera {
+    /// The camera out of `fppreset.ini` the first time there is one; `start` puts it on the screen
+    /// then (`--camera "First Person"`).
+    pub fn ensure(&mut self, file: Option<&[u8]>, viewport: usize, wide: bool, start: bool) {
+        if self.cam.is_none()
+            && let Some(bytes) = file
+        {
+            self.cam = Some(game_sim::camera::FirstPerson::new(game_sim::camera::FpPreset::read_bytes(bytes), viewport, wide));
+            self.on = start;
+        }
+        if let Some(cam) = &mut self.cam {
+            cam.set_viewport(viewport);
+            cam.wide = wide;
+        }
+    }
+
+    /// The camera button, with this camera in the walk: true when it now has the screen. Off it, the
+    /// follow camera goes on to its next preset as before.
+    pub fn next(&mut self, cam: &mut game_sim::camera::Follow) -> bool {
+        if self.on || self.cam.is_none() {
+            self.on = false;
+            cam.next_preset();
+            return false;
+        }
+        let count = cam.presets.len();
+        let next = (1..=count).map(|step| (cam.preset + step) % count).find(|&i| cam.presets[i].cycle_thru_this_preset);
+        if next.is_none_or(|n| n <= cam.preset) {
+            self.on = true;
+            if let Some(fp) = &mut self.cam {
+                fp.reset = true;
+            }
+        } else {
+            cam.next_preset();
+        }
+        self.on
+    }
+
+    /// One frame of it over the bike `ride`, while it has the screen: the view and the camera's up.
+    /// `head` is the rider's Head node in the world, where the body is posed.
+    pub fn frame(
+        &mut self,
+        ride: &Ride,
+        head: Option<Vf>,
+        adjust: FpAdjust,
+        dt: F,
+        curve: &game_sim::camera::CurveTable,
+        scene: &mut impl game_sim::camera::Surface,
+    ) -> Option<(game_sim::camera::View, Vf)> {
+        let cam = self.cam.as_mut().filter(|_| self.on)?;
+        let on = onboard(ride, head, cam.view().offset, adjust);
+        let (mut view, up) = cam.update(dt, &on, curve, scene);
+        view.fov = F(view.fov.0 + adjust.fov);
+        Some((view, up))
+    }
+}
+
+/// What the first-person camera reads off a bike: the eye, the bike's axes, its world yaw rate, its
+/// roll, and whether it is upside down. The eye is the rider's head node (the task's ask), trimmed
+/// by `adjust`; with no posed body, where a still head sits: the bike's point plus `offset` in the
+/// bike's axes. Which object fills the disc's record while riding was not found (journal).
+pub fn onboard(ride: &Ride, head: Option<Vf>, offset: Vf, adjust: FpAdjust) -> game_sim::camera::Onboard {
+    let (forward, up) = ride.axes();
+    let p = ride.position();
+    let side = [up.y() * forward.z() - up.z() * forward.y(), up.z() * forward.x() - up.x() * forward.z(), up.x() * forward.y() - up.y() * forward.x()];
+    let along = |o: [f32; 3]| [0, 1, 2].map(|k| side[k] * o[0] + [up.x(), up.y(), up.z()][k] * o[1] + [forward.x(), forward.y(), forward.z()][k] * o[2]);
+    let still = along([offset.x(), offset.y(), offset.z()]);
+    let still = [p.x() + still[0], p.y() + still[1], p.z() + still[2]];
+    let at = head.map_or(still, |h| [h.x(), h.y(), h.z()]);
+    let trim = along([0.0, adjust.up, adjust.forward]);
+    let eye: [f32; 3] = [0, 1, 2].map(|k| still[k] + adjust.bob * (at[k] - still[k]) + trim[k]);
+    game_sim::camera::Onboard {
+        eye: Vf::new(eye[0], eye[1], eye[2], 1.0),
+        forward,
+        up,
+        yaw_rate: F(ride.chassis.world_ang_vel.y()),
+        roll: game_sim::camera::FirstPerson::roll_of(forward, up),
+        tumbling: up.y() < 0.0,
+    }
+}
