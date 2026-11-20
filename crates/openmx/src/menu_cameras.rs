@@ -12,49 +12,86 @@ use super::{CAMERA_FOV, CAMERA_SHARE, CameraView, Machine, SEATS_MAX, clean_name
 /// own file.
 pub const PAGE: [Machine; 6] = [Machine::Bike, Machine::Biplane, Machine::Helicopter, Machine::Buggy, Machine::Monster, Machine::Baja];
 
-/// One preset's three sliders: the field of view's offset from the disc's, in degrees, and how far
-/// behind and how high above its machine the camera sits, in percent of the disc's.
+/// One preset's sliders: the field of view's offset from the disc's, in degrees, and how far behind
+/// and how high above its machine the camera sits, in percent of the disc's; then (P388) the degrees
+/// its pitch swings by and its look-at and position lags' time constants, in percent of the disc's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
     pub fov: i16,
     pub distance: u16,
     pub height: u16,
+    pub angle: i16,
+    pub look_lag: u16,
+    pub pos_lag: u16,
 }
+
+/// The angle slider's span, in degrees off the disc's pitch (P388).
+pub const ANGLE: (i16, i16) = (-30, 30);
+/// The two lag sliders' span and step, in percent of the disc's time constants (P388): never none,
+/// which the lag would divide by.
+pub const LAG: (u16, u16) = (10, 300);
+pub const LAG_STEP: u16 = 10;
+/// How many sliders a preset has, in [`Look::get`]'s order.
+pub const SLIDERS: usize = 6;
 
 impl Look {
     /// The disc's numbers.
-    pub const ORIGINAL: Look = Look { fov: 0, distance: 100, height: 100 };
+    pub const ORIGINAL: Look = Look { fov: 0, distance: 100, height: 100, angle: 0, look_lag: 100, pos_lag: 100 };
 
-    /// A seat's one set over every preset, as it frames `machine`'s.
+    /// A seat's one set over every preset, as it frames `machine`'s; the one set has no angle or lags.
     pub fn of(view: &CameraView, machine: Machine) -> Look {
         match machine {
             // A car's camera takes the bike's one set, as the helicopter's does (S149e, P264).
-            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter | Machine::Atv | Machine::MxvatvCar => Look { fov: view.fov, distance: view.distance, height: view.height },
-            Machine::Biplane => Look { fov: view.fov, distance: view.plane_distance, height: view.plane_height },
+            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter | Machine::Atv | Machine::MxvatvCar => {
+                Look { fov: view.fov, distance: view.distance, height: view.height, ..Look::ORIGINAL }
+            }
+            Machine::Biplane => Look { fov: view.fov, distance: view.plane_distance, height: view.plane_height, ..Look::ORIGINAL },
         }
     }
 
-    /// Slider `slider` (field of view, distance, height) as [`CameraView::get`] numbers it.
+    /// Slider `slider` (field of view, distance, height, angle, look lag, position lag) as a number:
+    /// degrees, or percent.
     pub fn get(&self, slider: usize) -> i32 {
         match slider {
             0 => self.fov as i32,
             1 => self.distance as i32,
-            _ => self.height as i32,
+            2 => self.height as i32,
+            3 => self.angle as i32,
+            4 => self.look_lag as i32,
+            _ => self.pos_lag as i32,
         }
     }
 
     fn set(&mut self, slider: usize, v: i32) {
         let share = |v: i32| v.clamp(CAMERA_SHARE.0 as i32, CAMERA_SHARE.1 as i32) as u16;
+        let lag = |v: i32| v.clamp(LAG.0 as i32, LAG.1 as i32) as u16;
         match slider {
             0 => self.fov = v.clamp(CAMERA_FOV.0 as i32, CAMERA_FOV.1 as i32) as i16,
             1 => self.distance = share(v),
-            _ => self.height = share(v),
+            2 => self.height = share(v),
+            3 => self.angle = v.clamp(ANGLE.0 as i32, ANGLE.1 as i32) as i16,
+            4 => self.look_lag = lag(v),
+            _ => self.pos_lag = lag(v),
+        }
+    }
+
+    /// Slider `slider`'s span, as its meter is drawn.
+    pub fn span(slider: usize) -> (i32, i32) {
+        match slider {
+            0 => (CAMERA_FOV.0 as i32, CAMERA_FOV.1 as i32),
+            1 | 2 => (CAMERA_SHARE.0 as i32, CAMERA_SHARE.1 as i32),
+            3 => (ANGLE.0 as i32, ANGLE.1 as i32),
+            _ => (LAG.0 as i32, LAG.1 as i32),
         }
     }
 
     /// Slider `slider` a step left or right, held at its ends; with neither, back to the disc's.
     pub fn step(&mut self, slider: usize, left: bool, right: bool) {
-        let step = if slider == 0 { 1 } else { super::CAMERA_STEP as i32 };
+        let step = match slider {
+            0 | 3 => 1,
+            4 | 5 => LAG_STEP as i32,
+            _ => super::CAMERA_STEP as i32,
+        };
         let v = self.get(slider);
         let to = match (left, right) {
             (true, _) => v - step,
@@ -69,7 +106,7 @@ impl Look {
         let v = self.get(slider);
         match slider {
             _ if v == Look::ORIGINAL.get(slider) => "Original".to_string(),
-            0 => format!("{v:+} deg"),
+            0 | 3 => format!("{v:+} deg"),
             _ => format!("{v}%"),
         }
     }
@@ -79,17 +116,32 @@ impl Look {
         (self.fov as f32, self.distance as f32 / 100.0, self.height as f32 / 100.0)
     }
 
-    fn text(&self) -> String {
-        format!("{} {} {}", self.fov, self.distance, self.height)
+    /// The rest of it as the shell frames a camera (P388): (degrees added to the pitch, look lag
+    /// share, position lag share).
+    pub fn tune(&self) -> (f32, f32, f32) {
+        (self.angle as f32, self.look_lag as f32 / 100.0, self.pos_lag as f32 / 100.0)
     }
 
+    /// Its numbers as `settings.txt` keeps them: the first three alone while the rest are the disc's,
+    /// as a file from before P388 has them.
+    fn text(&self) -> String {
+        let three = format!("{} {} {}", self.fov, self.distance, self.height);
+        match (self.angle, self.look_lag, self.pos_lag) == (0, 100, 100) {
+            true => three,
+            false => format!("{three} {} {} {}", self.angle, self.look_lag, self.pos_lag),
+        }
+    }
+
+    /// [`Look::text`] back, three numbers or all six, each held to its slider's span.
     fn parse(v: &str) -> Option<Look> {
         let n: Vec<i32> = v.split_whitespace().map(|w| w.parse::<i32>().ok()).collect::<Option<_>>()?;
-        let [fov, distance, height] = n[..] else { return None };
+        if n.len() != 3 && n.len() != SLIDERS {
+            return None;
+        }
         let mut l = Look::ORIGINAL;
-        l.set(0, fov);
-        l.set(1, distance);
-        l.set(2, height);
+        for (slider, v) in n.into_iter().enumerate() {
+            l.set(slider, v);
+        }
         Some(l)
     }
 }

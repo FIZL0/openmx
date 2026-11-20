@@ -23,7 +23,7 @@ const NEAR_CLIP: f32 = 2.4;
 
 /// The shipped default, as the Camera page's `CameraView::DEFAULT` frames the bike: the menu's
 /// numbers, which `tests/menu.rs` holds the page to.
-const DEFAULT: Framing = Framing { fov: 4.0, distance: 1.15, height: 1.10 };
+const DEFAULT: Framing = Framing { fov: 4.0, distance: 1.15, height: 1.10, ..Framing::ORIGINAL };
 
 /// The disc's free06 follow cameras, the way the shell reads them; `None` without the disc.
 fn disc_presets() -> Option<Vec<Preset>> {
@@ -316,7 +316,7 @@ fn page_values() -> Vec<(String, Framing, Framing)> {
             while v <= hi {
                 let mut n = base;
                 n[slider] = v;
-                let f = |d: i32, h: i32| Framing { fov: n[0] as f32, distance: d as f32 / 100.0, height: h as f32 / 100.0 };
+                let f = |d: i32, h: i32| Framing::of(n[0] as f32, d as f32 / 100.0, h as f32 / 100.0);
                 out.push((format!("{n:?}"), f(n[1], n[2]), f(n[3], n[4])));
                 v += step;
             }
@@ -421,7 +421,7 @@ fn a_change_mid_ride_eases_over() {
         }
         let default = if plane { [4, 120, 115] } else { [4, 115, 110] };
         walk.extend([default, [0, 100, 100], [20, 200, 50], [-10, 50, 200], [0, 100, 100]]);
-        let to = |v: [i32; 3]| Framing { fov: v[0] as f32, distance: v[1] as f32 / 100.0, height: v[2] as f32 / 100.0 };
+        let to = |v: [i32; 3]| Framing::of(v[0] as f32, v[1] as f32 / 100.0, v[2] as f32 / 100.0);
 
         let mut cam = shell_camera(presets.clone(), at);
         let mut ease = FovEase::default();

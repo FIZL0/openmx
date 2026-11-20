@@ -75,10 +75,13 @@ const CAMERAS: [(&str, &str); 5] = [
 ];
 
 /// One preset's sliders (P163), in [`cameras::Look::get`]'s order.
-const PRESET_CAMERAS: [(&str, &str); 3] = [
+const PRESET_CAMERAS: [(&str, &str); cameras::SLIDERS] = [
     ("Field of View", "How wide this preset's view is: the original's angle, opened or narrowed by this many degrees."),
     ("Distance", "How far behind its machine this preset sits."),
     ("Height", "How high above its machine this preset sits."),
+    ("Angle", "How steeply this preset looks down at its machine: the eye swung up or down by this many degrees, as far away."),
+    ("Look Lag", "How slowly this preset's aim follows its machine: lower keeps it dead on, higher lets it drift behind."),
+    ("Follow Lag", "How slowly this preset's eye follows its machine: lower keeps it tight, higher lets it swing wide and catch up."),
 ];
 
 /// What Music Plays offers, as `settings.txt`'s words; One Song is a song's id there.
@@ -1178,7 +1181,9 @@ impl Menu {
             Some(pick) => {
                 let look = self.camera_look(pick);
                 for (i, (label, about)) in PRESET_CAMERAS.iter().enumerate() {
-                    let mut r = Row::slider(Key::CameraOwn(i), label, look.label(i), meter(i, look.get(i)), about);
+                    let (lo, hi) = cameras::Look::span(i);
+                    let meter = (look.get(i) - lo) as f32 / (hi - lo) as f32;
+                    let mut r = Row::slider(Key::CameraOwn(i), label, look.label(i), meter, about);
                     r.note = Some("Cross puts it back to the original's.".into());
                     rows.push(r);
                 }

@@ -66,7 +66,7 @@ fn the_original_notch_is_the_files_presets() {
 #[test]
 fn distance_height_and_fov_reach_both_ends() {
     let disc = presets();
-    let f = Framing { fov: 5.0, distance: 1.5, height: 2.0 };
+    let f = Framing::of(5.0, 1.5, 2.0);
     let laid = untamed_seat_presets(&disc, f, &[], false);
     let (was, now) = (shot(disc.clone(), 0), shot(laid.clone(), 0));
     let ((wb, wa), (nb, na)) = (legs(&was), legs(&now));
@@ -87,7 +87,7 @@ fn distance_height_and_fov_reach_both_ends() {
 #[test]
 fn the_look_back_keeps_the_eye_in_front() {
     let disc = presets();
-    let f = Framing { fov: 3.0, distance: 1.2, height: 1.0 };
+    let f = Framing::of(3.0, 1.2, 1.0);
     let back = &untamed_seat_presets(&disc, f, &[], false)[1];
     // Still a look-back distance (the springs run its way round), 1.2 times as far in front.
     assert!(back.slow.follow_distance.0 < 0.0);
@@ -102,7 +102,7 @@ fn the_look_back_keeps_the_eye_in_front() {
 fn a_seats_own_presets_line_up_with_the_stand_ins() {
     let disc = presets();
     let stand_ins: Vec<_> = disc.iter().map(UntamedPreset::stand_in).collect();
-    let mine = Framing { fov: 0.0, distance: 2.0, height: 1.0 };
+    let mine = Framing::of(0.0, 2.0, 1.0);
     let own = [Own { base: "Race", name: "Mine", framing: mine }, Own { base: "Back", name: "Back", framing: mine }];
     let laid = untamed_seat_presets(&disc, Framing::ORIGINAL, &own, true);
     let race = seat_presets(&stand_ins, Framing::ORIGINAL, &own, true);
@@ -126,7 +126,7 @@ fn a_framing_change_eases_the_field_of_view() {
     let mut cam = UntamedFollow::new(disc.clone());
     let mut ease = FovEase::default();
     // Not run yet: it snaps, nothing to ease from.
-    untamed_reframe(&mut cam, untamed_seat_presets(&disc, Framing { fov: 10.0, distance: 1.0, height: 1.0 }, &[], false), 0, &mut ease);
+    untamed_reframe(&mut cam, untamed_seat_presets(&disc, Framing::of(10.0, 1.0, 1.0), &[], false), 0, &mut ease);
     assert_eq!(ease.offset, 0.0);
     let dt = F(1.0 / 60.0);
     let first = cam.update(dt, &rider, &mut Nothing);

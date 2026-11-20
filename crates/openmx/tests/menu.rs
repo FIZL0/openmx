@@ -563,10 +563,10 @@ fn the_settings_file_reads_back_as_it_was_written() {
             use menu::cameras::{Cycle, Look, Own, Seat};
             let mut c: [Seat; menu::SEATS_MAX] = Default::default();
             c[1].start = ["Freestyle Cam".into(), "Flight Cam 2".into()];
-            c[1].own.push(Own { machine: Machine::Bike, base: "Freestyle Cam".into(), name: "Freestyle Cam".into(), look: Look { fov: 3, distance: 130, height: 90 } });
-            c[1].own.push(Own { machine: Machine::Bike, base: "Slot Cam".into(), name: "Low Slot".into(), look: Look { fov: -2, distance: 60, height: 50 } });
+            c[1].own.push(Own { machine: Machine::Bike, base: "Freestyle Cam".into(), name: "Freestyle Cam".into(), look: Look { fov: 3, distance: 130, height: 90, ..Look::ORIGINAL } });
+            c[1].own.push(Own { machine: Machine::Bike, base: "Slot Cam".into(), name: "Low Slot".into(), look: Look { fov: -2, distance: 60, height: 50, ..Look::ORIGINAL } });
             c[2].cycle = Cycle::Mine;
-            c[2].own.push(Own { machine: Machine::Biplane, base: "Flight Cam 1".into(), name: "Far Plane".into(), look: Look { fov: 10, distance: 200, height: 150 } });
+            c[2].own.push(Own { machine: Machine::Biplane, base: "Flight Cam 1".into(), name: "Far Plane".into(), look: Look { fov: 10, distance: 200, height: 150, ..Look::ORIGINAL } });
             c
         },
         // The mods folder not read (MD2).
@@ -1235,11 +1235,81 @@ fn laid(m: &Menu, seat: usize, machine: Machine, disc: &[game_sim::camera::Prese
     let (fov, distance, height) = if machine == Machine::Bike { view.bike() } else { view.plane() };
     let own: Vec<chase::Own> = menu::cameras::laid(&set.own, set.cycle, machine)
         .map(|o| {
-            let (fov, distance, height) = o.look.framing();
-            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+            let ((fov, distance, height), (angle, look_lag, pos_lag)) = (o.look.framing(), o.look.tune());
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height, angle, look_lag, pos_lag } }
         })
         .collect();
-    chase::seat_presets(disc, chase::Framing { fov, distance, height }, &own, set.cycle == menu::cameras::Cycle::Mine)
+    chase::seat_presets(disc, chase::Framing::of(fov, distance, height), &own, set.cycle == menu::cameras::Cycle::Mine)
+}
+
+/// P388: a disc preset's Angle, Look Lag and Follow Lag on the Camera page start on the disc's
+/// (`Original`, the preset the file's), and each moved changes that preset's own `cpresets.ini`
+/// field the camera reads — `AngleX`, `LookFilters`, `PosFilters` — and no other preset's; the
+/// numbers save in `settings.txt` and load back, and a preset with only the first three moved
+/// writes its line as a file from before P388 has it.
+#[test]
+fn a_presets_angle_and_lags_override_its_file_and_save() {
+    use menu::cameras::Look;
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    let bike = camera_file("cpresets.ini");
+    m.camera_names = [cycling(&bike), Vec::new()];
+    m.settings.cameras[0] = menu::CameraView::ORIGINAL;
+    let disc = laid(&m, 0, Machine::Bike, &bike);
+    assert_eq!(disc, bike, "at the original's every preset is the file's");
+
+    settings_at(&mut m, &mut r, "Camera");
+    down_to(&mut m, &mut r, Key::CameraPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_some_and(|p| p.name == "Race Cam 1"));
+    let pick = m.camera_picked().unwrap();
+    for i in 3..menu::cameras::SLIDERS {
+        assert_eq!(m.page().iter().find(|r| r.key == Key::CameraOwn(i)).unwrap().value, "Original", "slider {i}");
+    }
+    // Angle five degrees down, the look lag half, the follow lag one and a half times.
+    down_to(&mut m, &mut r, Key::CameraOwn(3));
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Left);
+    }
+    down_to(&mut m, &mut r, Key::CameraOwn(4));
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Left);
+    }
+    down_to(&mut m, &mut r, Key::CameraOwn(5));
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    let look = Look { angle: -5, look_lag: 50, pos_lag: 150, ..Look::ORIGINAL };
+    assert_eq!(m.camera_look(&pick), look);
+    assert_eq!(m.page().iter().find(|r| r.key == Key::CameraOwn(3)).unwrap().value, "-5 deg");
+
+    let now = laid(&m, 0, Machine::Bike, &bike);
+    let at = bike.iter().position(|p| p.name == "Race Cam 1").unwrap();
+    let (was, got) = (&bike[at], &now[at]);
+    assert!((got.angle_x.0 - (was.angle_x.0 - 5f32.to_radians())).abs() < 1e-5, "{} vs {}", got.angle_x.0, was.angle_x.0);
+    assert!((got.following_distance.0 - was.following_distance.0).abs() < 1e-3, "the distance stays");
+    for k in 0..3 {
+        assert_eq!(got.look_filters.0[k], was.look_filters.0[k] * 0.5, "look lag {k}");
+        assert_eq!(got.pos_filters.0[k], was.pos_filters.0[k] * 1.5, "position lag {k}");
+    }
+    assert_eq!((got.fov, got.look_ahead_distance, got.camera_swing), (was.fov, was.look_ahead_distance, was.camera_swing), "the rest is the file's");
+    for (i, (p, q)) in bike.iter().zip(&now).enumerate().filter(|(i, _)| *i != at) {
+        assert_eq!(p, q, "preset {i} is the file's");
+    }
+
+    // Saved, and back.
+    let text = m.settings.text();
+    assert!(text.contains("camera_preset = 1 | bike | Race Cam 1 | Race Cam 1 | 0 100 100 -5 50 150\n"), "{text}");
+    let back = menu::Settings::parse(&text);
+    assert_eq!(back.camera_sets[0].look(&back.cameras[0], Machine::Bike, "Race Cam 1"), look);
+    // Only the first three moved: the old three-number line, read back the same.
+    m.settings.camera_sets[0].set_look(Machine::Bike, "Race Cam 1", Look { distance: 120, ..Look::ORIGINAL });
+    let text = m.settings.text();
+    assert!(text.contains("| Race Cam 1 | 0 120 100\n"), "{text}");
+    let back = menu::Settings::parse(&text);
+    assert_eq!(back.camera_sets[0].look(&back.cameras[0], Machine::Bike, "Race Cam 1"), Look { distance: 120, ..Look::ORIGINAL });
+    // Out of span: held to it.
+    let back = menu::Settings::parse("camera_preset = 1 | bike | Race Cam 1 | Race Cam 1 | 0 100 100 90 0 999\n");
+    assert_eq!(back.camera_sets[0].look(&back.cameras[0], Machine::Bike, "Race Cam 1"), Look { angle: 30, look_lag: 10, pos_lag: 300, ..Look::ORIGINAL });
 }
 
 /// The shell's follow camera on `presets`, on `start` as the shell starts it (`--camera`'s).
@@ -1315,7 +1385,7 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
     let (bike, plane) = (camera_file("cpresets.ini"), camera_file("biplanecpresets.ini"));
     m.camera_names = [cycling(&bike), cycling(&plane)];
     let before = laid(&m, 0, Machine::Bike, &bike);
-    assert_eq!(before, chase::framed(&bike, chase::Framing { fov: 4.0, distance: 1.15, height: 1.10 }), "no presets of the seat's own: P82's");
+    assert_eq!(before, chase::framed(&bike, chase::Framing::of(4.0, 1.15, 1.10)), "no presets of the seat's own: P82's");
 
     settings_at(&mut m, &mut r, "Camera");
     // The Preset row: All Presets, the disc's that cycle (the bike's, then the biplane's).
@@ -1352,7 +1422,7 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
     for _ in 0..3 {
         tap(&mut m, &mut r, Control::Right);
     }
-    let look = Look { fov: CameraView::DEFAULT.fov + 3, distance: CameraView::DEFAULT.distance - 20, height: CameraView::DEFAULT.height - 10 };
+    let look = Look { fov: CameraView::DEFAULT.fov + 3, distance: CameraView::DEFAULT.distance - 20, height: CameraView::DEFAULT.height - 10, ..Look::ORIGINAL };
     assert_eq!(m.camera_look(&pick), look);
     assert_eq!(m.settings.camera_sets[0].own_of(Machine::Bike, "Slot Cam"), None, "Slot Cam has no numbers of its own");
     assert_eq!(m.settings.camera_sets[1], Default::default(), "2P's are their own");
@@ -1362,12 +1432,12 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
     assert_eq!(now[..bike.len()], before[..], "the disc's presets are unchanged");
     let slot = bike.iter().find(|p| p.name == "Slot Cam").unwrap();
     let (fov, distance, height) = look.framing();
-    let mut want = chase::framed(std::slice::from_ref(slot), chase::Framing { fov, distance, height }).remove(0);
+    let mut want = chase::framed(std::slice::from_ref(slot), chase::Framing::of(fov, distance, height)).remove(0);
     want.name = "Low".into();
     assert_eq!(now.len(), bike.len() + 1);
     assert_eq!(now[bike.len()], want);
     assert!(now[bike.len()].following_distance.0 < before.iter().find(|p| p.name == "Slot Cam").unwrap().following_distance.0);
-    assert_eq!(laid(&m, 0, Machine::Biplane, &plane), chase::framed(&plane, chase::Framing { fov: 4.0, distance: 1.20, height: 1.15 }), "the plane has none");
+    assert_eq!(laid(&m, 0, Machine::Biplane, &plane), chase::framed(&plane, chase::Framing::of(4.0, 1.20, 1.15)), "the plane has none");
     // The camera button: the disc's, then Low, round to the start.
     let mut cam = follow_on(now.clone(), "Race Cam 1");
     let mut want: Vec<String> = cycling(&bike)[1..].to_vec();
@@ -1385,7 +1455,7 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
     assert_eq!(cam.cam.preset().name, "Low");
     assert_eq!(walk(&mut cam), ["Low"]);
     // The plane, with none of 1P's own, keeps the disc's cycle under Mine Only.
-    assert_eq!(laid(&m, 0, Machine::Biplane, &plane), chase::framed(&plane, chase::Framing { fov: 4.0, distance: 1.20, height: 1.15 }));
+    assert_eq!(laid(&m, 0, Machine::Biplane, &plane), chase::framed(&plane, chase::Framing::of(4.0, 1.20, 1.15)));
     // Disc's: Low is out, and the list is the disc's again.
     tap_until(&mut m, &mut r, Control::Right, |m| m.settings.camera_sets[0].cycle == Cycle::Disc);
     assert_eq!(laid(&m, 0, Machine::Bike, &bike), before);
@@ -9963,16 +10033,16 @@ fn the_helicopter_camera_is_kept_and_framed_per_seat() {
 
     // A preset of the seat's own on it joins the helicopter's camera button, and the bike's does not
     // see it.
-    let kept = m.settings.camera_sets[2].save_custom(Machine::Helicopter, &first, "High", Look { fov: 5, distance: 150, height: 160 }, &m.heli_camera_names.clone());
+    let kept = m.settings.camera_sets[2].save_custom(Machine::Helicopter, &first, "High", Look { fov: 5, distance: 150, height: 160, ..Look::ORIGINAL }, &m.heli_camera_names.clone());
     let set = &m.settings.camera_sets[2];
     let own: Vec<chase::Own> = menu::cameras::laid(&set.own, set.cycle, Machine::Helicopter)
         .map(|o| {
             let (fov, distance, height) = o.look.framing();
-            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing::of(fov, distance, height) }
         })
         .collect();
     let (fov, distance, height) = m.settings.cameras[2].bike();
-    let mut cam = follow_on(chase::seat_presets(&heli, chase::Framing { fov, distance, height }, &own, false), &first);
+    let mut cam = follow_on(chase::seat_presets(&heli, chase::Framing::of(fov, distance, height), &own, false), &first);
     assert!(walk(&mut cam).contains(&kept), "{kept}");
     assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Bike).next().is_none());
 }
@@ -10058,18 +10128,18 @@ fn the_cars_presets_are_on_the_camera_page() {
     assert!(set.own_of(Machine::Baja, &first).is_none() && set.own_of(Machine::Bike, &first).is_none());
 
     // Saved as the seat's own, it joins the buggy's cycle and no one else's.
-    let kept = m.settings.camera_sets[seat].save_custom(Machine::Buggy, &first, "Far", Look { fov: 0, distance: 180, height: 120 }, &m.car_camera_names[0].1.clone());
+    let kept = m.settings.camera_sets[seat].save_custom(Machine::Buggy, &first, "Far", Look { fov: 0, distance: 180, height: 120, ..Look::ORIGINAL }, &m.car_camera_names[0].1.clone());
     let set = &m.settings.camera_sets[seat];
     assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Bike).next().is_none());
     assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Baja).next().is_none());
     let own: Vec<chase::Own> = menu::cameras::laid(&set.own, set.cycle, Machine::Buggy)
         .map(|o| {
             let (fov, distance, height) = o.look.framing();
-            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing::of(fov, distance, height) }
         })
         .collect();
     let (fov, distance, height) = m.settings.cameras[seat].bike();
-    let mut cam = follow_on(chase::seat_presets(&buggy, chase::Framing { fov, distance, height }, &own, false), &first);
+    let mut cam = follow_on(chase::seat_presets(&buggy, chase::Framing::of(fov, distance, height), &own, false), &first);
     assert!(walk(&mut cam).contains(&kept), "{kept}");
     let labels: Vec<String> = m.camera_choices().iter().map(|p| p.label()).collect();
     assert_eq!(labels.last(), Some(&format!("Buggy: {kept} (Mine)")), "{labels:?}");

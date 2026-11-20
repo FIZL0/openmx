@@ -1031,10 +1031,23 @@ pub struct Framing {
     pub distance: f32,
     /// The eye's height above the target point, as a share of the preset's.
     pub height: f32,
+    /// Degrees added to the preset's pitch (`AngleX`) after the two shares, the eye swung up or down
+    /// about the target point at the distance they make (P388).
+    pub angle: f32,
+    /// The look-at lags' time constants (`LookFilters`), as a share of the preset's (P388): under 1
+    /// the aim keeps up sooner, over 1 it trails further.
+    pub look_lag: f32,
+    /// The position lags' (`PosFilters`), as a share of the preset's (P388).
+    pub pos_lag: f32,
 }
 
 impl Framing {
-    pub const ORIGINAL: Framing = Framing { fov: 0.0, distance: 1.0, height: 1.0 };
+    pub const ORIGINAL: Framing = Framing { fov: 0.0, distance: 1.0, height: 1.0, angle: 0.0, look_lag: 1.0, pos_lag: 1.0 };
+
+    /// The first three as P82's sliders have them, the rest the original's.
+    pub fn of(fov: f32, distance: f32, height: f32) -> Framing {
+        Framing { fov, distance, height, ..Framing::ORIGINAL }
+    }
 
     pub fn is_original(&self) -> bool {
         *self == Framing::ORIGINAL
@@ -1048,7 +1061,9 @@ impl Framing {
 /// (times its sine). The two shares scale those two legs apart, and the preset's distance and pitch
 /// are made again from the new legs, so the slider for one does not move the other. The two distance
 /// limits and the reverse ramp's distance scale with the distance; the field of view and its limits
-/// move by the offset. Everything else — the lags, the look-ahead, the swings — is the preset's.
+/// move by the offset. The angle then swings the pitch (held short of straight up or down), and the
+/// lags' time constants take their shares. Everything else — the look-ahead, the swings — is the
+/// preset's.
 pub fn framed(presets: &[game_sim::camera::Preset], framing: Framing) -> Vec<game_sim::camera::Preset> {
     if framing.is_original() {
         return presets.to_vec();
@@ -1073,6 +1088,13 @@ pub fn framed(presets: &[game_sim::camera::Preset], framing: Framing) -> Vec<gam
             p.fov = F(p.fov.0 + framing.fov);
             p.min_fov = F(p.min_fov.0 + framing.fov);
             p.max_fov = F(p.max_fov.0 + framing.fov);
+            if framing.angle != 0.0 {
+                let limit = 89f32.to_radians();
+                p.angle_x = F((p.angle_x.0 + framing.angle.to_radians()).clamp(-limit, limit));
+            }
+            let lag = |v: Vf, k: f32| Vf([v.0[0] * k, v.0[1] * k, v.0[2] * k, v.0[3]]);
+            p.look_filters = lag(p.look_filters, framing.look_lag);
+            p.pos_filters = lag(p.pos_filters, framing.pos_lag);
             p
         })
         .collect()
