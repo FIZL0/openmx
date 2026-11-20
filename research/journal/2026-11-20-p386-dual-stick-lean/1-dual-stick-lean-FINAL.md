@@ -1,4 +1,4 @@
-# 1 — dual stick lean (PART)
+# 1 — dual stick lean (FINAL)
 
 Task P386. 2026-11-20.
 
@@ -60,4 +60,8 @@ only. Nothing in the sim changes; the remap only moves bytes.
 
 ## Next
 
--
+- None for this task. When context/mxa is back on the machine (MD259), compare MXA's AxSteer and
+  LookBackDualStick with the mapping here.
+- Spec review (fresh agent, diff + brief only): removed `Sticks`' unused word helpers. Kept the keyboard,
+  flier and extra-tricks limits — each stops dual sticks from breaking a control there. No handshake test:
+  no handshake field carries the setting, and the remap leaves online's bytes alone (tested).

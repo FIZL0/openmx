@@ -594,20 +594,6 @@ pub enum Sticks {
 }
 
 impl Sticks {
-    pub const ALL: [Sticks; 2] = [Sticks::Single, Sticks::Dual];
-
-    /// The word `settings.txt` spells it with.
-    pub fn word(self) -> &'static str {
-        match self {
-            Sticks::Single => "single",
-            Sticks::Dual => "dual",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Sticks> {
-        Sticks::ALL.into_iter().find(|s| s.word() == w.trim())
-    }
-
     /// The report the ride is handed for `report`, already through the seat's [`Scheme::ride`]:
     /// `look_back` is the control the seat's table reads its look-back command off, as the ride
     /// sees it. Under [`Sticks::Single`], or for a pad that is not there, the report as it is.
@@ -3793,8 +3779,6 @@ pub(crate) mod tests {
         assert_eq!(out.0[20..], r.0[20..], "online's bytes untouched");
         // With no look-back to give (a ride whose L2 is a trick), R3 is let go and gives nothing.
         assert_eq!(Sticks::Dual.ride(r, None).buttons(), Control::Cross.mask());
-        assert_eq!(Sticks::from_word("dual"), Some(Sticks::Dual));
-        assert_eq!(Sticks::from_word(Sticks::Single.word()), Some(Sticks::Single));
     }
 
     #[test]
