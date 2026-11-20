@@ -586,6 +586,59 @@ pub fn mxvatv_phy_ini(ini: &crate::phy::Ini, curve: &crate::camera::CurveTable) 
     phy.collisions.friction = part.friction;
     phy.collisions.body_friction = part.body_friction;
     phy.collisions.surface_friction = part.surface_friction;
+    mxvatv_mass(&mut phy, ini, curve);
     phy.handling = Handling::MxVsAtv;
     phy
+}
+
+/// MD63e — the rest of MX vs. ATV's `[Mass Properties]` over what MX Unleashed's reader made of the
+/// moved keys: the words the ride reads from the part reader ([`mass::Part`]) where it differs from
+/// [`crate::phy::Phy::read`].
+///
+/// * **The chassis' mass** is `Weight * 0.0310559` (default `Weight` 500), not `Weight / 32.2` on a
+///   default of 0. The tire reader scales the four wheel springs by the same part mass (MD122's
+///   loader), so they are worked out again on it; the collision springs are scaled by it in the ride.
+/// * **The collision springs** default to `SpringStiffness` 10, `SpringDamping` 0.7,
+///   `MaxPenetration` 0.25 (MX Unleashed's 0), and a `-1` body key is the spring's.
+/// * **The four moment scales** default to ones (MX Unleashed's `-1, -1, -1` stands for "no mask"),
+///   the body's two the others only for an explicit `-1, -1, -1`.
+/// * **The flags** (`AngularImpulseEnabled`, `BodyAngularImpulseEnabled`,
+///   `CheckForHighSpeedCollisions`, the last off by default) parse as the game's ([`mass::flag`]).
+/// * **`CollisionWeight`** defaults to the part's `Weight` (500); a mass at or under 0 is not written
+///   (the record keeps its zero).
+/// * **The sweep's facing** is the cosine of `HighSpeedMinCollisionAngle` as radians, default 0.
+///
+/// `Inertia`, `CofG`, `WreckCofG`, `BalanceCofG`, the travels and `YawRateLimit` are the bike
+/// loader's re-read ([`mass::Bike`]), the same keys and defaults as MX Unleashed's reader. `Radius`,
+/// the dampings and `InertiaScale` are the body's, which the ride's chassis does not take from the file.
+fn mxvatv_mass(phy: &mut crate::phy::Phy, ini: &crate::phy::Ini, curve: &crate::camera::CurveTable) {
+    let s = ini.section("Mass Properties");
+    // The box only moves the inertias, which the bike's loader replaces (the body's) or the ride
+    // does not read (the record's).
+    let part = mass::Part::read(&s, Vf::new(1.0, 1.0, 1.0, 1.0), curve);
+    let r = &part.record;
+    let weight = s.float_or("Weight", F(500.0));
+    let m = part.body.mass;
+    phy.mass.weight = weight;
+    phy.mass.mass = m;
+    phy.mv.front_spring_when_stopped = crate::phy::spring_rate(phy.front.spring_when_stopped, m);
+    phy.mv.front_spring = crate::phy::spring_rate(phy.front.spring, m);
+    phy.mv.rear_spring_when_stopped = crate::phy::spring_rate(phy.rear.spring_when_stopped, m);
+    phy.mv.rear_spring = crate::phy::spring_rate(phy.rear.spring, m);
+    let c = &mut phy.collisions;
+    let [pen, k, d, _, _, rest, b_pen, b_k, b_d, _, _, b_rest] = r.springs;
+    (c.max_compression, c.spring, c.damping, c.restitution) = (pen, k, d, rest);
+    (c.body_max_compression, c.body_spring, c.body_damping, c.body_restitution) = (b_pen, b_k, b_d, b_rest);
+    [c.spring_moment_scale, c.friction_moment_scale, c.body_spring_moment_scale, c.body_friction_moment_scale] =
+        r.moment_scales;
+    c.angular_impulse_enabled = r.angular_impulse[0] != 0;
+    c.body_angular_impulse_enabled = r.angular_impulse[1] != 0;
+    c.check_for_high_speed_collisions = r.check_high_speed != 0;
+    c.high_speed_ray_offset = r.ray_offset;
+    c.high_speed_ray_speed_scale = r.ray_speed_scale;
+    c.high_speed_unpenetration_distance = r.unpenetration;
+    c.high_speed_min_collision_angle = r.facing;
+    c.collision_weight = s.float_or("CollisionWeight", weight);
+    c.collision_mass = r.mass.map_or(F::ZERO, |(cm, _)| cm);
+    c.collision_cofg_offset = r.cofg_offset;
 }
