@@ -86,6 +86,11 @@ pub struct PropSet {
     /// does not wrap. The step wraps a body that rolls past one ([`Collection::close_seams`]). Not
     /// state: the world's, read again every pass.
     pub seams: Option<([bool; 2], [F; 2])>,
+    /// How many of the hulls a collide pass is handed ([`PropSet::search_in_among`]'s `wrecks`) are
+    /// the parked cars', after the wreck bikes' (S486b, [`crate::prop_wreck::parked_on_node`]): the
+    /// props' rays meet them, but they cast no rays of their own on the props' node. Not state: set
+    /// and put back around one pass.
+    pub parked: usize,
 }
 
 impl PropSet {
@@ -228,6 +233,7 @@ impl PropSet {
             bike_frame: None,
             across: Vec::new(),
             seams: None,
+            parked: 0,
         };
         (set, said)
     }
@@ -313,7 +319,8 @@ impl PropSet {
         if self.tables.is_none() {
             return (Vec::new(), strikes);
         }
-        let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
+        let own = wrecks.len() - self.parked.min(wrecks.len());
+        let rayed = crate::prop_wreck::wreck_rays_first(self, &wrecks[..own]);
         self.stamp_filed();
         self.heard_afresh();
         for k in 0..self.collections.len() {
@@ -357,7 +364,8 @@ impl PropSet {
             return (out, strikes);
         }
         self.seams = world.area().filter(|_| world.wrap() != [false, false]).map(|a| (world.wrap(), [a.width, a.depth]));
-        let rayed = crate::prop_wreck::wreck_rays_first_in(self, wrecks, &*world);
+        let own = wrecks.len() - self.parked.min(wrecks.len());
+        let rayed = crate::prop_wreck::wreck_rays_first_in(self, &wrecks[..own], &*world);
         self.stamp_filed();
         self.heard_afresh();
         // The collections that searched, in order: each puts its listeners on after its search.

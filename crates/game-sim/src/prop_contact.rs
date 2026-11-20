@@ -618,9 +618,15 @@ impl crate::Sim {
         hulls: &[crate::prop_wreck::Hull],
         framed: &dyn Fn(usize) -> bool,
     ) {
-        let wrecks = crate::prop_wreck::hulls_on_node(hulls);
-        let (props, strikes) = self.traffic.props.strike_in_among(&mut strike, dt, world, movers, &wrecks);
+        // And the parked cars' hulls after them, as the pass had them (S486b).
+        let first = 2 * self.players();
+        let crate::Sim { traffic, parked_cars, .. } = self;
+        let mut wrecks = crate::prop_wreck::hulls_on_node(hulls);
+        wrecks.extend(crate::prop_wreck::parked_on_node(parked_cars, first));
+        let (props, mut strikes) = traffic.props.strike_in_among(&mut strike, dt, world, movers, &wrecks);
         drop(wrecks);
+        let cars = strikes.split_off(hulls.len().min(strikes.len()));
+        crate::prop_wreck::wake_parked(parked_cars, &cars);
         bump.props = props;
         bump.contacts = crate::mover_contact::merged(std::mem::take(&mut bump.contacts), strike.contacts);
         self.late_struck(hulls, strikes, framed);
@@ -636,7 +642,12 @@ impl crate::Sim {
         }
         let mut bump = self.bump(0, Vec::new());
         let sides = self.wreck_sides();
-        let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
+        // And after them the parked cars' bodies (S486b, [`crate::prop_wreck::parked_on_node`]).
+        let mut wrecks: Vec<(Collider, Body, F)> = sides
+            .iter()
+            .map(|s| s.unwrap_or_default())
+            .chain(self.parked_cars.iter().map(|p| (p.collision.collider, p.machine.body, p.collision.mass)))
+            .collect();
         // A striker that struck across a seam is seen by the bodies it struck, one width over (MD167,
         // a wreck bike's since MD167a).
         let moved = across_moved(std::mem::take(&mut self.traffic.props.across), &mut bump.vehicles, &mut wrecks);
@@ -652,8 +663,12 @@ impl crate::Sim {
         drop(others);
         drop(bodies);
         across_back(moved, &mut wrecks);
+        let parked = wrecks.split_off(sides.len());
         let pushed: Vec<_> = sides.iter().zip(wrecks).map(|(s, w)| s.map(|_| w)).collect();
         self.wrecks_pushed(&pushed);
+        for (p, (collider, body, mass)) in self.parked_cars.iter_mut().zip(parked) {
+            p.pushed(&rider_contact::Flown { seat: 0, collider, body, mass, quad: None });
+        }
     }
 }
 

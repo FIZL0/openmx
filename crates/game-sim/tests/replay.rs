@@ -14329,6 +14329,79 @@ fn without_the_parked_truck_the_bike_rides_through_its_spot() {
     assert!(port.iter().all(|p| !p.wrecked), "the bike wrecked with nothing parked");
 }
 
+/// S485's ride with free09's barrel (the props' `SH_Barrel` collection) put `gap` ft along `x` of
+/// the parked truck's middle and 3 ft along `z` (in line with a wheel: at the middle it rolls under
+/// the body), 2 ft over the ground on the first tick, and rolled at the truck at 25 ft/s from the
+/// fourth (`None`: the barrel left where free09 has it). Per tick: S485's tick and the barrel's place.
+fn barrel_at_the_truck(gap: Option<f32>) -> Option<Vec<(S485Tick, Vf)>> {
+    // The ride's traffic has no knockable props: free09's, loaded as tests/prop_wreck.rs loads them.
+    let mut props = {
+        let mut disc = game_render::disc::Disc::open_configured().ok()?;
+        let res = disc.res("Tracks\\free09.res").ok()?;
+        let toy = game_sim::phy::Ini::parse_bytes(&res.read_suffix("free09.toy").ok()?);
+        let scene = Scene::parse(&res.read_suffix("free09.scn").ok()?).ok()?;
+        let area = game_sim::biplane::Area::new(F(3.0), F(3.0), F(9.0), F(9.0));
+        let (set, said) = game_sim::prop_set::PropSet::load(&toy, "Tracks\\Free09\\", &scene.models, &mut |p| res.read(p).ok(), &mut |p| res.read_suffix(p).ok(), Some(area));
+        assert!(said.is_empty(), "free09's props load whole: {said:?}");
+        Some(set)
+    };
+    let mut barrel = Vec::new();
+    let port = s485_ride_with(24, true, |t, sim, world| {
+        if let Some(set) = props.take() {
+            sim.traffic.props = set;
+        }
+        let set = &mut sim.traffic.props;
+        let c = set.names.iter().position(|n| n.eq_ignore_ascii_case("SH_Barrel")).unwrap_or_else(|| panic!("free09's barrel in {:?}", set.names));
+        if let (1, Some(gap)) = (t, gap) {
+            let mid = sim.parked_cars[0].machine.body.position;
+            let (ground, _) = world.ground(Vf::new(mid.x() + gap, mid.y(), mid.z() + 3.0, 1.0));
+            let at = Vf::new(mid.x() + gap, ground.y() + 2.0, mid.z() + 3.0, 1.0);
+            set.struck(c, 0);
+            let b = &mut set.collections[c].bones[0].body;
+            (b.position, b.last_position) = (at, at);
+            let o = &mut set.collections[c].objects[0];
+            o.node.origin = at;
+            if let Some(col) = o.collision.as_mut() {
+                col.record.node.origin = at;
+                col.nearby.built = false;
+                col.nearby.nearby.found.clear();
+            }
+        }
+        if let (4, Some(gap)) = (t, gap) {
+            set.collections[c].bones[0].body.velocity = Vf::new(-25.0 * gap.signum(), 0.0, 0.0, 0.0);
+        }
+        barrel.push(set.collections[c].bones[0].body.position);
+    })?;
+    Some(port.into_iter().zip(barrel).collect())
+}
+
+/// **S486b: free09's barrel rolled into the parked truck wakes it and pushes it**: the barrel's rays
+/// meet the truck's hull on the props' node, the strike wakes the truck and the barrel's resolve gives
+/// it the barrel's way (`+x`), long before S485's bike reaches it (tick 56 or so). Left alone the
+/// truck sleeps where it is parked. Before S486b the barrel rolled through the truck.
+#[test]
+fn a_barrel_rolled_into_the_parked_truck_wakes_and_pushes_it() {
+    let Some(ticks) = barrel_at_the_truck(Some(-14.0)) else { return };
+    let still = barrel_at_the_truck(None).unwrap();
+    for (t, ((p, barrel), (s, _))) in ticks.iter().zip(&still).enumerate() {
+        println!("tick {}: truck awake {} at {:?} vel {:?} (alone at {:?}), barrel {:?}", t + 1, p.awake, p.truck.0, p.truck_vel.0, s.truck.0, barrel.0);
+    }
+    assert!(still.iter().all(|(s, _)| !s.awake && s.truck == still[0].0.truck), "the truck left alone stirred");
+    let woken = ticks.iter().position(|(p, _)| p.awake).expect("the barrel woke the truck") + 1;
+    let push = ticks.iter().map(|(p, _)| p.truck_vel.x()).fold(f32::MIN, f32::max);
+    let moved = ticks.last().unwrap().0.truck - still.last().unwrap().0.truck;
+    let reach = ticks.iter().map(|(_, b)| b.x()).fold(f32::MIN, f32::max);
+    println!("woken at tick {woken}, pushed to {push} ft/s along x, rests {:?} ft off, the barrel reached x {reach}", moved.0);
+    assert!(push > 0.5, "the truck pushed only to {push} ft/s along the barrel's way");
+    // It rocks on its springs and settles near where it stood, a little off.
+    assert!(moved.0 != [0.0; 4], "the truck rests where it was parked");
+    // The barrel bounces back off the wheel, short of the truck's middle.
+    assert!(reach < still[0].0.truck.x() - 5.0, "the barrel reached x {reach}");
+    assert!(ticks.last().unwrap().1.x() < reach - 2.0, "the barrel did not bounce back");
+    let (back, _) = ticks.last().unwrap();
+    assert!(!back.awake, "the truck still awake at tick {}", ticks.len());
+}
+
 /// **S486: a resync carries the parked cars.** S485's ride, its state sent while the struck truck is
 /// awake and again once it sleeps where it slid, decoded onto the same ride's state from before the
 /// strike: the same hash (the truck's machine, collision object and resting place are in its
