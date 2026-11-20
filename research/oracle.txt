@@ -14501,3 +14501,9 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   context/capture/c43/strike.csv, frames 1204..1663 (84 rows past the strike), research/c43/c43.toml.
 #   Checked: a second run of the tape (try6.csv) equals it on every lane but the pads, stamps and the two
 #   entry columns (re-defined between the runs) on all 460 rows.
+#   S471 (journal 3-s471-…-FINAL.md): the rows are read a tick late from row 1 (C43's 1205 = C14's 1206,
+#   two ticks from c14-kiowa), the tick after t ticks reads row t-1's pad_a; row 1613 is a stale read of 1612
+#   (equal but stamps and pad_b; its tick ran). Walk order the replay holds bit-exact: the heli's search
+#   (blades, then the props after the world), the blades' search, the woken prop's late search and its rays
+#   on kiowaf.col, the heli's world step (its resolve pushing the egg), then the props' step with the heli as
+#   striker. kiowa_capture.rs a_tail_strike_on_a_prop_replays_bit_exact: 1205..=1663, both records too.

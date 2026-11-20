@@ -2010,6 +2010,155 @@ impl Collision {
         (movers, records.map(|r| r.contacts).collect())
     }
 
+    /// **[`Collision::search_knocking`] among the knockable props too** (S471): the thrown blades
+    /// offered as [`Collision::search_knocking`] offers them, then every prop of `props` with a
+    /// collidable mesh after them, by its distance where it stands now, as the car's
+    /// [`Collision::search_props`] has them. The record's ray probe leaves out one category only, not
+    /// the props' (C14a, B34c), so its rays meet any prop's `f.col`. A blade's entry names its blade,
+    /// an entry on prop `k` (in [`crate::flight::knocks`]' order) [`crate::flight::KNOCK_FROM`]` + k`.
+    /// Answers the movers, the blades' mirrors as [`Collision::search_knocking`] gives them, and the
+    /// mirrors each prop's record took, naming no one yet, for [`Collision::strike_props`]. Without
+    /// props, [`Collision::search_knocking`] exactly.
+    #[allow(clippy::type_complexity)]
+    pub fn search_among(
+        &mut self,
+        body: &mut Body,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        blades: &[(usize, Knock<'_>, F)],
+        props: Option<&crate::prop_set::PropSet>,
+    ) -> (Vec<crate::contact::Mover>, Vec<(usize, Vec<crate::contact::Contact>)>, Vec<Vec<crate::contact::Contact>>) {
+        use crate::contact_search::{self, Search};
+        use crate::flight_search::{self, Scene};
+        let Some(set) = props else {
+            let (movers, struck) = self.search_knocking(body, world, dt, blades);
+            return (movers, struck, Vec::new());
+        };
+        let shapes = std::sync::Arc::clone(&set.shapes);
+        let posed = crate::flight::knocks(set, &shapes);
+        let rays = self.rays.clone();
+        self.record.node = crate::wreck_bike::node_of(body);
+        contact_search::clear(&mut self.record, Some(&mut *body));
+        let (field, near, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
+        let bounds = field.as_deref().map(field_box);
+        let node = &self.record.node;
+        let (centre, _) = flight_search::reach(&rays, &[node.rows[0], node.rows[1], node.rows[2], node.origin]);
+        let knocks: Vec<Knock<'_>> = blades.iter().map(|&(_, n, _)| n).chain(posed.iter().map(|p| p.knock)).collect();
+        // A prop's distance as [`Scene::knocking`] reckons it, where it stands now.
+        let distances: Vec<F> = blades
+            .iter()
+            .map(|&(_, _, d)| d)
+            .chain(posed.iter().map(|p| {
+                let v = centre.sub(p.knock.centre);
+                F(ps2_float::vu::dot3(v.0, v.0)).sqrt() - p.knock.radius
+            }))
+            .collect();
+        let mut scene = Scene::flown(near, trees, None, bounds, &rays, &self.record.node, &mut self.nearby)
+            .sweep_of(crate::prop_world::sweep_categories())
+            .knocking_gathered(&knocks, 1, &distances);
+        let mut records = vec![std::mem::take(&mut self.record)];
+        records.extend(knocks.iter().map(|n| contact_search::Record { capacity: n.capacity, ..contact_search::Record::default() }));
+        contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
+        let movers = Search::movers(&scene);
+        drop(scene);
+        let mut records = records.into_iter();
+        self.record = records.next().unwrap_or_default();
+        let n = blades.len();
+        for e in &mut self.record.contacts {
+            if let Some(i) = e.other.and_then(|o| o.checked_sub(1)) {
+                e.other = Some(if i < n { blades[i].0 } else { crate::flight::KNOCK_FROM + i - n });
+            }
+        }
+        let mut rest: Vec<Vec<crate::contact::Contact>> = records.map(|r| r.contacts).collect();
+        let knocked = rest.split_off(n);
+        let struck = rest
+            .into_iter()
+            .zip(blades)
+            .filter(|(r, _)| !r.is_empty())
+            .map(|(r, &(k, _, _))| (k, r.into_iter().map(|m| crate::contact::Contact { other: Some(0), ..m }).collect()))
+            .collect();
+        (movers, struck, knocked)
+    }
+
+    /// **The props [`Collision::search_among`] struck** (S471), as the car's strike has them
+    /// ([`crate::car::Machine::step_props_in`]): each woken and its mirrors (`knocked`) filed at the
+    /// head of its list naming the helicopter as [`KiowaProps::me`], in the order the helicopter's
+    /// entries first name them; with `late` (dt, the world and the props' collide pass's movers,
+    /// [`crate::traffic::Traffic::frame_held`]) a prop the strike files searches at once
+    /// ([`crate::prop_set::PropSet::strike_in`]), as the original's node walk reaches it at the list's
+    /// end behind the helicopter; without, it is heard ([`crate::prop_set::PropSet::strike`]). Then the
+    /// props' rays on the hull ([`KiowaProps::hull`], `kiowaf.col`, where the record's node stands it:
+    /// [`crate::prop_wreck::struck_on`]), their mirrors after the record's entries as far as its room
+    /// goes. The helicopter's entries and the hull's mirrors are renamed to the struck bodies' places
+    /// after the `first` others of its resolve (the blades', [`Blades::with_others_among`]). Answers
+    /// the struck bodies, for the resolve and then [`crate::prop_set::PropSet::pushed`].
+    pub fn strike_props(
+        &mut self,
+        props: &mut KiowaProps<'_>,
+        first: usize,
+        knocked: Vec<Vec<crate::contact::Contact>>,
+        late: Option<(F, &mut dyn crate::world::World, &mut crate::prop_set::PropMovers)>,
+    ) -> Vec<crate::prop_contact::Pushed> {
+        use crate::flight::KNOCK_FROM;
+        let me = props.me;
+        let shapes = std::sync::Arc::clone(&props.set.shapes);
+        let posed = crate::flight::knocks(props.set, &shapes);
+        let mut order: Vec<usize> = Vec::new();
+        for k in self.record.contacts.iter().filter_map(|e| e.other).filter_map(|o| o.checked_sub(KNOCK_FROM)) {
+            if !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        for (k, m) in knocked.iter().enumerate() {
+            if !m.is_empty() && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        let struck = order
+            .iter()
+            .map(|&k| {
+                let mirrors = knocked[k].iter().map(|e| crate::contact::Contact { other: Some(me), ..*e }).collect();
+                (posed[k].collection, posed[k].object, mirrors)
+            })
+            .collect();
+        let mut strike = crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() };
+        let mut bodies = match late {
+            Some((dt, world, movers)) => {
+                strike.by = Some((me, first));
+                props.set.strike_in(&mut strike, dt, world, movers)
+            }
+            None => props.set.strike(&strike),
+        };
+        for e in &mut self.record.contacts {
+            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
+                e.other = order.iter().position(|&j| j == k).map(|i| first + i);
+            }
+        }
+        let Some(hull) = props.hull else { return bodies };
+        let node = &self.record.node;
+        let at = [node.rows[0], node.rows[1], node.rows[2], node.origin];
+        let on = crate::prop_wreck::struck_on(props.set, hull, at, COLLIDABLE, self.collider.collides_with, me);
+        if on.is_empty() {
+            return bodies;
+        }
+        let places: Vec<usize> = on
+            .struck
+            .iter()
+            .map(|p| match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
+                Some(i) => i,
+                None => {
+                    bodies.push(p.clone());
+                    bodies.len() - 1
+                }
+            })
+            .collect();
+        let r = &mut self.record;
+        (r.touching, r.on_object, r.touching_other) = (true, true, true);
+        let room = r.capacity.saturating_sub(r.contacts.len());
+        r.contacts.extend(on.mirrors.iter().map(|e| crate::contact::Contact { other: e.other.map(|i| first + places[i]), ..*e }).take(room));
+        bodies
+    }
+
     /// The body wrapper's post: the nearby list gathered again round the ray probe placed where the body
     /// now stands ([`crate::flight_search::refresh_flown`]).
     pub fn refresh(&mut self, body: &Body, world: &mut dyn crate::world::World) {
@@ -2071,6 +2220,15 @@ impl Collision {
     pub fn ignored(&self) -> bool {
         self.record.struck.is_some_and(|o| crate::flight_search::category(o) & CRASH_MASK != 0)
     }
+}
+
+/// **The knockable props a helicopter flies among** (S471, [`Collision::strike_props`]): the set, the
+/// index the props' step gives the helicopter among its strikers, which their mirrors name, and its
+/// hull for the props' own rays (`kiowaf.col`, [`KIOWA_HULL`], [`Blades::hull`]), if the disc has it.
+pub struct KiowaProps<'a> {
+    pub set: &'a mut crate::prop_set::PropSet,
+    pub me: usize,
+    pub hull: Option<&'a crate::track::Mesh>,
 }
 
 /// A heightfield's box on the ground plane, (x, z) low and high.
@@ -3041,6 +3199,30 @@ impl Blades {
             .zip(weighed.iter_mut())
             .filter_map(|(o, w)| Some(crate::contact::Other { collider: &mut o.collision.as_mut()?.collider, side: crate::contact::Side::Body(w) }))
             .collect();
+        f(&mut others)
+    }
+
+    /// How many other sides [`Blades::with_others`] hands the resolve: the blades with a collision
+    /// object. The struck props' bodies come after them ([`Collision::strike_props`]'s `first`).
+    pub fn others(&self) -> usize {
+        self.set.objects.iter().filter(|o| o.collision.is_some()).count()
+    }
+
+    /// **[`Blades::with_others`] with the struck props' bodies after the blades** (S471): each of
+    /// `props` (what [`Collision::strike_props`] answered) as a body side, as the car's resolve meets
+    /// them ([`crate::car::Machine::step_props_in`]).
+    pub fn with_others_among<R>(&mut self, props: &mut [crate::prop_contact::Pushed], f: impl FnOnce(&mut [crate::contact::Other<'_>]) -> R) -> R {
+        let set = &mut self.set;
+        let mut weighed: Vec<crate::contact::Weighed<'_>> =
+            set.bones.iter_mut().map(|b| crate::contact::Weighed { body: &mut b.body, mass: b.mass }).collect();
+        let mut others: Vec<crate::contact::Other<'_>> = set
+            .objects
+            .iter_mut()
+            .zip(weighed.iter_mut())
+            .filter_map(|(o, w)| Some(crate::contact::Other { collider: &mut o.collision.as_mut()?.collider, side: crate::contact::Side::Body(w) }))
+            .collect();
+        let mut bodies: Vec<_> = props.iter_mut().map(|p| p.weighed()).collect();
+        others.extend(bodies.iter_mut().map(|(collider, body)| crate::contact::Other { collider: &mut **collider, side: crate::contact::Side::Body(body) }));
         f(&mut others)
     }
 
