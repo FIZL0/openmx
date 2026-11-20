@@ -1,0 +1,521 @@
+# c44-plane-bike.toml — written by research/c44/spec.py (C44): biplane.p2m2's plane parked in an AI
+# rider's way on free06, the three AI bikes and the plane, one row a tick.
+
+[watch]
+name        = "c44-plane-bike"
+description = "the parked biplane and free06's three AI bikes: chassis, levers, collision lists"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "crash"
+addr = "0xc44a40 + 0x3b0"
+type = "u32"
+
+[[field]]
+name = "crash_time"
+addr = "0xc44a40 + 0x3bc"
+type = "f32"
+
+[[field]]
+name = "plane_contacts"
+addr = "0xc44a40 + 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "plane_pos"
+addr = "0xc44a40 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "plane_vel"
+addr = "0xc44a40 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "plane_rot"
+addr = "0xc44a40 + 0x160 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "plane_spin"
+addr = "0xc44a40 + 0x160 -> 0x90"
+type = "f32x4"
+
+[[field]]
+name = "plane_body"
+addr = "0xc44a40 + 0x160 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "a0_ch_centre"
+addr = "0x18f7290 + 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_quat"
+addr = "0x18f7290 + 0x7a4 -> 0x1a0"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_vel"
+addr = "0x18f7290 + 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_spin"
+addr = "0x18f7290 + 0x7a4 -> 0x280"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_rates"
+addr = "0x18f7290 + 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_shock"
+addr = "0x18f7290 + 0x7a4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_twist"
+addr = "0x18f7290 + 0x7a4 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "a0_ch_xform"
+addr = "0x18f7290 + 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "a0_ch_raw"
+addr = "0x18f7290 + 0x7a4 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "a0_on_ground"
+addr = "0x18f7290 + 0x574"
+type = "u32"
+
+[[field]]
+name = "a0_wreck_reason"
+addr = "0x18f7290 + 0x748"
+type = "u32"
+
+[[field]]
+name = "a0_clock"
+addr = "0x18f7290 + 0x13fc"
+type = "f32"
+
+[[field]]
+name = "a0_steer"
+addr = "0x18f7290 + 0x628"
+type = "f32"
+
+[[field]]
+name = "a0_lean"
+addr = "0x18f7290 + 0x62c"
+type = "f32"
+
+[[field]]
+name = "a0_gas"
+addr = "0x18f7290 + 0x63c"
+type = "f32"
+
+[[field]]
+name = "a0_brake"
+addr = "0x18f7290 + 0x640"
+type = "f32"
+
+[[field]]
+name = "a0_reverse"
+addr = "0x18f7290 + 0x648"
+type = "f32"
+
+[[field]]
+name = "a0_rec_count"
+addr = "0x18f7290 + 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "a0_rec_struck"
+addr = "0x18f7290 + 0x7d0 -> 0x40"
+type = "u32"
+
+[[array]]
+name   = "a0_c"
+addr   = "0x18f7290 + 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0x0
+type = "u32"
+
+[[array.field]]
+name = "from"
+off  = 0x10
+type = "f32x3"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "arm"
+off  = 0x50
+type = "f32x3"
+
+[[array.field]]
+name = "other_arm"
+off  = 0x60
+type = "f32x3"
+
+[[array.field]]
+name = "surface"
+off  = 0x70
+type = "u32"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"
+off  = 0x78
+type = "u32"
+
+[[field]]
+name = "a1_ch_centre"
+addr = "0x19a44b0 + 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_quat"
+addr = "0x19a44b0 + 0x7a4 -> 0x1a0"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_vel"
+addr = "0x19a44b0 + 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_spin"
+addr = "0x19a44b0 + 0x7a4 -> 0x280"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_rates"
+addr = "0x19a44b0 + 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_shock"
+addr = "0x19a44b0 + 0x7a4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_twist"
+addr = "0x19a44b0 + 0x7a4 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "a1_ch_xform"
+addr = "0x19a44b0 + 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "a1_ch_raw"
+addr = "0x19a44b0 + 0x7a4 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "a1_on_ground"
+addr = "0x19a44b0 + 0x574"
+type = "u32"
+
+[[field]]
+name = "a1_wreck_reason"
+addr = "0x19a44b0 + 0x748"
+type = "u32"
+
+[[field]]
+name = "a1_clock"
+addr = "0x19a44b0 + 0x13fc"
+type = "f32"
+
+[[field]]
+name = "a1_steer"
+addr = "0x19a44b0 + 0x628"
+type = "f32"
+
+[[field]]
+name = "a1_lean"
+addr = "0x19a44b0 + 0x62c"
+type = "f32"
+
+[[field]]
+name = "a1_gas"
+addr = "0x19a44b0 + 0x63c"
+type = "f32"
+
+[[field]]
+name = "a1_brake"
+addr = "0x19a44b0 + 0x640"
+type = "f32"
+
+[[field]]
+name = "a1_reverse"
+addr = "0x19a44b0 + 0x648"
+type = "f32"
+
+[[field]]
+name = "a1_rec_count"
+addr = "0x19a44b0 + 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "a1_rec_struck"
+addr = "0x19a44b0 + 0x7d0 -> 0x40"
+type = "u32"
+
+[[array]]
+name   = "a1_c"
+addr   = "0x19a44b0 + 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0x0
+type = "u32"
+
+[[array.field]]
+name = "from"
+off  = 0x10
+type = "f32x3"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "arm"
+off  = 0x50
+type = "f32x3"
+
+[[array.field]]
+name = "other_arm"
+off  = 0x60
+type = "f32x3"
+
+[[array.field]]
+name = "surface"
+off  = 0x70
+type = "u32"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"
+off  = 0x78
+type = "u32"
+
+[[field]]
+name = "a3_ch_centre"
+addr = "0x1881b10 + 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_quat"
+addr = "0x1881b10 + 0x7a4 -> 0x1a0"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_vel"
+addr = "0x1881b10 + 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_spin"
+addr = "0x1881b10 + 0x7a4 -> 0x280"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_rates"
+addr = "0x1881b10 + 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_shock"
+addr = "0x1881b10 + 0x7a4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_twist"
+addr = "0x1881b10 + 0x7a4 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "a3_ch_xform"
+addr = "0x1881b10 + 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+[[field]]
+name = "a3_ch_raw"
+addr = "0x1881b10 + 0x7a4 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "a3_on_ground"
+addr = "0x1881b10 + 0x574"
+type = "u32"
+
+[[field]]
+name = "a3_wreck_reason"
+addr = "0x1881b10 + 0x748"
+type = "u32"
+
+[[field]]
+name = "a3_clock"
+addr = "0x1881b10 + 0x13fc"
+type = "f32"
+
+[[field]]
+name = "a3_steer"
+addr = "0x1881b10 + 0x628"
+type = "f32"
+
+[[field]]
+name = "a3_lean"
+addr = "0x1881b10 + 0x62c"
+type = "f32"
+
+[[field]]
+name = "a3_gas"
+addr = "0x1881b10 + 0x63c"
+type = "f32"
+
+[[field]]
+name = "a3_brake"
+addr = "0x1881b10 + 0x640"
+type = "f32"
+
+[[field]]
+name = "a3_reverse"
+addr = "0x1881b10 + 0x648"
+type = "f32"
+
+[[field]]
+name = "a3_rec_count"
+addr = "0x1881b10 + 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "a3_rec_struck"
+addr = "0x1881b10 + 0x7d0 -> 0x40"
+type = "u32"
+
+[[array]]
+name   = "a3_c"
+addr   = "0x1881b10 + 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0x0
+type = "u32"
+
+[[array.field]]
+name = "from"
+off  = 0x10
+type = "f32x3"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "arm"
+off  = 0x50
+type = "f32x3"
+
+[[array.field]]
+name = "other_arm"
+off  = 0x60
+type = "f32x3"
+
+[[array.field]]
+name = "surface"
+off  = 0x70
+type = "u32"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"
+off  = 0x78
+type = "u32"
+

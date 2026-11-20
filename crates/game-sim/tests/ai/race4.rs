@@ -346,6 +346,23 @@ pub(crate) fn c33_bike(ee: &Ee, r: u32, phy: &Phy, name: &str, col: &Arc<BikeCol
     bike
 }
 
+/// C44: [`c33_bike`] for a human's rider, whose body is not at `+0xdb4` (it is at `+0x64`), so its
+/// band is not checked.
+pub(crate) fn c44_human_bike(ee: &Ee, r: u32, phy: &Phy, name: &str, col: &Arc<BikeCol>) -> Bike {
+    let im = Image { ee, rider: r };
+    let c = im.at(0x7a4);
+    let mut bike = Bike::new(phy, im.mounts(), im.vf(c + 0x60), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
+    bike.no_start_line();
+    bike.carries_bike_col(Arc::clone(col));
+    bike.fifty = track::fifty_reach(name);
+    im.chassis(&mut bike.ride);
+    im.wheel(0, &mut bike.ride.front);
+    im.wheel(1, &mut bike.ride.rear);
+    im.rest(&mut bike.ride);
+    bike.body_rates = game_render::vehicle::params();
+    bike
+}
+
 /// The AI brain `b` on rider `r`, read out of RAM as S323's lane test reads recording2's.
 fn c33_pilot(ee: &Ee, lists: &super::sim::S12eLists, b: u32, r: u32) -> Pilot {
     let filler = ai::spawn(&mut Rng::from_seed(0), 0, None, 2);
