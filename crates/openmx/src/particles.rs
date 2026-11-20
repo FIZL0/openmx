@@ -223,6 +223,13 @@ pub struct Emt {
     /// `RandomMin`/`MaxTimeOn`/`Off`; mode 3's `TimedTimeOn` and `TimedTimeOff` the two most.
     /// What a mode does not read stays 0.
     pub times: [f32; 4],
+    /// `UseViewDependentCull` (on unless the file says `F`) and its `FarCullDistance` and
+    /// `DirectionalCullDistance`, the constructor's 800 and 200 where the file leaves them out (S420):
+    /// what the Sim's emitter culls by ([`game_sim::dust::Cull`]).
+    pub cull: Option<(f32, f32)>,
+    /// `UseVUParticles` (S420): the emitter takes the original's other emit path, which draws on the
+    /// shared generator as the plain one does ([`game_sim::dust::Emitter::new`]).
+    pub vu: bool,
 }
 
 impl Default for Emt {
@@ -266,6 +273,8 @@ impl Default for Emt {
             mode: 0,
             delay: 0.0,
             times: [0.0; 4],
+            cull: Some((800.0, 200.0)),
+            vu: false,
         }
     }
 }
@@ -348,6 +357,11 @@ impl Emt {
                     _ => [0.0; 4],
                 }
             },
+            cull: find("UseViewDependentCull").is_none_or(ini::switch).then(|| {
+                let (far, directional) = d.cull.unwrap_or((800.0, 200.0));
+                (number("FarCullDistance", far), number("DirectionalCullDistance", directional))
+            }),
+            vu: flag("UseVUParticles"),
         }
     }
 }
@@ -1147,6 +1161,11 @@ pub struct PlaneFrame {
     /// The vehicle's further collision models, model `k` at `k − 1` (V114: the Kiowa's four
     /// wrecked blades). A model missing here touches nothing, so its entries are off.
     pub models: Vec<ModelFrame>,
+    /// The draws each entry's emitter made in the Sim's dust this tick, by entry (S420, [`sim_rider`]):
+    /// where it is given, an emitter on a node (generic, exhaust, spray) emits on a frame its Sim
+    /// twin drew and not on one it did not, in place of the speed gate and the switch here. `None`
+    /// (a ride with no race) keeps them.
+    pub sim_draws: Option<Vec<u8>>,
 }
 
 /// One further collision model's contacts this frame, as a `CollisionModel` entry with its index
@@ -1512,6 +1531,23 @@ impl PlaneFx {
                         entry.lit = entry.gate.is_on();
                         continue;
                     }
+                    // S420: a race's Sim runs this emitter's switch and speed gate on the shared
+                    // generator; it emits here on the frames its twin drew, shaped as above.
+                    if let Some(drew) = plane.sim_draws.as_ref().map(|d| d.get(index).is_some_and(|&n| n > 0)) {
+                        entry.lit = on && node.is_some();
+                        match node {
+                            Some((_, m)) if drew => {
+                                let at = m.point(v3(0.0, 0.0, 0.0));
+                                let velocity = entry.emt.velocity;
+                                let gate = std::mem::replace(&mut entry.emt.min_speed, f32::NEG_INFINITY);
+                                source.emit_over(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
+                                entry.emt.min_speed = gate;
+                            }
+                            Some((_, m)) => source.last = Some(m.point(v3(0.0, 0.0, 0.0))),
+                            None => source.off(),
+                        }
+                        continue;
+                    }
                     let lit = entry.lit;
                     entry.lit = on && node.is_some();
                     match node {
@@ -1638,6 +1674,54 @@ impl PlaneFx {
             .map(|(i, e)| (e.name.as_str(), self.particles.iter().filter(|p| p.emitter == i).count()))
             .collect()
     }
+}
+
+/// **A racer's dust for the Sim** (S420): `fx`'s entries as `game_sim::dust` runs them, one Sim
+/// entry for each of `fx`'s, in its order, so [`PlaneFrame::sim_draws`] lines up with
+/// [`PlaneFx::entries`]. The list's `TireTrack`s, which `fx` leaves out, are the Sim's tracks
+/// (V135) and draw nothing here.
+///
+/// - **Each entry** keeps its type's keys (the exhaust's `MaxSpeed`, the spray's
+///   `SideForceThreshold`), its tyre (`AttachedToTire`), its `Disable`, and for a collision model or
+///   a sphere entry its zones, `none` as 0xff. A tire dust or a prop wash (no bike's list has one)
+///   draws nothing, nor does an entry on a node `world` does not find.
+/// - **Each emitter** keeps its `.emt`'s `MinimumEmissionSpeed` and view cull. Its place is fixed in
+///   the chassis' frame: where `world` says its node is with the bike at `bike`, the Sim's transform
+///   of the same ride. The tyres' nodes ride the swing arm and the fork, which the Sim's own rigs
+///   (`dust::RearNode`, `FrontNode`) follow only off an image; held at the spawn's pose they move a
+///   few hundredths of a foot off it, against speed gates of 1 to 5 ft/s.
+pub fn sim_rider(fx: &PlaneFx, world: impl Fn(&str) -> Option<ps2_float::Vf>, bike: &game_sim::math::Mat4) -> game_sim::dust::RiderDust {
+    use game_sim::dust::{self, Place};
+    use ps2_float::F;
+    let zones = |e: &Entry| -> [u8; 16] {
+        core::array::from_fn(|z| match e.zones.get(z) {
+            Some(Zone::Off) => 0xff,
+            _ => z as u8,
+        })
+    };
+    let entries = fx
+        .entries
+        .iter()
+        .map(|e| {
+            let kind = match &e.kind {
+                Kind::Generic => dust::Kind::Generic,
+                Kind::Exhaust { max_speed } => dust::Kind::Exhaust { max_speed: F(*max_speed) },
+                Kind::Spray(keys) => dust::Kind::Spray { threshold: F(keys.side_threshold), clock: F(0.0) },
+                Kind::CollisionModel => dust::Kind::Collision { zones: zones(e) },
+                Kind::Constraint { mask } => dust::Kind::Spheres { mask: *mask, zones: zones(e) },
+                Kind::Dust(_) | Kind::HelicopterDust { .. } => dust::Kind::Quiet,
+            };
+            let at = e.node.as_deref().and_then(&world);
+            // An entry whose node the bike does not have is not built (free09's left exhaust on the
+            // YZ250: C33's riders carry one exhaust entry): it draws nothing.
+            let kind = if e.node.is_some() && at.is_none() { dust::Kind::Quiet } else { kind };
+            let place = at.and_then(|p| dust::place_on(bike, p)).unwrap_or(ps2_float::Vf([0.0, 0.0, 0.0, 1.0]));
+            let cull = e.file.cull.map(|(far, directional)| dust::Cull { far: F(far), directional: F(directional) });
+            let emitter = dust::Emitter::new(F(e.file.min_speed), Place::Chassis(place), cull, at.unwrap_or(bike.0[3]));
+            dust::Entry::new(kind, e.tire, e.disable as u8, emitter)
+        })
+        .collect();
+    dust::RiderDust { entries, ..dust::RiderDust::default() }
 }
 
 /// The track's own emitters (V45): the `.toy`'s `[ParticleEmitterN]` — nat08's camp fires and

@@ -8307,6 +8307,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("tire tracks: the race lays {} players' rows", riders.len());
             sim.tracks = Some(Box::new(game_sim::tire_track::Tracks { riders }));
         }
+        // S420: and their emitters draw on it, every player's off the track's list (the AI's own file
+        // is the same), each emitter fixed where its node sits on the first seat's rig at the grid.
+        if let (Some(fx), Some(rig)) = (&bike_fx_list, rigs.first()) {
+            let riders: Vec<_> = (0..sim.players())
+                .map(|i| {
+                    let rider = sim.rider_of(i);
+                    let nodes = bike_fx_frame(fx, rider, rig, &assets).nodes;
+                    let world = |name: &str| {
+                        let (_, m) = nodes.iter().find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+                        let p = m.point(v3(0.0, 0.0, 0.0));
+                        Some(Vf([p.x, p.y, p.z, 1.0]))
+                    };
+                    particles::sim_rider(fx, world, &rider.ride.transform())
+                })
+                .collect();
+            let built = riders.first().map_or(0, |r| r.entries.iter().filter(|e| e.kind != game_sim::dust::Kind::Quiet).count());
+            println!("bike: particles: the race's Sim draws {} players' emitters, {built} of {} entries built", riders.len(), fx.entries.len());
+            sim.dust = Some(Box::new(game_sim::dust::Dust { riders, view: None }));
+        }
     }
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -11379,11 +11398,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             bike_fx.resize_with(world.seats.len(), || list.clone());
             let place = &mut world.place;
             for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
-                let frame = match seat.garage.up {
+                let mut frame = match seat.garage.up {
                     Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets),
                     _ => particles::PlaneFrame::default(),
                 };
-                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+                // S420: a race's emitters emit when the Sim's drew.
+                frame.sim_draws = seat.sim.dust.as_deref().and_then(|d| d.riders.first()).map(|r| r.entries.iter().map(|e| e.draws).collect());                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
         // The Kiowas' (V114): a frame for each seat flying one, off its flight after the tick. A seat

@@ -81,6 +81,15 @@
 //!   stale point, so the first frame of a wreck far from the last one emits nothing. The camera is
 //!   the shell's ([`Dust::view`]); with none it is the bike's point. The emitter pass's own entries
 //!   (exhaust, generic, spray) read the same answer after their just-on test (S477).
+//!
+//! # The shell's races (S420)
+//!
+//! A race the shell loads builds every player's entries off the track's `mxparticles.dat`
+//! (`openmx/src/particles.rs`'s `sim_rider`, [`Entry::new`], [`Emitter::new`]): each entry off, with
+//! its `.emt`'s `MinimumEmissionSpeed` and view cull, and its emitter at [`Place::Chassis`], where its
+//! node sits on the bike at the grid. An entry on a node the bike lacks is not built (free09's left
+//! exhaust: C33's riders carry one) and is [`Kind::Quiet`]. The shell's emitters then place particles
+//! on the frames their twins here drew.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -390,6 +399,14 @@ pub struct View {
 }
 
 impl Emitter {
+    /// **An emitter as the load builds it** (S420): off, at `at` for both points, never culled yet.
+    /// `min_speed` is the `.emt`'s `MinimumEmissionSpeed` and `cull` its view cull. An `.emt` that
+    /// sets `UseVUParticles` (`+0x23c`) takes the other emit path (`0x001512b0`), which draws twice a
+    /// frame as the plain one does (C33's entries 9 and 10), so nothing here tells the two apart.
+    pub fn new(min_speed: F, place: Place, cull: Option<Cull>, at: Vf) -> Emitter {
+        Emitter { on: false, just_on: false, min_speed, place, pos: at, prev: at, cull, culled: false }
+    }
+
     /// **The view test** (S422), once a frame after the emitters have run: an emitter with a cull is
     /// culled when its point is farther than `far` from the camera, or behind it (its offset
     /// against the forward row below zero) and farther than `directional`.
@@ -502,6 +519,12 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// **An entry as the load builds it** (S420): not live, its spray clock run down, its emitter off.
+    /// The manager's first frame switches it on where its `Disable` allows.
+    pub fn new(kind: Kind, tyre: Option<usize>, disable: u8, emitter: Emitter) -> Entry {
+        Entry { kind, tyre, disable, live: false, zone_off: false, emitter, draws: 0 }
+    }
+
     fn enable(&mut self) {
         self.live = true;
         if !self.zone_off {
