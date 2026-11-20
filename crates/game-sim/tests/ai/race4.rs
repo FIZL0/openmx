@@ -105,10 +105,10 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// B42: the main bone is set with the last step's rest, and ridden in the frame ai0's parts stay
 /// within 0.0066 ft through 134; the foot dust draws on 132 with the original's (T9a).
 /// T9a: this replay poses each body in the frame, before its riding step, and draws its chassis after
-/// it, whose grips are the holds that step rides (the first step's too, off a fresh chassis, not the
-/// image's holds). The generator now agrees through 172 (from 133; it parts at 173) and ai2 through
+/// it, whose grips are the holds that step rides (the first step's too, not the image's holds). The generator now agrees through 172 (from 133; it parts at 173) and ai2 through
 /// 280 (from 279); ai0, ai1 and the human do not move. Ridden so, ai0's foot dust draws on 132 with
-/// the original's, as `C33_DUST_THROUGH` holds.
+/// the original's, as `C33_DUST_THROUGH` holds. R56: the chassis starts on the image's pose
+/// (`c33_chassis_seed`), not fresh; none of these move.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 280, 172];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -459,20 +459,24 @@ const S490_BONES_WITHIN: f32 = 0.01;
 /// The last tick the in-frame run is held to: past the foot dust's 132 and the foot ball's lift
 /// after 133. Before B42 ai0's foot ball (bone 17) was 0.02 ft low at 130 and touched a tick early,
 /// its foot dust drawing on 131; now it draws on 132 with the original's. Held through 400, the
-/// bones stay within [`S490_BONES_WITHIN`] until ai0's drawn holds jump 0.09 ft at 198 (R56).
+/// bones stay within [`S490_BONES_WITHIN`] through 320 (ai0's ride parts at 319); its drawn holds
+/// jump at the take-off at 198 too (R56, [`S490_HOLDS_APART`]).
 const S490_THROUGH: u64 = 134;
 
 /// T9: how far each rider's drawn chassis holds ([`c33_hold`], drawn in the frame after its body)
 /// may be from the original's request after the frame ([`c33_frame_holds`]), in feet: the root's
 /// place and the four points, in the bike's frame. The run still rides the original's. 0.0041 is
-/// the worst seen outside [`S490_HOLDS_APART`].
+/// the worst seen outside [`S490_HOLDS_APART`]. Held from the first row (R56): the chassis starts on
+/// the image's pose ([`c33_chassis_seed`]); fresh, every rider's root was 0.07 ft off at 4 and closed
+/// over the restart's fade to 16, the first restart fading out of the bind pose.
 const S490_HOLDS_WITHIN: f32 = 0.006;
-/// The first tick the drawn holds are held to. The chassis starts fresh, not from the image, and
-/// every rider's root is 0.07 ft off at 4, closing about 0.005 ft a tick until 16.
-const S490_HOLDS_FROM: u64 = 17;
 /// The ticks each of [`C33_RIDERS`]' drawn holds are let go: both an AI rider's grips (the bars) jump
 /// from the original's at one tick (ai0 0.13 ft at 64, ai1 0.09 at 63, ai2 0.03 at 54) and close
 /// linearly over about ten; the feet and the root stay within 0.003 ft. The human's never part.
+/// R56: each is a take-off. Ours snaps, the original's ramps: the chassis' restart into the air row
+/// fades from its shown pose, kept before the drives, so without the bars' steering turn, and in the
+/// air nothing turns them; the original's fades from the turned bars. Writing the turn into the
+/// shown pose closes every one (B45, which empties this).
 const S490_HOLDS_APART: [std::ops::RangeInclusive<u64>; 4] = [64..=73, 63..=72, 1..=0, 54..=62];
 
 /// The original's request after the frame, per rider of [`C33_RIDERS`]: the root node and the four
@@ -569,6 +573,9 @@ fn c33_replay(in_frame: bool) {
     // T9: each rider's bike as the shell draws it, whose grips are the holds of every step after the
     // first (that one rides the image's).
     let mut chassis: Vec<_> = (0..C33_RIDERS.len()).map(|k| bikes.chassis(S363_C33_MODELS[c33_player(&ee, k)])).collect();
+    for (k, ch) in chassis.iter_mut().enumerate() {
+        c33_chassis_seed(&ee, C33_RIDERS[k].0, ch);
+    }
     // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
     sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
     // S448: the tyre tracks, as the image holds them, and each one's entry in its rider's manager.
@@ -660,7 +667,7 @@ fn c33_replay(in_frame: bool) {
                     let gap = |a: Vf, b: Vf| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt();
                     let off = [gap(ours.root.0[3], theirs.root.0[3]), gap(ours.hands[0], theirs.hands[0]), gap(ours.hands[1], theirs.hands[1]), gap(ours.feet[0], theirs.feet[0]), gap(ours.feet[1], theirs.feet[1])];
                     let off = off.into_iter().fold(0.0f32, f32::max);
-                    let held = row.frame >= S490_HOLDS_FROM && !S490_HOLDS_APART[by_player[p]].contains(&row.frame);
+                    let held = !S490_HOLDS_APART[by_player[p]].contains(&row.frame);
                     assert!(!held || off <= S490_HOLDS_WITHIN, "tick {}: {}'s drawn holds are {off} ft from the original's", row.frame, C33_NAMES[by_player[p]]);
                     if held && off > worst_hold.0 {
                         worst_hold = (off, row.frame, by_player[p]);
@@ -1046,6 +1053,30 @@ fn c33_hold(rider: &mut game_sim::rider::Rider, chassis: &mut game_render::vehic
         hands: [point(hand_l), point(hand_r)],
         feet: [point(foot_l), point(foot_r)],
     }));
+}
+
+/// R56: rider `r`'s chassis as its image last drew it: the pose of the nodes the vehicle holds
+/// (`Bike` `+0x964`, `Handlebars` `+0x968`, `SwingArm` `+0x96c`, `Shocks` `+0x970`), each one's local
+/// at `+0x40`, as the pose the chassis last showed, and posed by the motion driver (C33's riders are
+/// in the air). So the first restart fades out of the image's pose, as the original's does, and not
+/// out of the bind pose: fresh, every rider's drawn root was 0.07 ft off at 4, closing to 16.
+fn c33_chassis_seed(ee: &Ee, r: u32, chassis: &mut game_render::vehicle::Chassis) {
+    let sk = &chassis.stance.set.skeleton;
+    let mut shown = game_render::skin::Pose::new(sk.bones.len());
+    for (name, at) in [(game_render::vehicle::ROOT, 0x964), (game_render::vehicle::BARS, 0x968), (game_render::vehicle::SWINGARM, 0x96c), (game_render::vehicle::SHOCKS, 0x970)] {
+        let j = sk.find(name).unwrap_or_else(|| panic!("the chassis lacks {name}"));
+        let m: [[f32; 4]; 4] = [0, 0x10, 0x20, 0x30].map(|row| [0, 4, 8, 12].map(|c| ee.f32_at(ee.u32_at(r + at) + 0x40 + row + c)));
+        // The rotation's quaternion, as `skin::rotation` builds the matrix from one.
+        let w = (1.0 + m[0][0] + m[1][1] + m[2][2]).sqrt() * 0.5;
+        assert!(w > 0.5, "rider {r:#x}: {name} turned past a quarter turn");
+        let k = 0.25 / w;
+        shown.rot[j] = [(m[1][2] - m[2][1]) * k, (m[2][0] - m[0][2]) * k, (m[0][1] - m[1][0]) * k, w];
+        shown.pos[j] = [m[3][0], m[3][1], m[3][2], 1.0];
+        shown.turned[j] = true;
+        shown.moved[j] = true;
+    }
+    chassis.shown = shown;
+    chassis.driven = true;
 }
 
 /// S488: the nodes the riding ragdoll drew, kept on the render body as the shell's `ai_ride` keeps
