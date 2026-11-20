@@ -789,6 +789,15 @@ impl Chassis {
             if let Some(m) = local.get_mut(j) {
                 set_rotation(m, about(shape.fork, d.steer_angle));
             }
+            // B45: the original's drive writes the node's local, so a restart (a take-off) fades
+            // from the turned bars. Kept only in `locals`, the turn was gone from the pose a restart
+            // fades from, and the grips snapped toward straight on leaving the ground.
+            if j < self.shown.rot.len() {
+                let (s, c) = (d.steer_angle * 0.5).sin_cos();
+                let a = shape.fork.scale(s);
+                self.shown.rot[j] = [a.x, a.y, a.z, c];
+                self.shown.turned[j] = true;
+            }
         }
         // 2 — the fork's slide. The original works the target out in the `Bike` frame — the rest
         // position, plus the compression up the fork, plus a fixed nudge — and the node's parent is

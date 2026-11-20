@@ -100,7 +100,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// T9: each rider's chassis is drawn after its body as the shell's `ai_ride` draws it, and its grips
 /// are the next step's holds (`c33_hold`). The marks do not move. Drawn in the frame, those holds
 /// are the original's within 0.004 ft but for the chassis' fresh start (to 16) and each AI rider's
-/// bars jump (S490_HOLDS_APART). Ridden in the frame, ai0's parts stay within 0.093 ft through 130
+/// bars jump (at its take-offs, gone with B45). Ridden in the frame, ai0's parts stay within 0.093 ft through 130
 /// (part 7 within 0.01 at 24-36). This replay goes in the frame once B42 moves the early touch.
 /// B42: the main bone is set with the last step's rest, and ridden in the frame ai0's parts stay
 /// within 0.0066 ft through 134; the foot dust draws on 132 with the original's (T9a).
@@ -460,24 +460,19 @@ const S490_BONES_WITHIN: f32 = 0.01;
 /// after 133. Before B42 ai0's foot ball (bone 17) was 0.02 ft low at 130 and touched a tick early,
 /// its foot dust drawing on 131; now it draws on 132 with the original's. Held through 400, the
 /// bones stay within [`S490_BONES_WITHIN`] through 320 (ai0's ride parts at 319); its drawn holds
-/// jump at the take-off at 198 too (R56, [`S490_HOLDS_APART`]).
+/// jumped at the take-off at 198 too until B45 (R56).
 const S490_THROUGH: u64 = 134;
 
 /// T9: how far each rider's drawn chassis holds ([`c33_hold`], drawn in the frame after its body)
 /// may be from the original's request after the frame ([`c33_frame_holds`]), in feet: the root's
 /// place and the four points, in the bike's frame. The run still rides the original's. 0.0041 is
-/// the worst seen outside [`S490_HOLDS_APART`]. Held from the first row (R56): the chassis starts on
+/// the worst seen. Held from the first row (R56): the chassis starts on
 /// the image's pose ([`c33_chassis_seed`]); fresh, every rider's root was 0.07 ft off at 4 and closed
 /// over the restart's fade to 16, the first restart fading out of the bind pose.
+/// Every row is held (B45): each AI rider's grips used to jump at a take-off (ai0 0.13 ft at 64, ai1
+/// 0.09 at 63, ai2 0.03 at 54), the chassis' restart into the air row fading from a shown pose
+/// without the bars' steering turn; the drive now writes the turn into it, as the original's does.
 const S490_HOLDS_WITHIN: f32 = 0.006;
-/// The ticks each of [`C33_RIDERS`]' drawn holds are let go: both an AI rider's grips (the bars) jump
-/// from the original's at one tick (ai0 0.13 ft at 64, ai1 0.09 at 63, ai2 0.03 at 54) and close
-/// linearly over about ten; the feet and the root stay within 0.003 ft. The human's never part.
-/// R56: each is a take-off. Ours snaps, the original's ramps: the chassis' restart into the air row
-/// fades from its shown pose, kept before the drives, so without the bars' steering turn, and in the
-/// air nothing turns them; the original's fades from the turned bars. Writing the turn into the
-/// shown pose closes every one (B45, which empties this).
-const S490_HOLDS_APART: [std::ops::RangeInclusive<u64>; 4] = [64..=73, 63..=72, 1..=0, 54..=62];
 
 /// The original's request after the frame, per rider of [`C33_RIDERS`]: the root node and the four
 /// holds' world points (rider `+0xb80`: `+0x50`, `+0xb0..+0xe0`), as [`super::wreck_dust::s483_riding_of`]
@@ -667,9 +662,8 @@ fn c33_replay(in_frame: bool) {
                     let gap = |a: Vf, b: Vf| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt();
                     let off = [gap(ours.root.0[3], theirs.root.0[3]), gap(ours.hands[0], theirs.hands[0]), gap(ours.hands[1], theirs.hands[1]), gap(ours.feet[0], theirs.feet[0]), gap(ours.feet[1], theirs.feet[1])];
                     let off = off.into_iter().fold(0.0f32, f32::max);
-                    let held = !S490_HOLDS_APART[by_player[p]].contains(&row.frame);
-                    assert!(!held || off <= S490_HOLDS_WITHIN, "tick {}: {}'s drawn holds are {off} ft from the original's", row.frame, C33_NAMES[by_player[p]]);
-                    if held && off > worst_hold.0 {
+                    assert!(off <= S490_HOLDS_WITHIN, "tick {}: {}'s drawn holds are {off} ft from the original's", row.frame, C33_NAMES[by_player[p]]);
+                    if off > worst_hold.0 {
                         worst_hold = (off, row.frame, by_player[p]);
                     }
                     rider.holds = Some(Arc::new(theirs));
