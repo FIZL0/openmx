@@ -2040,6 +2040,11 @@ fn fly_by_parked(from: u32, to: u32, pad_of: &dyn Fn(u32) -> Report, reason: u32
 /// the truck parked 30 ft ahead of the plane (along `-x`), asleep; the plane's rays reach its hull at
 /// tick 42, and that tick the truck is awake with the plane's way in its velocity (about -11 ft/s in
 /// x, the plane's -25 cut to -16), then settles and sleeps again. Before S486a the plane flew through.
+/// R48 caught this meeting on the original (no truck in C16's 2p session; R48 booted its own): the
+/// wake on the meeting tick, the shove along the plane's way and the plane's lost speed are held to it
+/// by [`r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick`], the original's shove
+/// 1.33 times the plane's lost speed (14.0 of 10.5 ft/s). Its truck did not sleep again while the
+/// plane's throttle stayed on it; "sleeps again" here is the Sim's, where the plane stops dead.
 #[test]
 fn the_plane_flown_into_a_parked_truck_wakes_and_pushes_it() {
     let ahead = |plane: Vf, _: Vf| Vf::new(plane.x() - 30.0, plane.y(), plane.z() + 2.0, 1.0);
@@ -2056,7 +2061,8 @@ fn the_plane_flown_into_a_parked_truck_wakes_and_pushes_it() {
 /// **A downed rider's wreck bike in the plane lane meets a parked truck** (S486a): P2 wrecked
 /// (reason 7) in image 138010, the truck parked 8 ft along `+x` of the wreck bike, asleep; the wreck
 /// bike rolls into its hull about tick 8 and wakes it, the plane 45 ft and more away (its rays reach
-/// nothing). Before S486a the plane lane's wreck bikes searched no parked car.
+/// nothing). Before S486a the plane lane's wreck bikes searched no parked car. Not held to the
+/// original: R48's capture is one player's (the free09 boot that parks a truck has no P2 to wreck).
 #[test]
 fn a_wreck_bike_in_the_plane_lane_wakes_a_parked_truck() {
     let beside = |_: Vf, w: Vf| Vf::new(w.x() + 8.0, w.y(), w.z(), 1.0);
@@ -2068,4 +2074,191 @@ fn a_wreck_bike_in_the_plane_lane_wakes_a_parked_truck() {
     let gap = apart(t.plane, t.truck);
     assert!(gap > 30.0, "the plane is far from the truck when it wakes: {gap} ft");
     assert!(apart(t.wreck, t.truck) < 10.0, "the wreck bike is at the truck");
+}
+
+// --- R48: the plane taxied into free09's parked truck, on the original -------------------------------
+//
+// C16's 2p session parks no truck (both players' machines are planes), so R48 booted its own free09
+// for one player with the plane and the truck parked (research/r48/index.md): the human switched into
+// the plane, put 45 ft south of the truck with its nose at the truck's, Cross for 160 fields (80 ticks)
+// and idle after. `context/capture/r48/truck.csv` (watch/r48-truck.toml) has the plane and the truck's
+// body a row a tick from frame 1488; `context/states/r48/r48-1487.ram` is the tape's state.
+
+const R48_CAPTURE: &str = "capture/r48/truck.csv";
+const R48_TAPE: &str = "recordings/r48/drive.p2m2";
+/// The tape's state's frame: tick `R48_FROM` writes the capture's first row.
+const R48_FROM: u32 = 1487;
+/// The plane (the list's first entry, type 1) and the truck (car vtable 0x0045edac at +0x88) in R48's boot.
+const R48_PLANE: u32 = 0x007c_cae0;
+const R48_TRUCK: u32 = 0x0149_0240;
+/// The human's bike, parked where the switch left it (the list's type-4 entry).
+const R48_BIKE: u32 = 0x0156_13d0;
+
+fn r48_image() -> Option<Ee> {
+    let path = ctx(&format!("states/r48/r48-{R48_FROM}.ram"))?;
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), R48_FROM, "r48-{R48_FROM}.ram is not frame {R48_FROM}");
+    Some(ee)
+}
+
+fn r48_capture() -> Option<Rows> {
+    let path = ctx(R48_CAPTURE)?;
+    let file = std::io::BufReader::new(File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+    let keep = |c: &str| ["dt", "crash", "plane_contacts", "cmd_34c", "truck_awake"].contains(&c) || ["body_pos.", "body_vel.", "truck_pos.", "truck_vel."].iter().any(|p| c.starts_with(p));
+    let cap = game_sim::replay::two_p::read(file, keep).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+    Some(Rows { first: cap.frames[0], cols: cap.columns.clone(), rows: cap.rows })
+}
+
+/// The one-player free09 as [`in_free09_ss`] reads the split one: `free09.res` and `free09_2.res`.
+fn in_free09<R>(disc: &mut Disc, then: impl FnOnce(&mut Wooded<Place<'_>>, Area) -> R) -> R {
+    let parts = ["Tracks\\free09.res", "Tracks\\free09_2.res"].map(|n| disc.res(n).unwrap_or_else(|e| panic!("{n}: {e}")));
+    let read = move |want: &str| parts.iter().find_map(|r| r.read_suffix(want).ok()).ok_or_else(|| format!("no archive of this track has {want}"));
+    let scene = Scene::parse(&read(".scn").unwrap()).expect("parse the scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let bytes = read(leaf.rsplit('\\').next().unwrap()).unwrap();
+    let terrain = Terrain::parse(&bytes).expect("parse the terrain");
+    let t = &scene.terrain;
+    let area = Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale);
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let (props, _) = Props::load(&scene, |w: &str| read(w));
+    let (trees, missed) = Trees::on_ground(&read(".esb").unwrap(), &ground, &CurveTable::build()).expect("the ecosystem");
+    assert!(missed.is_empty(), "free09's trunks the port lacks: {missed:?}");
+    then(&mut Wooded { world: Place { ground, props }, trees }, area)
+}
+
+/// What [`r48_fly`] keeps of a tick: [`ParkedTick`]'s words and the plane's throttle.
+#[derive(Clone, Debug)]
+struct R48Tick {
+    awake: bool,
+    truck: Vf,
+    truck_vel: Vf,
+    plane: Vf,
+    plane_vel: Vf,
+    throttle: f32,
+}
+
+/// **The Sim's plane lane on R48's boot** (one seat): the plane seeded off the tape's state
+/// ([`seeded_plane_at`]), the human's rider standing at its parked bike, free09's truck parked at its
+/// map spot (`[Monster2]`, (4688, 3838), nose `-z`, settled: [`Parked::settled`]), on the tape's pads
+/// (two fields a tick; the first tick after the load reads the state's idle controls) and the
+/// capture's frame times, ticks `R48_FROM..to`. Also the settled truck's offset from the image's body
+/// and its turn.
+fn r48_fly(to: u32) -> Option<(Vec<R48Tick>, Vf, Vf)> {
+    use game_sim::car::{Car, CarModel, Kind, Parked};
+    let ee = r48_image()?;
+    let cap = r48_capture()?;
+    let path = ctx(R48_TAPE)?;
+    let tape = P2m2::parse(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+    let pad = |t: u32| match t.checked_sub(R48_FROM + 1) {
+        Some(n) => tape.field((2 * n as usize).min(tape.fields() - 1), 0),
+        None => Report::idle(),
+    };
+    let (plane, rays, hull) = machines()?;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let truck = {
+        let res = disc.res("machine.res").ok()?;
+        let kind = Kind::MonsterTruck;
+        let car = Car::read_bytes(&res.read(kind.phy()).ok()?, kind);
+        let model = CarModel::read(&res.read("monstertruck\\anim\\monstertruck.psg").ok()?).ok()?;
+        let rays = track::Rays::parse(&res.read(kind.rays()).ok()?).ok()?;
+        let hull = track::Mesh::parse(&res.read(kind.hull()).ok()?).ok()?;
+        (car, model, rays, hull)
+    };
+    let tables = Arc::new(Tables::build());
+    let (phy, col) = bike(&mut disc, &tables);
+    let mesh = bike_box(&mut disc);
+    let mut me = Rider::new(&phy, game_sim::stock::MOUNTS, quad(&ee, R48_BIKE + 0x1b0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    me.no_start_line();
+    me.carries_bike_col(Arc::new(col));
+    let mut sim = Sim::with_rider(0x5272, Arc::clone(&tables), phy, me);
+    let wreck = wreck_hull(&mut disc);
+    let image_truck = ee.u32_at(R48_TRUCK + 0x160);
+    let image_at = (quad(&ee, image_truck + 0x60), quad(&ee, image_truck + 0x170));
+    in_free09(&mut disc, |world, area| {
+        let flight = seeded_plane_at(&ee, R48_PLANE, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+        sim.plane = Some(match wreck.clone() {
+            Some(w) => flight.with_wreck_hull(w),
+            None => flight,
+        });
+        let (car, model, rays, hull) = truck;
+        let t = &tables.ride;
+        let truck = Parked::settled(Arc::new(car), &model, Rays::of(&rays), Arc::new(hull), world, Vf::new(4688.0, 135.0, 3838.0, 1.0), Vf::new(0.0, 0.0, -1.0, 0.0), &t.acos, &t.curve);
+        assert!(!truck.awake(), "the truck settled and asleep");
+        let settled = (truck.machine.body.position, truck.machine.body.quat);
+        sim.park_cars(vec![truck]);
+        let dt = |t: u32| F(cap.f(t + 1, "dt"));
+        sim.poll(dt(R48_FROM), &[pad(R48_FROM - 1), Report::missing()]);
+        let mut out = Vec::new();
+        for t in R48_FROM..to {
+            let controls = sim.poll(dt(t), &[pad(t), Report::missing()]);
+            sim.step(dt(t), &controls, world);
+            let p = sim.plane.as_ref().unwrap();
+            let c = &sim.parked_cars[0];
+            out.push(R48Tick {
+                awake: c.awake(),
+                truck: c.machine.body.position,
+                truck_vel: c.machine.body.velocity,
+                plane: p.body.position,
+                plane_vel: p.body.velocity,
+                throttle: p.surfaces.throttle.0,
+            });
+        }
+        let off = Vf::new(settled.0.x() - image_at.0.x(), settled.0.y() - image_at.0.y(), settled.0.z() - image_at.0.z(), 0.0);
+        Some((out, off, settled.1))
+    })
+}
+
+/// The capture's word `w` (`body_pos`, `truck_vel`, ..) in row `f` as a vector.
+fn r48_row(cap: &Rows, f: u32, w: &str) -> Vf {
+    let c = |k: &str| cap.f(f, &format!("{w}.{k}"));
+    Vf::new(c("x"), c("y"), c("z"), 0.0)
+}
+
+/// The meeting row: the first with the truck awake in R48's capture (the plane's rays on its hull).
+const R48_MEET: u32 = 1569;
+
+/// **R48's taxi on the Sim runs as the original's, to the truck** : the parked truck settles within
+/// 0.15 ft of the original's (car_spawn.rs's check, here on the tape's own state), and on the tape's
+/// pads the plane's throttle, place and velocity follow the capture row for row to the meeting (81
+/// ticks, Cross ramping the throttle to 0.933 and holding it), the truck asleep throughout.
+#[test]
+fn r48_the_plane_taxis_to_the_truck_as_the_original() {
+    let Some(cap) = r48_capture() else { return };
+    let Some((ticks, off, _)) = r48_fly(R48_MEET - 1) else { return };
+    assert!((0..3).all(|i| off.0[i].abs() < 0.15), "the truck settled off the original's by {:?}", off.0);
+    for (k, t) in ticks.iter().enumerate() {
+        let f = R48_FROM + 1 + k as u32;
+        let near = |a: Vf, b: Vf, d: f32| (0..3).all(|i| (a.0[i] - b.0[i]).abs() < d);
+        assert!((t.throttle - cap.f(f, "cmd_34c")).abs() < 1e-4, "row {f}: throttle {} vs {}", t.throttle, cap.f(f, "cmd_34c"));
+        assert!(near(t.plane, r48_row(&cap, f, "body_pos"), 0.02), "row {f}: plane at {:?} vs {:?}", t.plane.0, r48_row(&cap, f, "body_pos").0);
+        assert!(near(t.plane_vel, r48_row(&cap, f, "body_vel"), 0.1), "row {f}: plane moving {:?} vs {:?}", t.plane_vel.0, r48_row(&cap, f, "body_vel").0);
+        assert!(!t.awake && cap.u(f, "truck_awake") == 0, "row {f}: the truck asleep before the meeting");
+    }
+}
+
+/// **The plane taxied into the parked truck wakes it and shoves it, on the original's tick** (R48):
+/// row 1569 has the truck awake on both, shoved along the plane's `+z` at 14.0 ft/s (the Sim's
+/// 13.9), the plane's 32.4 ft/s cut to 21.9 (the Sim's to the same 0.01), and the next row the truck
+/// has moved its way. Not held: the push after it. The original's plane keeps its throttle on the
+/// truck and drives it about 40 ft (to z 3877 by row 1628), the truck awake to the capture's end; the
+/// Sim's plane is stopped dead about 13 ticks on, the truck 5 ft moved and asleep from about row 1595.
+#[test]
+fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
+    let Some(cap) = r48_capture() else { return };
+    let Some((ticks, _, _)) = r48_fly(R48_MEET + 1) else { return };
+    let at = |f: u32| &ticks[(f - R48_FROM - 1) as usize];
+    let woke = R48_FROM + 1 + ticks.iter().position(|t| t.awake).expect("the plane met the truck") as u32;
+    assert_eq!(cap.u(R48_MEET - 1, "truck_awake"), 0);
+    assert_eq!(cap.u(R48_MEET, "truck_awake"), 1);
+    assert_eq!(woke, R48_MEET, "the truck wakes on the original's row");
+    let (shove, was) = (r48_row(&cap, R48_MEET, "truck_vel"), r48_row(&cap, R48_MEET, "body_vel"));
+    let t = at(R48_MEET);
+    assert!((t.truck_vel.z() - shove.z()).abs() < 0.5, "the shove {:?} vs the original's {:?}", t.truck_vel.0, shove.0);
+    assert!(t.truck_vel.x().abs() < 0.5 && t.truck_vel.z() > 13.0, "the truck shoved along the plane's +z: {:?}", t.truck_vel.0);
+    assert!((t.plane_vel.z() - was.z()).abs() < 0.1, "the plane cut to {:?} vs the original's {:?}", t.plane_vel.0, was.0);
+    assert!(at(R48_MEET).plane_vel.z() < at(R48_MEET - 1).plane_vel.z() - 10.0, "the plane slowed by the truck");
+    let moved = at(R48_MEET + 1).truck.z() - at(R48_MEET).truck.z();
+    let moved_there = cap.f(R48_MEET + 1, "truck_pos.z") - cap.f(R48_MEET, "truck_pos.z");
+    assert!(moved > 0.3 && moved_there > 0.3, "the truck moves its way next row: {moved} ft (the original's {moved_there})");
 }

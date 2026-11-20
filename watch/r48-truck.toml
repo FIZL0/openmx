@@ -1,0 +1,119 @@
+# r48-truck.toml — the biplane taxied into free09's parked monster truck (R48), one row a tick.
+#
+# research/r48/boot.py boots free09 for one player with [Biplane1] and [Monster2] parked; the human is
+# switched into the plane (MXBiplane 0x007ccae0) by a nav tape and research/r48/aim.py puts it 45 ft
+# south of the truck (0x01490240, body at +0x160), nose at it. research/r48/index.md has the steps.
+#   ./kit pcsx2 with -- env SPEC=watch/r48-truck.toml bash research/r48/play_capture.sh PID TAPE FIRST N OUT
+
+[watch]
+name        = "r48-truck"
+description = "R48: the biplane taxied into free09's parked monster truck, a row a tick"
+every       = 1
+frames      = 300
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- the plane --------------------------------------------------------------------------------------
+
+[[field]]
+name = "plane_flown"
+addr = "0x7ccae0 + 0x334"
+type = "u32"
+
+[[field]]
+name = "crash"
+addr = "0x7ccae0 + 0x3b0"
+type = "u32"
+
+[[field]]
+name = "plane_contacts"
+addr = "0x7ccae0 + 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "cmd_34c"                 # the joystick step's first command word (biplane.toml's +0x34c..)
+addr = "0x7ccae0 + 0x34c"
+type = "f32"
+
+[[field]]
+name = "body_pos"
+addr = "0x7ccae0 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"
+addr = "0x7ccae0 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"
+addr = "0x7ccae0 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_rate"
+addr = "0x7ccae0 + 0x160 -> 0x1b0"
+type = "f32x4"
+
+# --- the truck's body (car +0x160): +0 awake, the S484 words -------------------------------------------
+
+[[field]]
+name = "truck_awake"
+addr = "0x1490240 + 0x160 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "truck_pos"
+addr = "0x1490240 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "truck_vel"
+addr = "0x1490240 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "truck_quat"
+addr = "0x1490240 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "truck_rate"
+addr = "0x1490240 + 0x160 -> 0x1b0"
+type = "f32x4"
