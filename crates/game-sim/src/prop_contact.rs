@@ -670,6 +670,46 @@ impl crate::Sim {
             p.pushed(&rider_contact::Flown { seat: 0, collider, body, mass, quad: None });
         }
     }
+
+    /// **The props' step while player 1 flies** (S479): [`Sim::props_step`] with the plane's hull and
+    /// body in player 1's place, striker 0 as the plane's strike names it (S241), and the other
+    /// riders' bikes theirs by player, as split's shared step has a flying seat's plane in its place
+    /// ([`crate::prop_seats::Shared::finish_flying`]). A striker that struck across a seam stands a
+    /// width over for the bodies it struck, the plane's body put back after (MD254). With no other
+    /// rider this is [`PropSet::step_flown`].
+    pub(crate) fn props_step_flown(&mut self, dt: F, movers: &crate::prop_set::PropMovers) {
+        if self.traffic.props.is_empty() {
+            return;
+        }
+        let mut bump = self.bump(0, Vec::new());
+        let sides = self.wreck_sides();
+        let mut wrecks: Vec<(Collider, Body, F)> = sides
+            .iter()
+            .map(|s| s.unwrap_or_default())
+            .chain(self.parked_cars.iter().map(|p| (p.collision.collider, p.machine.body, p.collision.mass)))
+            .collect();
+        let crate::Sim { traffic, plane, .. } = self;
+        let Some(plane) = plane.as_mut() else { return };
+        let (flown, rest) = across_flown(std::mem::take(&mut traffic.props.across), &mut [Some(&mut plane.body)]);
+        let moved = across_moved(rest, &mut bump.vehicles, &mut wrecks);
+        let mut weighed = Weighed { body: &mut plane.body, mass: plane.mass };
+        let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
+        let mut others: Vec<Other<'_>> = std::iter::once(Other { collider: &mut plane.collider, side: Side::Body(&mut weighed) })
+            .chain(bump.colliders.iter_mut().zip(bump.vehicles.iter_mut()).skip(1).map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }))
+            .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
+            .collect();
+        traffic.props.step_with(dt, movers, &mut others);
+        drop(others);
+        drop(bodies);
+        across_flown_back(flown, &mut [Some(&mut plane.body)]);
+        across_back(moved, &mut wrecks);
+        let parked = wrecks.split_off(sides.len());
+        let pushed: Vec<_> = sides.iter().zip(wrecks).map(|(s, w)| s.map(|_| w)).collect();
+        self.wrecks_pushed(&pushed);
+        for (p, (collider, body, mass)) in self.parked_cars.iter_mut().zip(parked) {
+            p.pushed(&rider_contact::Flown { seat: 0, collider, body, mass, quad: None });
+        }
+    }
 }
 
 /// **The strikers that struck across a seam, by the bodies they struck** (MD167, MD167a): for the

@@ -507,8 +507,6 @@ impl Sim {
             let mut riders: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
             rider_contact::pushed_riders(&mut riders, &met);
             drop(riders);
-            // A plane that struck across a seam is seen a width over by those it struck (MD254).
-            self.traffic.props.step_flown(dt, &prop_movers, &mut plane.collider, &mut plane.body, plane.mass);
             if let (Some(plane), Some(race)) = (self.plane.as_mut(), self.race.as_deref_mut()) {
                 std::mem::swap(&mut plane.rng, &mut race.rng);
             }
@@ -517,8 +515,12 @@ impl Sim {
             self.parked_from_plane(&met, &wrecked_cars);
             let resting: Vec<bool> =
                 self.parked_cars.iter().zip(stepped.iter().zip(&was_awake)).map(|(p, (s, a))| *s && *a && p.machine.at_rest(&p.car)).collect();
-            self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
+            self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world, &mut prop_movers);
             self.parked_cars_sleep(&resting);
+            // The props' step after the riders, as on the ground: the plane its striker 0 and the
+            // other riders' bikes theirs by player (S479). A plane that struck across a seam is seen
+            // a width over by those it struck (MD254).
+            self.props_step_flown(dt, &prop_movers);
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
@@ -949,13 +951,27 @@ impl Sim {
     /// record (`struck`, by player) ahead of its own `lists` entry ([`rider_contact::struck_first`]),
     /// then its strikes on the cars; its resolve has the plane's body among its others, written back
     /// to the plane after. Player 1's bike is out of the world: nobody's rival. An AI rider rides its
-    /// brain's levers and its brain thinks after its frame; anyone else rides their own pad. The
-    /// bikes do not strike the knockable props here: the plane lane's props' step has the plane for
-    /// its one striker ([`Sim::hear_ridden`]).
-    fn step_flown_riders(&mut self, dt: F, struck: Vec<Vec<contact::Contact>>, mut lists: Option<Vec<Vec<contact::Contact>>>, world: &mut dyn World) {
+    /// brain's levers and its brain thinks after its frame; anyone else rides their own pad.
+    ///
+    /// S479 (biplane.p2m2's frame run whole, `tests/ai/flown.rs`): the original goes on with all of
+    /// its riders' actors while player 1 flies. Each bike's record collides on the plane's node, so
+    /// the bikes strike the knockable props, each before its frame as on the ground (`movers` the
+    /// props' pass's), and the props' step after has them for its strikers by player
+    /// ([`Sim::props_step_flown`]). After every bike, every body's look-around clock (player 1's
+    /// too, on no levers) and every engine note ([`Sim::notes_frame`], player 1's camera on the
+    /// plane). The state has no race, and no race manager runs.
+    fn step_flown_riders(
+        &mut self,
+        dt: F,
+        struck: Vec<Vec<contact::Contact>>,
+        mut lists: Option<Vec<Vec<contact::Contact>>>,
+        world: &mut dyn World,
+        movers: &mut prop_set::PropMovers,
+    ) {
         if self.others.is_empty() {
             return;
         }
+        let mut rode = vec![Controls::default(); self.players()];
         if self.ai.as_ref().is_some_and(|l| l.cards.is_empty()) {
             self.feed_cards();
         }
@@ -968,7 +984,10 @@ impl Sim {
             let firsts = [struck.get(i).cloned().unwrap_or_default()];
             let own = lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default();
             let list = mover_contact::merged(rider_contact::struck_first(&firsts, own, at, &*world), std::mem::take(&mut cars[i]));
-            let mut bump = Some(list).filter(|l| !l.is_empty()).map(|l| {
+            // Its body rays against the knockable props (S479): the struck bodies after the players'
+            // vehicles, the plane's body and the parked cars'.
+            let strike = self.prop_strike_after(i, self.players() + 1 + self.parked_cars.len(), dt, &*world);
+            let mut bump = Some(list).filter(|l| !l.is_empty() || !strike.contacts.is_empty()).map(|l| {
                 let mut b = self.bump_in(i, l, &*world);
                 b.planes = self.plane.as_ref().map(|p| p.flown(0, at, &*world)).into_iter().collect();
                 // The parked cars' bodies after the plane's, as their hulls follow its (S486); a
@@ -983,6 +1002,9 @@ impl Sim {
                 }
                 b
             });
+            if let Some(b) = bump.as_mut() {
+                self.strike_into(b, strike, dt, world, movers);
+            }
             let rivals: Vec<ride::Rival> = (1..self.players())
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
@@ -998,6 +1020,7 @@ impl Sim {
             self.lend_props(i);
             self.lend_parked(i, &*world);
             let c = self.levers_of(i).unwrap_or(pads[i]);
+            rode[i] = c;
             let kept = self.lend_rng(i);
             let p = &mut self.others[i - 1];
             p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());
@@ -1009,6 +1032,7 @@ impl Sim {
             self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
+                self.traffic.props.pushed(&b.props);
                 let cars = self.parked_cars.len();
                 let (plane_at, cars_at) = if hulled || cars == 0 { (0, 1) } else { (cars, 0) };
                 if let (Some(plane), Some(flown)) = (self.plane.as_mut(), b.planes.get(plane_at)) {
@@ -1020,6 +1044,10 @@ impl Sim {
             }
             self.wreck_pushed_back(i);
         }
+        // The bodies' look-around clocks and the engine notes after every bike, as on the ground
+        // (S328a, S328b).
+        self.bodies_look(dt, &rode);
+        self.notes_frame(dt, &rode);
         for p in &mut self.others {
             p.rider.wrap_round(&*world);
         }

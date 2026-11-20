@@ -757,8 +757,9 @@ impl crate::Sim {
             .map(|(i, r)| flight_search::Bike { transform: r.ride.transform(), in_world: !(i == 0 && flying) && r.state.wreck.is_none() && !r.ghost.on })
             .collect();
         self.traffic.props.hear_ridden(&bikes);
-        // The plane lane's props' step has the plane for its one striker.
-        self.traffic.props.file_ridden(!flying);
+        // The plane lane's props' step has the other riders' bikes for strikers too (S479): only
+        // player 1's bike, out of the world, is not filed on.
+        self.traffic.props.file_ridden(true);
     }
 
     /// Each of `players` (a player and its side, as [`crate::Sim::frame_held_wrecked`] takes them)

@@ -692,14 +692,18 @@ impl crate::Sim {
         }
         let ai = |i: usize| self.ai.as_deref().is_some_and(|l| l.pilots.iter().any(|(p, _)| *p == i));
         let n = rode.len();
-        let listeners: Vec<Vf> = (0..n).filter(|&i| !ai(i)).map(|i| self.rider_of(i).ride.position()).collect();
+        // Player 1's camera follows the plane while they fly (S479), and their parked bike's levers
+        // are let go (biplane.p2m2's rider: all 0).
+        let flying = |i: usize| (i == 0).then_some(()).and(self.plane.as_ref());
+        let listeners: Vec<Vf> =
+            (0..n).filter(|&i| !ai(i)).map(|i| flying(i).map_or_else(|| self.rider_of(i).ride.position(), |p| p.body.position)).collect();
         let hands: Vec<(Hands, Vf)> = (0..n)
             .map(|i| {
                 let r = &self.rider_of(i).ride;
                 let at = r.position();
                 let h = Hands {
                     grounded: r.air.on_ground,
-                    gas: r.held.gas.0,
+                    gas: if flying(i).is_some() { 0.0 } else { r.held.gas.0 },
                     // An AI rider's is its brain's, as it thought after the bike's frame (S482a: the
                     // original's note reads the rider's `+0x890`, which the brain writes).
                     clutch: self.levers_of(i).map_or(rode[i].clutch, |c| c.clutch).0,

@@ -501,3 +501,59 @@ fn a_wheel_meets_the_ball_through_the_bikes_list() {
     none.step(DT, &Controls::default(), &mut Listed::round(&set));
     assert_eq!(owners(&none.rider), [0, 0], "no props, no owner");
 }
+
+/// The biplane off `machine.res` in the disc's `MX.PSR`, flown.
+fn biplane() -> Option<game_sim::flight::Flight> {
+    use std::io::{Read, Seek, SeekFrom};
+    let kit = ps2_oracle::Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("iso").join("MX.PSR");
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", path.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = game_sim::archive::Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = game_sim::archive::Res::parse(&bytes).expect("machine.res");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(game_sim::phy::BIPLANE_PHY)).expect("machine.res has the plane");
+    let mut plane = game_sim::flight::Flight::new(&game_sim::phy::Plane::read_bytes(&res.read(&bytes, e).expect("its bytes")));
+    plane.attitude.flown = true;
+    Some(plane)
+}
+
+/// **The other riders strike while player 1 flies** (S479): the one-player [`Sim::step`]'s plane lane
+/// with a second rider whose bike stands against the ball, the plane far off. The original's AI bikes'
+/// records collide on the plane's node every tick of biplane.p2m2's state (`tests/ai/flown.rs`), as a
+/// riding bike's do, so the bike's rays strike the ball: it is woken, its mirror names player 2, and
+/// it goes as [`Sim::step_all`]'s session leaves it when player 2 strikes.
+/// The tick also runs the bodies' look-around clocks and the engine notes (`Sim::step_flown_riders`).
+#[test]
+fn another_rider_strikes_while_player_1_flies() {
+    let Some((base, col, c, at)) = setup() else { return };
+    let Some(plane) = biplane() else { return };
+    let mut session = base.clone();
+    let r = rider(&session, &col);
+    let p = (*session.phy).clone();
+    session.add_player(p, r);
+    session.rider.place(away(at), facing());
+    session.others[0].rider.place(at, facing());
+    let mut ground = session.clone();
+    ground.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
+    let want = ball(&ground, c);
+    assert!(want.0 && want.1.iter().all(|&o| o == Some(1)), "step_all: player 2 strikes the ball: {:?}", want.1);
+
+    let mut flying = session.clone();
+    let mut plane = plane;
+    let up = Vf::new(at.x(), at.y() + 300.0, at.z() - AWAY, 1.0);
+    plane.place(up, Vf::new(0.0, 0.0, -1.0, 0.0), &flying.tables.ride.acos);
+    flying.plane = Some(plane);
+    flying.step(DT, &Controls::default(), &mut Flat::default());
+    let (woken, mirrors, body) = ball(&flying, c);
+    assert!(woken, "player 2's bike strikes the ball while player 1 flies: the ball woken");
+    assert_eq!(mirrors, want.1, "the mirrors name player 2");
+    assert_eq!(body, want.2, "the ball as step_all's session leaves it");
+}
