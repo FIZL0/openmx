@@ -1758,7 +1758,9 @@ ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (th
 #                                           vt+0xe4 0x0015a1b0 places the body AT pos (no CofG
 #                                           offset). vt+0x124 enable thunk 0x003994b0 -> 0x00398c50:
 #                                           car+0x4ac = 1, then 0x0015b790 (fresh = 1); the car's
-#                                           first step clears +0x4ac again with nobody in it. The
+#                                           first step clears +0x4ac again with nobody in it (S489a:
+#                                           at 0x3e1934, after the controls step read it, so a
+#                                           struck car's brakes +0x3f4/+0x3f8 are 0 that frame). The
 #                                           listener is the props' 0x0015b2a0 / at-rest 0x0015b400.
 #                                           Put back at the spawn and node-updated (0x0026f800) at
 #                                           0.03333 it sleeps on frame 56; the port matches every
