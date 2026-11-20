@@ -14132,7 +14132,12 @@ fn s485_ride(ticks: usize, parked: bool) -> Option<Vec<S485Tick>> {
 }
 
 /// [`s485_ride`] with `after` handed the Sim and the world after each tick (its count from 1).
-fn s485_ride_with(ticks: usize, parked: bool, mut after: impl FnMut(usize, &mut Sim, &mut dyn World)) -> Option<Vec<S485Tick>> {
+fn s485_ride_with(ticks: usize, parked: bool, after: impl FnMut(usize, &mut Sim, &mut dyn World)) -> Option<Vec<S485Tick>> {
+    s485_ride_from(S485_BIKE, ticks, parked, after)
+}
+
+/// [`s485_ride_with`] with the bike moved to `spot` instead of [`S485_BIKE`].
+fn s485_ride_from(spot: [f32; 3], ticks: usize, parked: bool, mut after: impl FnMut(usize, &mut Sim, &mut dyn World)) -> Option<Vec<S485Tick>> {
     use game_sim::car::{Car, CarModel, Kind, Parked};
     let image = private_dir("states").join("recording2.p2m2_SaveState.eeMemory.bin");
     let Some(st) = SaveState::open_either(&image) else {
@@ -14168,7 +14173,7 @@ fn s485_ride_with(ticks: usize, parked: bool, mut after: impl FnMut(usize, &mut 
         st.seed_levers(ride).expect("the levers");
         // The script's one delta, from the vehicle's place to the spot, on every place the ride keeps.
         let vp = st.vf(st.vehicle()? + 0x1b0)?;
-        let by: [f32; 3] = std::array::from_fn(|i| (f64::from(S485_BIKE[i]) - f64::from(vp.0[i])) as f32);
+        let by: [f32; 3] = std::array::from_fn(|i| (f64::from(spot[i]) - f64::from(vp.0[i])) as f32);
         let moved = |v: Vf| Vf::new((F(v.x()) + F(by[0])).0, (F(v.y()) + F(by[1])).0, (F(v.z()) + F(by[2])).0, v.w());
         ride.chassis.cofg_world = moved(ride.chassis.cofg_world);
         ride.origin = moved(ride.origin);
@@ -14254,6 +14259,9 @@ fn s485_capture() -> Option<Vec<[f32; 11]>> {
 /// without a step on the 10th tick after (the original's row 68), and it steps 0.0012 ft (theirs
 /// 0.0009) and sleeps on the 11th, as theirs; slid 0.2024 ft then (theirs 0.2029). Not matched: the
 /// original's bike wakes it once more on the 12th (row 70); the port's has slid clear by then.
+/// S486c: that wake on the 10th is this spot's phase, not the original's cause: the port's bike stops
+/// 0.6 ft short of theirs, its wreck bike coasts into the nose late, and lined up it has left the
+/// nose by the 8th (`the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original`).
 #[test]
 fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let Some(cap) = s485_capture() else { return };
@@ -14318,6 +14326,55 @@ fn a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original() {
     let theirs_back = back(cap.iter().map(|r| r[10]).collect()).expect("the original's rider put back");
     println!("put back: port tick {}, the original's row {theirs_back}", ours_back + 1);
     assert!((ours_back as i64 + 2 - theirs_back as i64 - lag).abs() <= 2, "put back at port tick {}", ours_back + 1);
+}
+
+/// S486c: S485's spot moved 0.68 ft along `z`, where the port's slower pull-away (S485's test) leaves
+/// its bike on the last frame before the strike where the original's is (3828.30 / 3828.297).
+const S486C_BIKE: [f32; 3] = [S485_BIKE[0], S485_BIKE[1], S485_BIKE[2] + 0.68];
+
+/// **S486c: with the approach lined up, the wreck bike slides back off the truck's nose from the
+/// strike, as the original's** (S484's capture, its bike column the vehicle's place, which follows the
+/// wreck bike once the rider is down).
+///
+/// From S485's spot the port's bike reaches the nose 0.68 ft short of the original's frame phase, so
+/// it stops 0.6 ft further back (3827.31 / 3827.92), out of the hull's reach, and its wreck bike
+/// coasts 0.38 ft on at the bike's 3.6 ft/s before it meets the nose and creeps back: the slide
+/// S486 read as the original's. Lined up, the bike stops where the original's does, the wreck bike
+/// takes 1.8 ft/s and meets the nose on the first tick after, and it slides back as theirs: within
+/// 0.01 ft for 4 frames (3827.926, .950, .927, .860; theirs .918, .943, .925, .858). Not matched:
+/// from there the nose pushes it back at ~2.6 ft/s against theirs' ~3.1, so it trails theirs by
+/// 0.08 ft 8 frames on and 0.13 ft 12 on. It leaves the nose 8 frames after the strike, so it is not what wakes the
+/// original's truck at rest on rows 68 and 70 (10 and 12 frames after): the port's rider is thrown
+/// through the truck's body, whose collidable the bones do not meet.
+#[test]
+fn the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original() {
+    let Some(cap) = s485_capture() else { return };
+    let Some(port) = s485_ride_from(S486C_BIKE, 80, true, |_, _, _| {}) else { return };
+    let theirs = cap.iter().position(|r| r[1] != 0.0).expect("the original's truck wakes");
+    let ours = port.iter().position(|p| p.awake).expect("the port's truck wakes");
+    println!("the truck wakes: port tick {}, the original's row {theirs}", ours + 1);
+    let (before, after) = (port[ours - 1].bike.z(), port[ours].bike.z());
+    println!("the bike: {before:.3} / {:.3} before the strike, {after:.3} / {:.3} on it", cap[theirs - 1][10], cap[theirs][10]);
+    assert!((before - cap[theirs - 1][10]).abs() < 0.05, "the bike before the strike at z {before}");
+    assert!((after - cap[theirs][10]).abs() < 0.05, "the bike stopped at z {after}");
+    assert!(port[ours].wrecked, "the rider wrecks on the strike");
+    for k in 0..13 {
+        let (got, want) = (port[ours + k].wreck.z(), cap[theirs + k][10]);
+        println!("strike+{k}: wreck bike z {got:.3} / {want:.3}, truck vz {:.4} / {:.4}", port[ours + k].truck_vel.z(), cap[theirs + k][7]);
+        let near = if k < 4 { 0.02 } else { 0.15 };
+        assert!((got - want).abs() < near, "strike+{k}: the wreck bike at z {got}, the original's {want}");
+    }
+    // It slides back from the first tick after, as theirs from the second.
+    let back = |z: &[f32]| z.windows(2).position(|w| w[1] < w[0]);
+    let ours_back = back(&port[ours..ours + 6].iter().map(|p| p.wreck.z()).collect::<Vec<_>>());
+    let theirs_back = back(&cap[theirs..theirs + 6].iter().map(|r| r[10]).collect::<Vec<_>>());
+    println!("slides back: port strike+{ours_back:?}, the original's strike+{theirs_back:?}");
+    assert!(ours_back.is_some_and(|b| b <= 1), "the wreck bike slides back from strike+{ours_back:?}");
+    // The truck's push is the same as from S485's spot.
+    for k in 0..9 {
+        let (got, want) = (port[ours + k].truck_vel.z(), cap[theirs + k][7]);
+        assert!((got - want).abs() < 0.05, "strike+{k}: the truck's vz {got}, the original's {want}");
+    }
 }
 
 /// S485's control: without the parked truck the same ride goes on through its spot.

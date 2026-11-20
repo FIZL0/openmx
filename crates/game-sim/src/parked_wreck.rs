@@ -26,6 +26,15 @@
 //! 69 (the sleep after the riders' frames, [`crate::car::Parked::sleep`]); the original's second
 //! wake (row 70) is not reproduced, the port's wreck bike having slid clear (tests/replay.rs
 //! `a_bike_ridden_into_the_parked_truck_pushes_it_as_the_original`).
+//!
+//! S486c: that row-68 match is the ride's phase. From the script's spot the port's bike reaches the
+//! nose 0.68 ft behind the original's frame phase and stops 0.6 ft short of theirs, so its wreck bike
+//! coasts on at the bike's 3.6 ft/s into the nose late. With the spot moved to line the approach up,
+//! the wreck bike stops where theirs does, slides back as theirs (within 0.01 ft for 4 frames) and
+//! leaves the nose 8 frames after the strike: neither at-rest wake is the wreck bike's. The likely
+//! cause is the thrown rider: the port's ragdoll bones fly through the truck's body, whose
+//! collidable they do not meet (tests/replay.rs
+//! `the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original`).
 
 use crate::rider::Rider;
 use crate::rider_contact::Flown;
