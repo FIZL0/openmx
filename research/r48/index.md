@@ -165,3 +165,7 @@ hull's underside is at y 135.95, so every bone (y 136.4-140) meets the face, non
   rider falls off the face).
   - What would tell: S484's ride re-recorded with the rider's ragdoll part bodies per row
     (research/s484/ride.py), compared with the port's bones from strike+1.
+- **Answered by R57** (research/s484/index.md): the original's bones never get inside the hull; they
+  come in at 24-30 ft/s from the riding bodies, and the head leaves the face on +13. The wedge is the
+  test ride's: with no drawn bike it has no riding ragdoll, so its bones enter at the bike's 54 ft/s.
+  With the bike drawn as the shell draws it, no port bone gets behind the face either.
