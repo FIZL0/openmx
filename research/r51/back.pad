@@ -1,0 +1,9 @@
+# R51: from MD147's Rocksbury spawn (facing +z, the stadium's south wall straight behind at z~17), Cross and
+# Square held together from rest: the quad's reverse (the gas and the brake both down, P72's rule), backing
+# it straight into the wall; then let go to rest against it. (Square alone only brakes: no reverse.)
+sleep 15t
+down cross
+down square
+sleep 650t
+release
+sleep 60t

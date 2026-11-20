@@ -14524,3 +14524,16 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   (blades, then the props after the world), the blades' search, the woken prop's late search and its rays
 #   on kiowaf.col, the heli's world step (its resolve pushing the egg), then the props' step with the heli as
 #   striker. kiowa_capture.rs a_tail_strike_on_a_prop_replays_bit_exact: 1205..=1663, both records too.
+# R51 — the Untamed follow camera backed into Rocksbury's south wall (tests/untamed_camera.rs
+#   r51_the_eye_backed_into_rocksburys_wall_is_the_originals; journal 2026-11-20-r51-untamed-camera-wall;
+#   research/r51/README.md). From md147/spawn, back.pad (Cross+Square = reverse), camera.toml every tick:
+#   target block 0x01be5110 (quad 0x01be4760 +0x9b0; +0xb0 nonzero in the air, read by 0x004b52b0),
+#   filter 0x00f96b50 (+0x30/+0x70 look/eye springs: goal, pos, vel, last target point at +0x30 into each;
+#   +0xd0 last clear goal, +0x220 ring index, +0x28/+0x29 boost), camera 0x00f96e60 (+0x9c/+0xa0 0).
+#   context/capture/r51/back.csv, 720 rows, vsync 27275..28713; 64 frames torn (target block and filter a
+#   frame apart; the springs' last target point tells which target the filter ran on).
+#   Row 321: the eye sweep 0x003ab800 puts the goal 2 ft out (ring index 0 -> 1, the only move). Rows 322..:
+#   the goal sweep 0x003ab3a0's props hit puts it 2.5 ft out: the stadium wall is a prop to the camera,
+#   the world ray 0x004af7b0 misses it. Faces met: normal (0.1073, 0, 0.9942), then (0.0243, 0, 0.9997)
+#   from row ~365. Eye up to 5.68 ft behind the face (row ~352). Boost +0x29 reads 0 on every row.
+#   Quad +0x448 reads 21..32 here: not a dt. Replay: goal to 2e-6 ft, eye to 3e-5 ft on 653 frames.

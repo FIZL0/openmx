@@ -1,0 +1,98 @@
+# R51: MX vs. ATV Untamed's (SLUS-21701) follow camera on the race quad in Free Ride (Rocksbury), every tick:
+# the camera's target block, its filter (springs, swept goal, contact ring, boost bytes) and the camera's
+# own words, with the quad's place and pad words to see the ride by. Heap addresses are MD147's spawn
+# image's (the same in every state taken from it): quad 0x01be4760, its target block quad +0x9b0, the camera
+# 0x00f96e60 and its filter 0x00f96b50 (oracle.txt # MD251/# MD255). research/r51/play.sh adds the start trigger.
+[watch]
+name        = "r51-untamed-camera"
+description = "MX vs. ATV Untamed (SLUS-21701) follow camera by a wall: target block, filter, camera, quad place"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x410318, +2 a tick
+addr = "0x410318"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the quad's vtable word (+4), 0x003f0470
+addr = "0x01be4764"
+type = "u32"
+
+[[field]]
+name = "pos"            # the quad's rigid body (+0xe8) +0x60
+addr = "0x01be4848 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "euler"          # +0x390 pitch, +0x394 heading, +0x398 roll
+addr = "0x01be4af0"
+type = "f32x4"
+
+[[field]]
+name = "speed"          # +0xc28
+addr = "0x01be5388"
+type = "f32"
+
+[[field]]
+name = "ctl"            # +0x338..+0x344
+addr = "0x01be4a98"
+type = "f32x4"
+
+[[field]]
+name = "dt"             # +0x448, MD198a's tick dt; in back.csv it reads 21..32, not a dt: unknown, unused
+addr = "0x01be4ba8"
+type = "f32"
+
+[[field]]
+name = "wreck"          # +0x708
+addr = "0x01be4e68"
+type = "u32"
+
+[[field]]
+name = "eye_goal"       # filter +0x70: the eye spring's goal, as swept this frame
+addr = "0x00f96bc0"
+type = "f32x4"
+
+[[field]]
+name = "eye"            # filter +0x80: the eye spring's position
+addr = "0x00f96bd0"
+type = "f32x4"
+
+[[field]]
+name = "clear"          # filter +0xd0: the last goal the eye sweep found clear (write-only)
+addr = "0x00f96c20"
+type = "f32x4"
+
+[[field]]
+name = "ring"           # filter +0x220: the contact ring's index
+addr = "0x00f96d70"
+type = "u32"
+
+[[field]]
+name = "boost"          # filter +0x28 look boost, +0x29 eye boost (bytes)
+addr = "0x00f96b78"
+type = "u32"
+
+[[field]]
+name = "out_eye"        # filter +0x260: the eye the viewport is handed
+addr = "0x00f96db0"
+type = "f32x4"
+
+[[field]]
+name = "target"         # the target block (quad +0x9b0), raw: +0x10 body point, +0x30 forward, +0x40 up, +0x50 velocity
+addr = "0x01be5110"
+type = "bytes:208"
+
+[[field]]
+name = "filter"         # the camera's filter, raw, +0x0..+0x2a0
+addr = "0x00f96b50"
+type = "bytes:672"
+
+[[field]]
+name = "camera"         # the camera, raw (+0x5c filter switch, +0x9c user yaw, +0xa0 pitch, +0xa4 zoom)
+addr = "0x00f96e60"
+type = "bytes:192"

@@ -290,3 +290,186 @@ fn the_second_sweep_holds_the_goal_off_a_prop_between_it_and_the_eye() {
     assert!(!cam.sweep_from_eye(&mut wall));
     assert_eq!(cam.eye.goal, Vf::new(3.0, 4.0, 1.5, 1.0));
 }
+
+// --- R51: backed into Rocksbury's south wall, against the original --------------------------------
+
+/// One row of R51's `back.csv` (`context/capture/r51`, research/r51/camera.toml): the column name to
+/// its text.
+struct Row(std::collections::BTreeMap<String, String>);
+
+impl Row {
+    /// A raw column's little-endian words.
+    fn words(&self, k: &str) -> Vec<u32> {
+        let h = &self.0[k];
+        (0..h.len() / 8)
+            .map(|n| u32::from_le_bytes(std::array::from_fn(|b| u8::from_str_radix(&h[8 * n + 2 * b..8 * n + 2 * b + 2], 16).unwrap())))
+            .collect()
+    }
+
+    /// The quadword at byte `off` of raw column `k`.
+    fn q(&self, k: &str, off: usize) -> Vf {
+        let w = self.words(k);
+        v([w[off / 4], w[off / 4 + 1], w[off / 4 + 2], w[off / 4 + 3]])
+    }
+
+    /// The target block as the goal reads it: body point `+0x10`, forward `+0x30`, up `+0x40`,
+    /// velocity `+0x50`, and `+0xb0` set in the air.
+    fn ridden(&self) -> Ridden {
+        let vel = self.q("target", 0x50);
+        Ridden {
+            target: Target {
+                body_point: self.q("target", 0x10),
+                forward: self.q("target", 0x30),
+                up: self.q("target", 0x40),
+                vel,
+                lean: F::ZERO,
+            },
+            airborne: self.words("target")[0xb0 / 4] != 0,
+            speed: F(vel.x() * vel.x() + vel.y() * vel.y() + vel.z() * vel.z()).sqrt(),
+        }
+    }
+
+    /// The filter's spring at byte `off`: goal, position, velocity, last target point.
+    fn spring(&self, off: usize) -> game_sim::camera::Spring {
+        game_sim::camera::Spring {
+            goal: self.q("filter", off),
+            pos: self.q("filter", off + 0x10),
+            vel: self.q("filter", off + 0x20),
+            prev: self.q("filter", off + 0x30),
+        }
+    }
+}
+
+fn back_rows() -> Option<Vec<Row>> {
+    let kit = ps2_oracle::Kit::load().map_err(|w| ps2_oracle::skip(&w)).ok()?;
+    let path = kit.ctx("capture/r51").join("back.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        ps2_oracle::skip(&format!("{} is not there (R51's)", path.display()));
+        return None;
+    };
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_string).collect();
+    Some(lines.map(|l| Row(head.iter().cloned().zip(l.split(',').map(str::to_string)).collect())).collect())
+}
+
+/// Rocksbury's solids (`SX_A.scn`'s collision files), placed as `untamed_race_quad.rs` places them.
+fn rocksbury() -> Option<game_sim::world::Props> {
+    let kit = ps2_oracle::Kit::load().map_err(|w| ps2_oracle::skip(&w)).ok()?;
+    let dir = kit.ctx("untamed/sx_a");
+    let Ok(bytes) = std::fs::read(dir.join("env/sx_a/SX_A.scn.bpb")) else {
+        ps2_oracle::skip(&format!("{} has no SX_A.scn.bpb (SX_A.res extracted, MD168b)", dir.display()));
+        return None;
+    };
+    let ini = game_sim::bpb::ini(&bytes).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let mut text = String::new();
+    let mut last = None;
+    for (section, key, value) in ini.entries() {
+        if last != Some(section) {
+            text += &format!("[{section}]\n");
+            last = Some(section);
+        }
+        text += &format!("{key}={value}\n");
+    }
+    let scene = game_sim::track::Scene::parse(text.as_bytes()).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let files: Vec<std::path::PathBuf> =
+        std::fs::read_dir(dir.join("col")).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let (props, missed) = game_sim::world::Props::load(&scene, |name| {
+        let p = files
+            .iter()
+            .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+            .ok_or("not in SX_A.res")?;
+        std::fs::read(p).map_err(|e| e.to_string())
+    });
+    assert_eq!(missed, ["FP01A_E.col: not in SX_A.res"], "Rocksbury's solids not placed");
+    Some(props)
+}
+
+/// The stadium as the camera's filter meets it. Its walls are props, not the world's triangles: so
+/// the goal sweep's first ask in a frame (the world's, whose loop ends on a miss) meets nothing and
+/// every later ask is the props', unless `world_too`, when the props answer the world's ask as well
+/// (as a [`game_sim::world::Place`] does). The ground is far down.
+struct Stadium<'a> {
+    props: &'a mut game_sim::world::Props,
+    asks: usize,
+    world_too: bool,
+}
+
+impl Surface for Stadium<'_> {
+    fn on_surface(&mut self, p: Vf) -> Vf {
+        Vf::new(p.x(), -100.0, p.z(), p.w())
+    }
+}
+
+impl Obstacles for Stadium<'_> {
+    fn nearest(&mut self, start: Vf, end: Vf) -> Option<Obstacle> {
+        self.asks += 1;
+        if self.asks == 1 && !self.world_too {
+            return None;
+        }
+        self.props.nearest(start, end)
+    }
+}
+
+/// R51: the quad backed into Rocksbury's south wall from MD147's spawn (research/r51/back.pad), the
+/// original's filter read every tick (`back.csv`). Each row's frame is run from the row before's
+/// springs on the row's target block, with Rocksbury's solids as the scene, and the eye's swept goal
+/// and position are the original's. The wall pushes the goal on 380 of the 653 rows run. On the
+/// first, nothing is on the target point's line yet and the eye's sweep puts the goal 2 ft out; on
+/// the other 379 the goal sweep's props hit puts it 2.5 ft out from the face that line meets (two
+/// faces of the wall, about 6 and 1.4 degrees off the z axis), and the eye, on the straight spring,
+/// runs up to 5.68 ft behind the face before it comes back. Asked as world triangles too, the same
+/// wall would stop the goal 2 ft out on all 379.
+///
+/// A row whose filter is not one frame on from the row before's (the reader caught the target block
+/// or the filter a frame early or late; told by the springs' last target point) is left out.
+#[test]
+fn r51_the_eye_backed_into_rocksburys_wall_is_the_originals() {
+    let Some(rows) = back_rows() else { return };
+    let Some(mut props) = rocksbury() else { return };
+    let origin = |r: &Row| UntamedFollow::new(UntamedPreset::read(&Ini::parse(FILE))).goal(&r.ridden()).target;
+    let same = |a: Vf, b: Vf| (0..3).all(|k| a[k] == b[k]);
+    let (mut run, mut pressed, mut by_eye, mut behind, mut two_ft) = (0, 0, 0, 0.0f32, 0);
+    for i in 2..rows.len() - 1 {
+        let (was, now) = (&rows[i - 1], &rows[i]);
+        let Some(j) = (i - 1..=i + 1).find(|&j| same(origin(&rows[j]), now.q("filter", 0xa0))) else { continue };
+        if !same(origin(&rows[j - 1]), was.q("filter", 0xa0)) {
+            continue;
+        }
+        let frame = |world_too: bool, props: &mut game_sim::world::Props| {
+            let mut cam = UntamedFollow::new(UntamedPreset::read(&Ini::parse(FILE)));
+            cam.snap = false;
+            cam.look = was.spring(0x30);
+            cam.eye = was.spring(0x70);
+            let rider = rows[j].ridden();
+            let unswept = cam.goal(&rider).eye;
+            cam.update(F(1.0 / 30.0), &rider, &mut Stadium { props, asks: 0, world_too });
+            (cam, unswept)
+        };
+        let (cam, unswept) = frame(false, &mut props);
+        let (goal, eye) = (now.q("filter", 0x70), now.q("filter", 0x80));
+        assert!(near(cam.eye.goal, goal, 1e-5), "row {i}: goal {:?}, the original's {goal:?}", cam.eye.goal);
+        assert!(near(cam.eye.pos, eye, 1e-4), "row {i}: eye {:?}, the original's {eye:?}", cam.eye.pos);
+        run += 1;
+        if unswept == goal {
+            continue;
+        }
+        let off = |p: Vf, face: Obstacle| (0..3).map(|k| (p[k] - face.point[k]) * face.normal[k]).sum::<f32>();
+        let Some((_, face)) = props.along(origin(&rows[j]), unswept) else {
+            // Nothing on the target point's line: the eye's sweep, from where the eye was to as far
+            // past the goal again, found the goal under a foot in front of the wall.
+            let from = was.q("filter", 0x80);
+            let past = Vf::new(2.0 * unswept.x() - from.x(), 2.0 * unswept.y() - from.y(), 2.0 * unswept.z() - from.z(), 1.0);
+            let (_, face) = props.along(from, past).expect("the goal moved with no wall on either line");
+            assert!(off(unswept, face) < 1.0 && (off(goal, face) - 2.0).abs() < 1e-3, "row {i}");
+            by_eye += 1;
+            continue;
+        };
+        assert!((off(goal, face) - 2.5).abs() < 1e-3, "row {i}: goal {} ft off the wall", off(goal, face));
+        pressed += 1;
+        behind = behind.max(-off(eye, face));
+        let (merged, _) = frame(true, &mut props);
+        two_ft += usize::from((off(merged.eye.goal, face) - 2.0).abs() < 1e-3);
+    }
+    assert_eq!((run, pressed, by_eye, two_ft), (653, 379, 1, 379));
+    assert!((behind - 5.68).abs() < 0.01, "the eye ran {behind} ft behind the wall");
+}
