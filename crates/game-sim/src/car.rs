@@ -3066,6 +3066,15 @@ pub fn parked_spawn(world: &mut impl crate::world::World, model: &CarModel, at: 
     Vf::new(at.x(), (F(ground.y()) + F(model.bounds.centre.y())).0, at.z(), 1.0)
 }
 
+/// **The up a parked car is spawned with** (B47): the ground's normal under its map spot, which the
+/// original keeps as the car's spawn up (its `+0x290`) and squares its nose to. free07's baja stands
+/// on a 30-degree face: turned upright instead, it leans onto the slope differently and rolls off
+/// 30 frames before the original's.
+pub fn parked_up(world: &mut impl crate::world::World, at: Vf) -> Vf {
+    let (_, normal) = world.ground(Vf::new(at.x(), at.y(), at.z(), 1.0));
+    Vf::new(normal.x(), normal.y(), normal.z(), 0.0)
+}
+
 /// `CofGAI` turned to a car spawned along `facing` and squared to `up`: what [`Machine::new`] lifted
 /// the body by before S484 put it at the spot itself. The shell's taken car keeps the lift, so it
 /// is still dropped from where its tires were tuned.
@@ -3164,16 +3173,18 @@ fn node_matrix(body: &crate::biplane::Body) -> crate::math::Mat4 {
     crate::math::Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
 }
 
-/// How many frames a parked car's load settle may take before it is left as it stands: the truck's
-/// is 57 ([`Machine::settle`]).
-pub const SETTLE_FRAMES: usize = 400;
+/// How many frames a parked car's load settle may take before it is left as it stands, still awake,
+/// for play to step on: the truck sleeps on its 57th ([`Machine::settle`]). B47: free07's baja, on a
+/// slope, never sleeps, and R52's two images of it put the original's load at 88 and 98 frames
+/// before play; 400 left the port's 21 ft further down the slope than the original's at the start.
+pub const SETTLE_FRAMES: usize = 90;
 
 /// The frame time free09's load steps a parked car at (S484).
 pub const LOAD_DT: f32 = 0.03333;
 
 impl Parked {
     /// A car parked at its map spot `at` (`machine.txt`'s), its nose along `facing`: spawned over the
-    /// ground ([`parked_spawn`]), built ([`Machine::new`]) and settled at the load's frame time
+    /// ground ([`parked_spawn`]) and squared to it ([`parked_up`]), built ([`Machine::new`]) and settled at the load's frame time
     /// ([`LOAD_DT`]) until it sleeps, as the original's load leaves it.
     #[allow(clippy::too_many_arguments)]
     pub fn settled(
@@ -3189,7 +3200,7 @@ impl Parked {
     ) -> Parked {
         let world = &mut Through(world);
         let spawn = parked_spawn(world, model, at);
-        let mut machine = Machine::new(&car, model, spawn, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
+        let mut machine = Machine::new(&car, model, spawn, facing, parked_up(world, at));
         let mut collision = collision_of_model(&car, model, &machine.body, rays);
         machine.settle(&car, world, &mut collision, F(LOAD_DT), acos, curve, SETTLE_FRAMES);
         let rest = node_matrix(&machine.body);

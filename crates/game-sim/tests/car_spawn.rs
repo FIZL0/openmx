@@ -2,12 +2,14 @@
 //! cars the original parks, and that the car it builds drives; and a parked car's settle and sleep
 //! (S484) against the original's own, stepped in the interpreter.
 
+use std::sync::Arc;
+
 use game_render::disc::Disc;
 use game_sim::air::AcosTable;
 use game_sim::bindings::Command;
 use game_sim::camera::CurveTable;
 use game_sim::archive::Res;
-use game_sim::car::{Car, CarModel, Kind, Machine, UNDRIVEN_TOP_WHEEL_SPEED, collision_of_model, parked_spawn};
+use game_sim::car::{Car, CarModel, Kind, Machine, SETTLE_FRAMES, UNDRIVEN_TOP_WHEEL_SPEED, collision_of_model, parked_spawn, parked_up};
 use game_sim::eco::{Trees, Wooded};
 use game_sim::flight_search::Rays;
 use game_sim::track::{self, Scene, Terrain};
@@ -161,28 +163,7 @@ fn a_fresh_car_drives_off_on_the_gas() {
 /// `f` on free09 as a parked car meets it: the terrain, the props and the trees, out of the disc's
 /// two track archives.
 fn on_free09<R>(disc: &mut Disc, f: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> R {
-    let names = ["Tracks\\free09.res", "Tracks\\free09_2.res"];
-    let parts: Vec<(Vec<u8>, Res)> = names.iter().filter_map(|n| disc.member(n).ok()).filter_map(|b| Res::parse(&b).ok().map(|r| (b, r))).collect();
-    let by_end = |end: &str| {
-        let want = end.to_ascii_lowercase();
-        parts.iter().find_map(|(b, r)| {
-            let e = r.entries.iter().find(|e| {
-                let n = e.name.to_ascii_lowercase();
-                n == want || n.ends_with(&format!("\\{want}"))
-            })?;
-            r.read(b, e).ok()
-        })
-    };
-    let (bytes, res) = &parts[0];
-    let member = |end: &str| res.read(bytes, res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(end)).unwrap()).unwrap();
-    let scene = Scene::parse(&member(".scn")).unwrap();
-    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
-    let terrain_file = by_end(leaf.rsplit('\\').next().unwrap()).unwrap();
-    let terrain = Terrain::parse(&terrain_file).unwrap();
-    let (props, _) = Props::load(&scene, |want| by_end(want).ok_or_else(|| format!("no {want}")));
-    let ground = Ground::new(&terrain, &scene.terrain);
-    let (trees, _) = Trees::on_ground(&member(".esb"), &ground, &CurveTable::build()).unwrap();
-    f(&mut Wooded { world: Place { ground, props }, trees })
+    on_track(disc, &["Tracks\\free09.res", "Tracks\\free09_2.res"], f)
 }
 
 /// The parked truck as the port builds it: its `.phy`, model, rays and hull out of `machine.res`.
@@ -323,4 +304,143 @@ fn a_parked_truck_comes_to_rest_where_the_original_parks_it() {
     }
     eprintln!("{seen} images compared");
     });
+}
+
+/// R52's free07 images (copy 3, slot (5, 1)): the game frames since "in game" each was saved on,
+/// and its baja body's `x`.
+const BAJA_IMAGES: [(&str, usize, f32); 2] = [("r52-free07-baja.ee.bin", 303, 3916.3367), ("r52-free07-baja-later.ee.bin", 1711, 3941.2859)];
+
+/// free07's `[Machine1]`: its `Position` and `Direction` in `machine.txt`.
+const BAJA_SPOT: (Vf, Vf) = (Vf([3899.637, 151.1854, 2438.25, 1.0]), Vf([0.9989964, -0.03599517, 0.02666235, 0.0]));
+
+/// **free07's parked baja rolls on as the original's, and play starts where the original's load
+/// leaves it** (B47). R52's image's baja is put back at its spawn with its own calls (its stored
+/// spot, then its enable), as [`a_parked_truck_settles_and_sleeps_as_the_original`]'s truck, and
+/// stepped by free07's node update at the load's frame time beside the port's car. Its spawn's up
+/// (`+0x290`) is the ground's normal under the spot, a 30-degree face ([`parked_up`]). On this slope
+/// neither sleeps: the port's body keeps within 0.05 ft of the original's over 1810 frames (its
+/// velocity word is 1e-5 off from the first frame, from the turn's last bit, and the two stick-slip
+/// out of phase later, but both creep downhill alike).
+///
+/// The original's body passes R52's two images' places 88 and 98 frames after the frames they were
+/// saved on, so its load steps the car about 90 frames before play: [`SETTLE_FRAMES`]. The port
+/// once settled it 400 frames, and upright, so it left the slope's near-stall 30 frames early and
+/// stood 21 ft further down at the start of play (R52 read that as a rest at 3919.8, but that is the
+/// hull's node: the body was still awake and rolling).
+#[test]
+fn free07s_parked_baja_rolls_on_as_the_original() {
+    let Some(kit) = Kit::load().map_err(|why| skip(&why)).ok() else { return };
+    let Some(mut disc) = Disc::open_configured().map_err(|why| skip(&why)).ok() else { return };
+    let path = kit.ctx("states").join(BAJA_IMAGES[0].0);
+    let Some(mut ee) = Ee::from_ram(&path).map_err(|why| skip(&why)).ok() else { return };
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let res = disc.res("machine.res").unwrap();
+    let kind = Kind::Baja;
+    let car = Car::read_bytes(&res.read(kind.phy()).unwrap(), kind);
+    let model = CarModel::read(&res.read(PARKED[1].model).unwrap()).unwrap();
+    let rays = track::Rays::parse(&res.read(kind.rays()).unwrap()).unwrap();
+    let hull = track::Mesh::parse(&res.read(kind.hull()).unwrap()).unwrap();
+    on_track(&mut disc, &["Tracks\\free07.res", "Tracks\\free07_2.res"], |world| {
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+    let c = PARKED[1].at;
+    let w = c + wrapper_at::OF_CAR;
+    let vt = ee.u32_at(w + wrapper_at::VTABLE);
+    let node = ee.u32_at(w + wrapper_at::NODE);
+    ee.call(ee.u32_at(vt + wrapper_at::PUT_BACK), &[u64::from(w)], &[], 50_000_000);
+    ee.call(ee.u32_at(vt + wrapper_at::ENABLE), &[u64::from(w)], &[], 50_000_000);
+    for t in car_at::TIRES.map(|o| ee.u32_at(c + o)) {
+        for o in [0xe0, 0x1a0, 0x1e0, 0x1f4, 0x214, 0x230, 0x234, 0x238, 0x250, 0x254, 0x258, 0x2b0] {
+            ee.set_u32(t + o, 0);
+        }
+    }
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    ee.set_f32(app + 0x344, LOAD_DT);
+    ee.set_f32(app + 0x348, 1.0 / LOAD_DT);
+    let b = ee.u32_at(c + car_at::BODY);
+    let node_update = addr("collision_node_update").unwrap();
+
+    // machine.txt's spot gives the original's spawn but for the ground's last bits (5e-5 ft), its
+    // nose the file's, its up the ground's normal; the put-back turns the body by them.
+    let (at, facing) = BAJA_SPOT;
+    let spawn = parked_spawn(world, &model, at);
+    assert!((spawn.y() - quad(&ee, c + car_at::SPAWN).y()).abs() < 1e-4, "spawn {spawn:?}");
+    // (The original's reader makes the file's -0.03599517 one bit under the port's.)
+    let nose = quad(&ee, c + car_at::FACING);
+    assert!((0..3).all(|i| (facing.0[i] - nose.0[i]).abs() < 1e-6), "nose {nose:?}");
+    let up = parked_up(world, at);
+    assert_eq!(bits3(up), bits3(quad(&ee, c + car_at::UP)), "up {up:?}");
+    let mut m = Machine::new(&car, &model, quad(&ee, c + car_at::SPAWN), nose, up);
+    // Within a bit: the put-back turns it from the store's squared nose and up.
+    let turn = quad(&ee, b + 0x170);
+    assert!((0..4).all(|i| (m.body.quat.0[i] - turn.0[i]).abs() < 1e-7), "turned {:?} want {turn:?}", m.body.quat);
+    for (k, o) in car_at::TIRES.into_iter().enumerate() {
+        m.wheels[k].mount = quad(&ee, ee.u32_at(c + o) + 0x80);
+    }
+    m.body.inv_inertia = quad(&ee, b + 0x120);
+    let mut col = collision_of_model(&car, &model, &m.body, Rays::of(&rays));
+
+    let mut passed = [None; 2];
+    let (mut last_x, mut worst) = (0.0f32, 0.0f32);
+    let mut at_play = Vf::default();
+    for frame in 0..1810 {
+        ee.call(node_update, &[u64::from(node)], &[LOAD_DT], 2_000_000_000);
+        m.step_struck(&car, world, &mut col, F(LOAD_DT), &acos, &curve, &mut |_| F::ZERO);
+        let want = quad(&ee, b + 0x60);
+        assert_ne!(ee.u32_at(b), 0, "frame {frame}: the original's is awake");
+        assert!(!m.at_rest(&car), "frame {frame}: the port's at rest at {:?}", m.body.position);
+        let off = (0..3).map(|i| (m.body.position.0[i] - want.0[i]).abs()).fold(0.0, f32::max);
+        worst = worst.max(off);
+        assert!(off < 0.05, "frame {frame}: {:?} want {want:?}", m.body.position);
+        for (k, &(_, _, x)) in BAJA_IMAGES.iter().enumerate() {
+            if last_x < x && want.x() >= x {
+                passed[k] = Some(frame);
+            }
+        }
+        last_x = want.x();
+        if frame + 1 == SETTLE_FRAMES {
+            at_play = want;
+        }
+    }
+    eprintln!("the port's baja within {worst} ft of the original's; passes the images' places on {passed:?}");
+    for (k, &(state, saved, _)) in BAJA_IMAGES.iter().enumerate() {
+        let load = passed[k].expect(state) - saved;
+        assert!((85..=100).contains(&load), "{state}: the load stepped {load} frames");
+        assert!(load.abs_diff(SETTLE_FRAMES) <= 10, "{state}: the load stepped {load} frames, the port's {SETTLE_FRAMES}");
+    }
+
+    // The port's own settle, as the shell parks it (its model's mounts and inertia), leaves it awake
+    // where the original's stands at that frame.
+    let p = game_sim::car::Parked::settled(Arc::new(car.clone()), &model, Rays::of(&rays), Arc::new(hull), world, at, facing, &acos, &curve);
+    let got = p.machine.body.position;
+    let off = (0..3).map(|i| (got.0[i] - at_play.0[i]).abs()).fold(0.0, f32::max);
+    eprintln!("the port's settle leaves it awake {} at {got:?}, {off} ft from the original's", p.awake());
+    assert!(p.awake(), "the settle put it to sleep at {got:?}");
+    assert!(off < 0.05, "settled at {got:?}, the original's at {at_play:?}");
+    });
+}
+
+/// `f` on the track whose archives are `names` (the first holding the scene), as a parked car meets
+/// it: the terrain, the props and the trees.
+fn on_track<R>(disc: &mut Disc, names: &[&str], f: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> R {
+    let parts: Vec<(Vec<u8>, Res)> = names.iter().filter_map(|n| disc.member(n).ok()).filter_map(|b| Res::parse(&b).ok().map(|r| (b, r))).collect();
+    let by_end = |end: &str| {
+        let want = end.to_ascii_lowercase();
+        parts.iter().find_map(|(b, r)| {
+            let e = r.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })?;
+            r.read(b, e).ok()
+        })
+    };
+    let (bytes, res) = &parts[0];
+    let member = |end: &str| res.read(bytes, res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(end)).unwrap()).unwrap();
+    let scene = Scene::parse(&member(".scn")).unwrap();
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_file = by_end(leaf.rsplit('\\').next().unwrap()).unwrap();
+    let terrain = Terrain::parse(&terrain_file).unwrap();
+    let (props, _) = Props::load(&scene, |want| by_end(want).ok_or_else(|| format!("no {want}")));
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let (trees, _) = Trees::on_ground(&member(".esb"), &ground, &CurveTable::build()).unwrap();
+    f(&mut Wooded { world: Place { ground, props }, trees })
 }
