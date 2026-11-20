@@ -2328,7 +2328,7 @@ impl<P: sim_world::World> Game for World<P> {
         // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
         // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
         let dt = self.played_dt.unwrap_or(dt);
-        // P378: every seat's Sim holds the parked machines nobody is up on.
+        // P378: every seat's Sim holds the parked machines nobody is up on (P380: as cars its bike meets).
         let driven: Vec<Kind> = self.seats.iter().map(|s| s.garage.up).collect();
         for s in &mut self.seats {
             s.garage.in_play.hand_to(&mut s.sim, &driven);
@@ -2916,6 +2916,68 @@ mod split_contact {
         // Parked on an idle pad the buggy creeps on along its nose a little either way.
         assert!(fastest > idle + 1.0, "the car was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
         assert!(pushed > still + 0.5, "the car moved {pushed} ft along the bike's way (with no hull {still})");
+    }
+
+    /// P380: the shell's lone bike meets the truck the original parks in play as the Sim's own (S485).
+    /// The disc's monster truck is settled 25 ft up the bike's way, nose along it, and parked in the
+    /// seat's Sim; the bike rolls into its tail at 30 ft/s. Its body rays strike the truck's hull: the
+    /// bike is stopped short of where it rolls on to with nothing parked, and the truck is woken and
+    /// pushed along its way.
+    #[test]
+    fn the_shells_bike_wakes_and_pushes_the_parked_truck() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let ride = |parked: bool| {
+            let mut sim = Sim::new(0x380);
+            std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.sense.wrecks_enabled = false;
+            sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+            let mut world = split(vec![sim]);
+            if parked {
+                let in_play = crate::vehicle::InPlay::settled(&spots, &[false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+                assert_eq!(in_play.len(), 1, "the truck is parked");
+                world.seats[0].garage.in_play = in_play;
+            }
+            world.simulate(DT, Input::default(), &mut Default::default());
+            let rest = world.seats[0].sim.parked_cars.first().map(|p| p.machine.body.position);
+            assert_eq!(rest.is_some(), parked, "the seat's Sim holds the truck");
+            world.seats[0].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+            let mut woken = false;
+            for _ in 0..45 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                woken |= world.seats[0].sim.parked_cars.first().is_some_and(|p| p.awake());
+            }
+            let bike = world.seats[0].sim.rider.ride.position().z();
+            let pushed = rest.map_or(0.0, |r| world.seats[0].sim.parked_cars[0].machine.body.position.z() - r.z());
+            (bike, woken, pushed)
+        };
+        let ((bike, woken, pushed), (through, ..)) = (ride(true), ride(false));
+        println!("bike at z {bike}, the truck woken {woken}, pushed {pushed} ft; with nothing parked the bike at z {through}");
+        assert!(through > 30.0, "with nothing parked the bike stopped at z {through}");
+        assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
+        assert!(woken, "the bike's strike never woke the truck");
+        // Asleep it does not move at all; the 125's strike at 30 ft/s shoves it 0.09 ft on.
+        assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
     }
 
     /// MD179: a split-screen bike meets the other seat's quad as it meets a car (F26). Seat 1 takes
@@ -8522,8 +8584,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("race: {} cards, {} computer", laps.cards.len(), computers);
     }
     // P378: the machines the original parks on the ride ([`vehicle::in_play`], free09's monster truck)
-    // settled where they come to rest, every seat's Sim handed their hulls for its AI riders'
-    // feelers, but for a machine a player is up on.
+    // settled where they come to rest, and parked in every seat's Sim (P380, `Sim::park_cars`), where
+    // a ridden bike strikes and pushes them and the AI riders' feelers sweep them, but for a machine
+    // a player is up on.
     {
         let flying: Vec<bool> = seats.iter().map(|s| s.garage.up == Kind::Biplane).collect();
         // Off `machine.res` itself: the ride's cars are built without their collision files.
@@ -8532,7 +8595,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let in_play = vehicle::InPlay::settled(&lot.in_play, &flying, read, &mut sim, &tables.ride);
         for k in 0..in_play.len() {
             let (kind, at) = in_play.at(k).expect("in range");
-            println!("parked: {} at rest at {:.1}, {:.2}, {:.1}, its hull in the AI riders' world", kind.name(), at.x(), at.y(), at.z());
+            println!("parked: {} at rest at {:.1}, {:.2}, {:.1}, in the riders' world", kind.name(), at.x(), at.y(), at.z());
         }
         let driven: Vec<Kind> = seats.iter().map(|s| s.garage.up).collect();
         for s in &mut seats {

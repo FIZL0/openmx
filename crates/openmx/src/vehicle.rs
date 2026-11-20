@@ -2937,15 +2937,20 @@ pub fn in_play(machine_txt: &[u8]) -> Vec<(usize, Machine, Spawn)> {
         .collect()
 }
 
-/// **The parked machines' hulls in a seat's Sim** (P378): each machine [`in_play`] parks, its `f.col`
-/// where its body fell asleep, and which machine it is; [`InPlay::hand_to`] gives a Sim
-/// ([`Sim::parked`], what its AI riders' feelers sweep) those nobody drives.
+/// **The parked machines in a seat's Sim** (P378, P380): each car [`in_play`] parks, settled where it
+/// was parked ([`game_sim::car::Parked`]), and which machine it is; [`InPlay::hand_to`] parks those
+/// nobody drives in a Sim ([`Sim::park_cars`]): a ridden bike strikes, wakes and pushes them, and
+/// [`Sim::parked`], what its AI riders' feelers sweep, holds their hulls where they rest.
 ///
 /// Only the cars have a rest pose ([`game_sim::car::Parked::settled`], S484), so a file whose
 /// `[Machine1]` is the plane or the helicopter (free06, free10) parks nothing here yet.
 #[derive(Clone, Debug, Default)]
 pub struct InPlay {
-    parked: std::sync::Arc<[(Kind, std::sync::Arc<game_sim::track::Mesh>, game_sim::math::Mat4)]>,
+    /// The cars as the load settled them.
+    parked: std::sync::Arc<[(Kind, game_sim::car::Parked)]>,
+    /// Each car as this seat's Sim last held it (P380), once it has been handed one: where a car taken
+    /// out of the Sim while a player drives its kind is put back from.
+    kept: Vec<game_sim::car::Parked>,
     /// Which of them the Sim was last handed, once it has been.
     handed: Option<Vec<bool>>,
 }
@@ -2973,10 +2978,10 @@ impl InPlay {
                 };
                 let car = std::sync::Arc::new(c.car);
                 let p = game_sim::car::Parked::settled(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve);
-                Some((kind, p.hull, p.rest))
+                Some((kind, p))
             })
             .collect();
-        InPlay { parked, handed: None }
+        InPlay { parked, kept: Vec::new(), handed: None }
     }
 
     /// How many machines are parked.
@@ -2986,30 +2991,39 @@ impl InPlay {
 
     /// Where machine `k` rests: its node's origin.
     pub fn at(&self, k: usize) -> Option<(Kind, Vf)> {
-        self.parked.get(k).map(|(kind, _, rest)| (*kind, rest.0[3]))
+        self.parked.get(k).map(|(kind, p)| (*kind, p.rest.0[3]))
     }
 
     /// The same machines, not yet handed to any Sim: what a seat's garage starts with.
     pub fn fresh(&self) -> InPlay {
-        InPlay { parked: std::sync::Arc::clone(&self.parked), handed: None }
+        InPlay { parked: std::sync::Arc::clone(&self.parked), kept: Vec::new(), handed: None }
     }
 
-    /// **`sim`'s parked machines** ([`Sim::parked`], [`game_sim::ai::parked_hull`]): every one but those
-    /// a player is up on (`driven`, every seat's machine), which the original's player has taken out of
-    /// its spot, and back once they leave it. Only when that changes; a ride that parks nothing leaves
-    /// the Sim alone.
+    /// **`sim`'s parked cars** ([`Sim::park_cars`], P380): every one but those a player is up on
+    /// (`driven`, every seat's machine), which the original's player has taken out of its spot, and
+    /// back once they leave it, as the Sim last held it (struck, pushed or asleep). Only when that
+    /// changes; a ride that parks nothing leaves the Sim alone.
     pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
         if self.parked.is_empty() {
             return;
         }
-        let shown: Vec<bool> = self.parked.iter().map(|(kind, ..)| !driven.contains(kind)).collect();
+        let shown: Vec<bool> = self.parked.iter().map(|(kind, _)| !driven.contains(kind)).collect();
         if self.handed.as_ref() == Some(&shown) {
             return;
         }
-        sim.parked = (self.parked.iter().zip(&shown))
-            .filter(|(_, on)| **on)
-            .map(|((_, hull, rest), _)| game_sim::world::Prop::on((**hull).clone(), rest))
-            .collect();
+        if self.kept.len() != self.parked.len() {
+            self.kept = self.parked.iter().map(|(_, p)| p.clone()).collect();
+        }
+        // What the Sim did to the cars it held since it was last handed them, kept for their return.
+        if let Some(was) = &self.handed {
+            let held: Vec<usize> = (0..was.len()).filter(|&k| was[k]).collect();
+            if held.len() == sim.parked_cars.len() {
+                for (k, p) in held.into_iter().zip(std::mem::take(&mut sim.parked_cars)) {
+                    self.kept[k] = p;
+                }
+            }
+        }
+        sim.park_cars((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect());
         self.handed = Some(shown);
     }
 }
@@ -4894,7 +4908,7 @@ mod in_play_tests {
         assert!(in_play(b"[Machine1]\nType = Monster\nPosition = 1, 2, 3\n").is_empty(), "no NumberOfMachines, nothing parked");
     }
 
-    /// P378: the truck settled on a floor, its hull handed to a Sim, dropped while a seat drives a
+    /// P378, P380: the truck settled on a floor, parked in a Sim, dropped while a seat drives a
     /// monster truck and back once it leaves it; nothing parked for a first player on the plane.
     #[test]
     fn the_parked_truck_leaves_the_sims_list_while_driven() {
@@ -4920,10 +4934,13 @@ mod in_play_tests {
         assert!(at.y() > 130.0 && at.y() < 140.0, "the truck's node rests at y {}, on the floor at 135", at.y());
         let mut sim = Sim::new(0x378);
         parked.hand_to(&mut sim, &[Kind::Bike]);
-        assert_eq!(sim.parked.len(), 1, "nobody drives it");
+        assert_eq!((sim.parked.len(), sim.parked_cars.len()), (1, 1), "nobody drives it");
+        // P380: the truck as the Sim left it is what comes back.
+        sim.parked_cars[0].struck();
         parked.hand_to(&mut sim, &[Kind::Bike, Kind::Monster]);
-        assert_eq!(sim.parked.len(), 0, "the second seat drives a truck");
+        assert_eq!((sim.parked.len(), sim.parked_cars.len()), (0, 0), "the second seat drives a truck");
         parked.hand_to(&mut sim, &[Kind::Buggy, Kind::Bike]);
-        assert_eq!(sim.parked.len(), 1, "back once nobody drives a truck");
+        assert_eq!((sim.parked.len(), sim.parked_cars.len()), (1, 1), "back once nobody drives a truck");
+        assert!(sim.parked_cars[0].awake(), "the truck came back as the Sim left it, woken");
     }
 }
