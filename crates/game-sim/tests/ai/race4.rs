@@ -97,6 +97,11 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// hand: this replay keeps the image's holds, so the grips never turn with the bars. With the
 /// original's holds of each frame, every part stays within 0.08 ft through 130
 /// (`s490_c33s_bodies_posed_in_the_frame_follow_the_original`); the early touch stays even then.
+/// T9: each rider's chassis is drawn after its body as the shell's `ai_ride` draws it, and its grips
+/// are the next step's holds (`c33_hold`). The marks do not move. Drawn in the frame, those holds
+/// are the original's within 0.004 ft but for the chassis' fresh start (to 16) and each AI rider's
+/// bars jump (S490_HOLDS_APART). Ridden in the frame, ai0's parts stay within 0.093 ft through 130
+/// (part 7 within 0.01 at 24-36). This replay goes in the frame once B42 moves the early touch.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -293,6 +298,26 @@ impl Bikes {
             .unwrap_or_else(|| panic!("{leaf} in no archive"));
         Phy::read_bytes(&bytes, &tables.ride.curve)
     }
+
+    /// T9: the chassis `sub` (`250SX.sub`) names, out of whichever bike archive carries it, loaded
+    /// as the shell loads an AI rider's bike (no stunts, as [`super::wreck_dust::s483_ragdoll_body`]'s
+    /// body).
+    pub(crate) fn chassis(&mut self, sub: &str) -> game_render::vehicle::Chassis {
+        let bikes: Vec<String> = self
+            .disc
+            .entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+            .collect();
+        let res = bikes
+            .iter()
+            .find_map(|b| self.disc.res(b).ok().filter(|r| r.find_suffix(sub).is_some()))
+            .unwrap_or_else(|| panic!("{sub} in no bike archive"));
+        let vehicle = game_render::scene::Vehicle::parse(&game_render::ini::text(&res.read_suffix(sub).unwrap_or_else(|e| panic!("{e}"))));
+        game_render::vehicle::Chassis::load(vec![res], &vehicle.mcf, "bike_", &[], game_render::vehicle::params())
+            .unwrap_or_else(|e| panic!("{sub}'s chassis: {e}"))
+    }
 }
 
 /// The rider at `r`, built on `phy` (named `name`) and seeded off the image.
@@ -412,7 +437,9 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
 /// request after frame t, off an interpreter copy stepped beside the Sim, [`c33_frame_holds`]): ai0's
 /// riding bones stay within [`S490_BONES_WITHIN`] of the copy's through [`S490_THROUGH`]. Posed
 /// after the step instead (the replay above), they are 0.43 ft off at 128; with the image's holds
-/// kept, part 7 (a hand) strays 0.42 ft at 24-36, the grips not turning with the bars.
+/// kept, part 7 (a hand) strays 0.42 ft at 24-36, the grips not turning with the bars. T9: each
+/// rider's chassis is drawn in the frame too, and its holds are held to the original's
+/// ([`S490_HOLDS_WITHIN`]).
 #[test]
 fn s490_c33s_bodies_posed_in_the_frame_follow_the_original() {
     c33_replay(true);
@@ -426,6 +453,19 @@ const S490_BONES_WITHIN: f32 = 0.1;
 /// That gap stays with the original's joints and holds both fed, and the actor's fades, damping and
 /// hold pins agree, so it is in the riding body's own step after the restart at 120.
 const S490_THROUGH: u64 = 130;
+
+/// T9: how far each rider's drawn chassis holds ([`c33_hold`], drawn in the frame after its body)
+/// may be from the original's request after the frame ([`c33_frame_holds`]), in feet: the root's
+/// place and the four points, in the bike's frame. The run still rides the original's. 0.0041 is
+/// the worst seen outside [`S490_HOLDS_APART`].
+const S490_HOLDS_WITHIN: f32 = 0.006;
+/// The first tick the drawn holds are held to. The chassis starts fresh, not from the image, and
+/// every rider's root is 0.07 ft off at 4, closing about 0.005 ft a tick until 16.
+const S490_HOLDS_FROM: u64 = 17;
+/// The ticks each of [`C33_RIDERS`]' drawn holds are let go: both an AI rider's grips (the bars) jump
+/// from the original's at one tick (ai0 0.13 ft at 64, ai1 0.09 at 63, ai2 0.03 at 54) and close
+/// linearly over about ten; the feet and the root stay within 0.003 ft. The human's never part.
+const S490_HOLDS_APART: [std::ops::RangeInclusive<u64>; 4] = [64..=73, 63..=72, 1..=0, 54..=62];
 
 /// The original's request after the frame, per rider of [`C33_RIDERS`]: the root node and the four
 /// holds' world points (rider `+0xb80`: `+0x50`, `+0xb0..+0xe0`), as [`super::wreck_dust::s483_riding_of`]
@@ -518,6 +558,9 @@ fn c33_replay(in_frame: bool) {
         (body, doll)
     }).collect();
     c33_riding_seed(&ee, &mut sim, &Arc::new(kits.swap_remove(0)), &mut bodies);
+    // T9: each rider's bike as the shell draws it, whose grips are the holds of every step after the
+    // first (that one rides the image's).
+    let mut chassis: Vec<_> = (0..C33_RIDERS.len()).map(|k| bikes.chassis(S363_C33_MODELS[c33_player(&ee, k)])).collect();
     // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
     sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
     // S448: the tyre tracks, as the image holds them, and each one's entry in its rider's manager.
@@ -562,6 +605,7 @@ fn c33_replay(in_frame: bool) {
         (copy, clock)
     });
     let mut worst = (0.0f32, 0, 0);
+    let mut worst_hold = (0.0f32, 0, 0);
     let by_player: Vec<usize> = (0..C33_RIDERS.len()).map(|p| (0..C33_RIDERS.len()).find(|&k| c33_player(&ee, k) == p).unwrap()).collect();
     for (n, pair) in rows.windows(2).enumerate() {
         let (last, row) = (&pair[0], &pair[1]);
@@ -575,7 +619,7 @@ fn c33_replay(in_frame: bool) {
         match copy.as_mut() {
             None => {
                 sim.step_all(last.dt, &controls, &mut world);
-                c33_pose(&ee, &mut sim, &mut bodies, &controls, last.dt);
+                c33_pose(&ee, &mut sim, &mut bodies, &mut chassis, &controls, last.dt);
             }
             Some((copy, clock)) => {
                 super::draws::neutral_pad(copy);
@@ -589,10 +633,22 @@ fn c33_replay(in_frame: bool) {
                     let (root, at) = &held[by_player[p]];
                     let inv = math::inverse(&rider.ride.transform()).unwrap();
                     let local = |v: Vf| math::transform_point(&inv, v);
-                    rider.holds = Some(Arc::new(game_sim::ragdoll_riding::Holds { root: math::mul(root, &inv), hands: [local(at[0]), local(at[1])], feet: [local(at[2]), local(at[3])] }));
+                    let theirs = game_sim::ragdoll_riding::Holds { root: math::mul(root, &inv), hands: [local(at[0]), local(at[1])], feet: [local(at[2]), local(at[3])] };
                     let (body, doll) = &mut bodies[by_player[p]];
                     body.ride(last.dt, rider, hands, game_sim::rider::Gate::default());
                     rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+                    // T9: the chassis drawn in the frame, its holds against the original's.
+                    c33_hold(rider, &mut chassis[by_player[p]], body, last.dt);
+                    let ours = rider.holds.as_deref().unwrap();
+                    let gap = |a: Vf, b: Vf| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt();
+                    let off = [gap(ours.root.0[3], theirs.root.0[3]), gap(ours.hands[0], theirs.hands[0]), gap(ours.hands[1], theirs.hands[1]), gap(ours.feet[0], theirs.feet[0]), gap(ours.feet[1], theirs.feet[1])];
+                    let off = off.into_iter().fold(0.0f32, f32::max);
+                    let held = row.frame >= S490_HOLDS_FROM && !S490_HOLDS_APART[by_player[p]].contains(&row.frame);
+                    assert!(!held || off <= S490_HOLDS_WITHIN, "tick {}: {}'s drawn holds are {off} ft from the original's", row.frame, C33_NAMES[by_player[p]]);
+                    if held && off > worst_hold.0 {
+                        worst_hold = (off, row.frame, by_player[p]);
+                    }
+                    rider.holds = Some(Arc::new(theirs));
                 });
                 for (k, (body, doll)) in bodies.iter_mut().enumerate() {
                     c33_drawn(sim.rider_of(c33_player(&ee, k)), body, doll);
@@ -703,6 +759,7 @@ fn c33_replay(in_frame: bool) {
     }
     if in_frame {
         println!("posed in the frame, ai0's riding parts are within {:.4} ft of the original's through tick {S490_THROUGH} (worst part {} at tick {})", worst.0, worst.2, worst.1);
+        println!("the drawn chassis' holds are within {:.4} ft of the original's (worst {} at tick {})", worst_hold.0, C33_NAMES[worst_hold.2], worst_hold.1);
         return;
     }
     for (i, lane) in lanes.iter_mut().enumerate() {
@@ -954,7 +1011,17 @@ fn c33_posed(ee: &Ee, a: u32, r: u32, body: &mut game_render::rider::Body, doll:
 /// (openmx's `ai_ride`) and a seat's: the vehicle animation picks the clip on the levers the brain
 /// holds now (the human on its pad's), and the skeleton it poses is what the riding body follows on
 /// the next step. The clip is what lifts a slow rider's foot off its peg (the look-around clip).
-fn c33_pose(ee: &Ee, sim: &mut Sim, bodies: &mut [(game_render::rider::Body, game_render::rider::Ragdolled)], controls: &[Controls], dt: F) {
+///
+/// T9: and each rider's chassis is drawn after its body, its holds handed to the next step
+/// ([`c33_hold`]), as `ai_ride` hands an AI rider's.
+fn c33_pose(
+    ee: &Ee,
+    sim: &mut Sim,
+    bodies: &mut [(game_render::rider::Body, game_render::rider::Ragdolled)],
+    chassis: &mut [game_render::vehicle::Chassis],
+    controls: &[Controls],
+    dt: F,
+) {
     for (k, (body, doll)) in bodies.iter_mut().enumerate() {
         let p = c33_player(ee, k);
         let hands = match sim.ai.as_deref().and_then(|lane| lane.pilots.iter().find(|(q, _)| *q == p)) {
@@ -965,7 +1032,27 @@ fn c33_pose(ee: &Ee, sim: &mut Sim, bodies: &mut [(game_render::rider::Body, gam
         body.ride(dt, rider, &hands, game_sim::rider::Gate::default());
         rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
         c33_drawn(rider, body, doll);
+        c33_hold(rider, &mut chassis[k], body, dt);
     }
+}
+
+/// T9: rider's chassis drawn off its ride as the shell's `ai_ride` draws an AI rider's (replay.rs's
+/// S474 draw: `Chassis::ride`, then `chassis::grips`), and its "Bike" node and grips handed to the
+/// rider's next riding step as its holds, in the chassis' model frame (the shell's `ride_holds_of`).
+/// So the grips turn with the bars, where the image's holds, kept, never do.
+fn c33_hold(rider: &mut game_sim::rider::Rider, chassis: &mut game_render::vehicle::Chassis, body: &mut game_render::rider::Body, dt: F) {
+    let want = chassis.want_under(&rider.ride, &rider.tricks, rider.body.veh.want);
+    let request = chassis.riding_under(rider, want);
+    chassis.ride(dt, want, &request, rider, game_render::vehicle::Drive::of(&rider.ride));
+    body.bare = chassis.bare_under(&rider.body.veh);
+    let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(chassis) else { panic!("the chassis lacks a hold") };
+    let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+    let root = chassis.world[chassis.nodes.root.expect("a chassis root")];
+    rider.holds = Some(Arc::new(game_sim::ragdoll_riding::Holds {
+        root: game_sim::math::Mat4(root.0.map(Vf)),
+        hands: [point(hand_l), point(hand_r)],
+        feet: [point(foot_l), point(foot_r)],
+    }));
 }
 
 /// S488: the nodes the riding ragdoll drew, kept on the render body as the shell's `ai_ride` keeps
