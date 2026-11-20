@@ -50,3 +50,44 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
 - Still off from ~1585: the Sim's plane drags at ~21 ft/s against the original's 24-30. So the
   truck runs ~7 ft/s slow, ends ~5 ft short and still rolls at 1640.
 - The wreck-bike test is not captured: this boot has no P2.
+
+## The original replayed (S489)
+
+- Test `r48_the_originals_node_update_replays_the_push`: Ee off `states/r48/r48-1487.ram`, gp =
+  boot_gp. Each tick: write the row's `cmd_34c` to plane+0x34c, then
+  `ee.call(0x26f800, [0x7d0600], [row dt])`.
+  - Node 0x7d0600: count at +0x30, objects at +0x38. The plane's object (plane+0x170 = 0x144a030),
+    then the truck's (truck+0x170 = 0x14696d0), then 0x8eb230.
+  - It gives the capture on every row 1489..1640 within 0.001. Row 1488 is 0.002 off (saved controls).
+  - Row 1569 is torn. The capture's 21.86 / 14.02 is what the first substep's impulse left. The tick
+    ends at plane 21.62, truck 14.54 (x -0.41). So the existing meeting test compares the Sim with
+    the torn row.
+- Resolve hook 0x270dc0 (a0 = object, a1 = first). Contact list: count at obj+0x100, array at
+  obj+0x108, 0x80-byte entries, kind at +0, other object at +0x74.
+  - Each substep (4 a tick): plane resolve, then truck resolve. The truck resolves on its wake tick.
+  - Plane list: its own entries (kind 0), then mirrors (kind 1) of the truck's strikes.
+  - Truck list: the plane's mirrors first (kind 1), its own entries on the plane's hull after
+    (kind 0, from 1582).
+  - 1569-1574: only the plane's first-substep resolve changes speeds (the impulse). The truck's
+    resolve of its mirror changes nothing.
+- The Sim does it differently. The truck steps after the plane's whole frame, files the mirrors after
+  its own entries, and its strikes' mirrors never reach the plane's list.
+
+## The truck in the plane's world (S489, not merged)
+
+- `s489-truck-in-plane-world.patch` (applies to 33a1f54e7): the woken truck searches after the plane
+  and steps as a body of the plane's world, as the oracle orders it.
+  - Substep logs then show the oracle's pattern: one impulse, then the truck's resolve changes nothing.
+  - But `r48_the_plane_keeps_pushing_the_truck` fails from row 1576 (truck 17.1 vs 20.6 ft/s).
+    S487's order passed to 1584 because the truck's end-of-frame resolve against the stepped plane
+    gave pushes the original doesn't have.
+- With the patch and the truck put at the image's body (not the settled spot, which is 0.10 ft
+  further along z), row 1569's impulse matches: plane 21.879 after it (oracle 21.864), truck 13.990
+  (14.023).
+- What is left is the truck's own forces between impulses (its tires):
+  - Wake tick per substep, truck vz: oracle 14.023, 13.404, 13.758, 14.354, end 14.535.
+    Sim 13.990, 13.382, 13.750, 14.175, end 14.242.
+  - From the third substep the Sim's truck gains less. By 1573 it runs 1.4 ft/s slow. The plane then
+    strikes it harder and drags.
+  - Likely the woken truck's tire/suspension state: the Sim's comes from `Parked::settled`, the
+    original's from its parked state in the image.

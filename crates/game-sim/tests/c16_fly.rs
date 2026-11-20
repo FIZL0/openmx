@@ -2289,3 +2289,45 @@ fn r48_the_plane_keeps_pushing_the_truck() {
     }
     assert!(at(1628).truck.z() > 3870.0 && cap.f(1628, "truck_pos.z") > 3877.0, "the truck driven to {} by row 1628", at(1628).truck.z());
 }
+
+/// R48's world node in the tape's state: its count at `+0x30` and its objects' array at `+0x38`, the
+/// plane's collision object (the plane's `+0x170`) first, the truck's (its `+0x170`) second.
+const R48_NODE: u32 = 0x007d_0600;
+
+/// **R48's push in the original, replayed** (S489): the original's node update (`0x26f800`) run on
+/// the tape's state, each tick with the row's frame time and the plane's throttle word (`+0x34c`) off
+/// the row, gives the capture's plane and truck (bodies' `+0x60`/`+0x70`) on every row 1489..=1640 but
+/// the meeting's (row 1488 is the load's first tick, on the state's saved controls): row 1569 is torn, read between the plane's first resolve and the rest of the tick (the
+/// replay's plane 21.62 ft/s and truck 14.54 at the tick's end; the row's 21.86 and 14.02 are what the
+/// first substep's impulse left). It is the reference for the Sim's push: per tick 4 substeps of
+/// "plane resolve, truck resolve" in one node, the plane's list its own entries then the mirrors of
+/// the truck's, the truck's the plane's mirrors first (research/r48/index.md).
+#[test]
+fn r48_the_originals_node_update_replays_the_push() {
+    const NODE_UPDATE: u32 = 0x0026_f800;
+    let Some(cap) = r48_capture() else { return };
+    let Some(mut ee) = r48_image() else { return };
+    let objects = ee.u32_at(R48_NODE + 0x38);
+    assert_eq!(ee.u32_at(R48_NODE + 0x30), 3, "R48's node holds the plane, the truck and one more");
+    assert_eq!(ee.u32_at(objects), ee.u32_at(R48_PLANE + 0x170), "the plane's object first");
+    assert_eq!(ee.u32_at(objects + 4), ee.u32_at(R48_TRUCK + 0x170), "the truck's second");
+    let (plane, truck) = (ee.u32_at(R48_PLANE + 0x160), ee.u32_at(R48_TRUCK + 0x160));
+    for f in R48_FROM + 1..=1640 {
+        ee.set_f32(R48_PLANE + 0x34c, cap.f(f, "cmd_34c"));
+        ee.call(NODE_UPDATE, &[u64::from(R48_NODE)], &[cap.f(f, "dt")], 2_000_000_000);
+        let got = [quad(&ee, plane + 0x60), quad(&ee, plane + 0x70), quad(&ee, truck + 0x60), quad(&ee, truck + 0x70)];
+        let want = ["body_pos", "body_vel", "truck_pos", "truck_vel"].map(|w| r48_row(&cap, f, w));
+        if f == R48_FROM + 1 {
+            // The first tick after the load ran on the state's saved controls: 0.002 ft off.
+            continue;
+        }
+        if f == R48_MEET {
+            assert!((got[1].z() - 21.62).abs() < 0.01 && (got[3].z() - 14.54).abs() < 0.01, "row {f}: plane {:?} truck {:?} at the tick's end", got[1].0, got[3].0);
+            continue;
+        }
+        for (g, w) in got.iter().zip(&want) {
+            assert!((0..3).all(|i| (g.0[i] - w.0[i]).abs() < 1e-3), "row {f}: {:?} vs the capture's {:?}", g.0, w.0);
+        }
+        assert_eq!(ee.u32_at(truck) != 0, cap.u(f, "truck_awake") == 1, "row {f}: the truck's awake word");
+    }
+}

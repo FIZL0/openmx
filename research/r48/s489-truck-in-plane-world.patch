@@ -1,0 +1,446 @@
+diff --git i/crates/game-sim/src/car.rs w/crates/game-sim/src/car.rs
+index 0df8f1f10..d7a9f7328 100644
+--- i/crates/game-sim/src/car.rs
++++ w/crates/game-sim/src/car.rs
+@@ -3205,30 +3205,6 @@ impl Parked {
+         machine.at_rest(car)
+     }
+ 
+-    /// [`Parked::frame`] in a flown plane's ride (S487, [`Machine::step_mirrored`]): the mirrors its
+-    /// rays put on the car's hull this frame filed on the car's record, the plane's hull (`hull`) in
+-    /// the car's own search, and the plane's body `by` the other side of both, as the car's resolve
+-    /// leaves it.
+-    #[allow(clippy::too_many_arguments)]
+-    pub fn frame_mirrored(
+-        &mut self,
+-        world: &mut dyn crate::world::World,
+-        dt: F,
+-        acos: &AcosTable,
+-        curve: &CurveTable,
+-        mirrors: &[crate::contact::Contact],
+-        hull: Option<crate::flight_search::Knock<'_>>,
+-        by: &mut crate::prop_contact::Pushed,
+-    ) -> bool {
+-        if !self.awake() {
+-            return false;
+-        }
+-        let Parked { car, machine, collision, .. } = self;
+-        let hulls: Vec<_> = hull.into_iter().collect();
+-        machine.step_mirrored(car, &mut Through(world), collision, mirrors, &hulls, std::slice::from_mut(by), dt, acos, curve, &mut |_| F::ZERO);
+-        machine.at_rest(car)
+-    }
+-
+     /// The object listener's sleep (S486), after the frame in which [`Parked::frame`] found it at
+     /// rest: its body disabled whatever struck it since, and its hull's place for the AI riders
+     /// moved to where it now rests.
+@@ -3270,6 +3246,114 @@ impl Parked {
+     }
+ }
+ 
++/// **A woken parked car in a flown plane's dynamics world** (S489): R48's oracle (the original's
++/// node update run on its state) has the plane and the truck in one node, each substep the plane's
++/// resolve and then the truck's, as the downed wreck bikes are ([`crate::wreck_plane::InWorld`]). Its
++/// search runs after the plane's and before the world step: the mirrors the plane's rays put on its
++/// hull at the head of its list, its own entries on the plane's hull after them, and their mirrors on
++/// the plane's list ([`crate::flight::Met::cars`]). Its body is the one the plane's resolve pushes
++/// (`place` among the frame's pushed bodies, as [`crate::flight::Met::wrecks`]' copy).
++#[derive(Clone, Debug)]
++pub struct InPlane {
++    pub parked: Parked,
++    /// Its place in [`crate::flight::Met::wrecks`] (within the frame, among its pushed bodies).
++    pub place: usize,
++    pub movers: Vec<crate::contact::Mover>,
++    /// Where the plane's copy of its body stands off its own (a world that wraps), and whether it
++    /// was searched and stepped in the plane's world this frame.
++    pub by: Vf,
++    pub stepped: bool,
++}
++
++impl InPlane {
++    /// A parked car for the plane's world, its body `place` in the met's wrecks.
++    pub fn new(parked: Parked, place: usize) -> InPlane {
++        InPlane { parked, place, movers: Vec::new(), by: Vf::ZERO, stepped: false }
++    }
++
++    /// Its search, awake, after the plane's (`hull` the plane's, where it stood for its search): the
++    /// plane's `mirrors` on its hull at the head of its list (naming the plane, side 0), then its own
++    /// entries. Gives the mirrors of its own entries on the plane's hull, for the plane's list.
++    pub fn search(&mut self, world: &mut dyn crate::world::World, dt: F, mirrors: &[crate::contact::Contact], hull: Option<crate::flight_search::Knock<'_>>) -> Vec<crate::contact::Contact> {
++        let Parked { machine, collision, .. } = &mut self.parked;
++        let node = crate::wreck_bike::node_of(&machine.body);
++        let knocks: Vec<(usize, crate::flight_search::Knock<'_>, F)> = hull.into_iter().map(|h| (0, h, crate::flight_search::knock_distance(&collision.rays, &node, &h))).collect();
++        let (movers, theirs) = collision.search_knocking(&mut machine.body, world, dt, &knocks);
++        self.movers = movers;
++        if !mirrors.is_empty() {
++            let r = &mut collision.record;
++            (r.touching, r.on_object, r.touching_other) = (true, true, true);
++            let mut list: Vec<crate::contact::Contact> = mirrors.iter().map(|e| crate::contact::Contact { other: Some(0), ..*e }).collect();
++            list.append(&mut r.contacts);
++            list.truncate(r.capacity);
++            r.contacts = list;
++        }
++        machine.touching = collision.record.touching;
++        self.stepped = true;
++        theirs.into_iter().flat_map(|(_, m)| m).collect()
++    }
++
++    /// Its body as the plane's world holds it (`body`) taken into the car, and given back after `run`.
++    fn through(&mut self, body: &mut crate::prop_contact::Pushed, run: impl FnOnce(&mut InPlane)) {
++        let by = self.by;
++        let b = &mut self.parked.machine.body;
++        *b = body.body;
++        (b.position, b.last_position) = (b.position.sub(by), b.last_position.sub(by));
++        self.parked.collision.collider = body.collider;
++        run(self);
++        let b = self.parked.machine.body;
++        body.body = b;
++        (body.body.position, body.body.last_position) = (b.position.add(self.by), b.last_position.add(self.by));
++        body.collider = self.parked.collision.collider;
++    }
++
++    /// The car's step's listeners ([`Stepping`]), `plane` its resolve's other side.
++    #[allow(clippy::too_many_arguments)]
++    fn listen(
++        &mut self,
++        body: &mut crate::prop_contact::Pushed,
++        plane: &mut crate::prop_contact::Pushed,
++        world: &mut dyn crate::world::World,
++        acos: &AcosTable,
++        curve: &CurveTable,
++        call: impl FnOnce(&mut dyn crate::biplane::Dynamics),
++    ) {
++        self.through(body, |me| {
++            let InPlane { parked: Parked { car, machine, collision, .. }, movers, .. } = me;
++            let mut s = Stepping {
++                m: machine,
++                car,
++                world: &mut Through(world),
++                acos,
++                curve,
++                noise: &mut |_| F::ZERO,
++                struck: Some((collision, movers)),
++                met: None,
++                props: std::slice::from_mut(plane),
++                knocks: &[],
++            };
++            call(&mut s);
++        });
++    }
++
++    /// Its preforce listener, with the frame's `dt`.
++    pub fn preforce(&mut self, body: &mut crate::prop_contact::Pushed, plane: &mut crate::prop_contact::Pushed, world: &mut dyn crate::world::World, dt: F, acos: &AcosTable, curve: &CurveTable) {
++        self.listen(body, plane, world, acos, curve, |s| s.preforce(0, dt));
++    }
++
++    /// Its force listener, after the plane's: tires and its list resolved against the plane's body.
++    pub fn force(&mut self, body: &mut crate::prop_contact::Pushed, plane: &mut crate::prop_contact::Pushed, world: &mut dyn crate::world::World, h: F, acos: &AcosTable, curve: &CurveTable) {
++        self.listen(body, plane, world, acos, curve, |s| s.force(0, h));
++    }
++
++    /// Its post listener: the measure, and the next frame's terrain switch.
++    pub fn post(&mut self, body: &mut crate::prop_contact::Pushed, plane: &mut crate::prop_contact::Pushed, world: &mut dyn crate::world::World, dt: F, acos: &AcosTable, curve: &CurveTable) {
++        self.listen(body, plane, world, acos, curve, |s| s.post(0, dt));
++        let Parked { machine, collision, .. } = &mut self.parked;
++        collision.record.search_ground = machine.searches_terrain(&mut Through(world));
++    }
++}
++
+ /// A `dyn World` for the car's step, which takes its world by type: every query passed through.
+ struct Through<'a>(&'a mut dyn crate::world::World);
+ 
+@@ -3449,38 +3533,6 @@ impl Machine {
+         collision.record.search_ground = self.searches_terrain(world);
+     }
+ 
+-    /// **[`Machine::step_struck`] with mirrors on its record** (S487): `hulls` in its own search after
+-    /// the world (entries naming `others[k]`, whose impulses push that body), and `mirrors` (kind 1)
+-    /// filed after it, each naming `others[0]`, the body that struck it, whose resolve leaves that
+-    /// body as it is (a mirror springs only its own side) but which the friction and the relative
+-    /// velocity read. A parked car a flown plane struck: the plane's mirrors on its hull, and its own
+-    /// rays on the plane's.
+-    #[allow(clippy::too_many_arguments)]
+-    pub fn step_mirrored(
+-        &mut self,
+-        car: &Car,
+-        world: &mut impl crate::world::World,
+-        collision: &mut Collision,
+-        mirrors: &[crate::contact::Contact],
+-        hulls: &[crate::flight_search::Knock<'_>],
+-        others: &mut [crate::prop_contact::Pushed],
+-        dt: F,
+-        acos: &AcosTable,
+-        curve: &CurveTable,
+-        noise: &mut impl FnMut(F) -> F,
+-    ) {
+-        let node = crate::wreck_bike::node_of(&self.body);
+-        let knocks: Vec<(usize, crate::flight_search::Knock<'_>, F)> =
+-            hulls.iter().enumerate().map(|(k, h)| (k, *h, crate::flight_search::knock_distance(&collision.rays, &node, h))).collect();
+-        let (movers, _theirs) = collision.search_knocking(&mut self.body, &mut *world, dt, &knocks);
+-        let named: Vec<crate::contact::Contact> = mirrors.iter().map(|e| crate::contact::Contact { other: Some(0), ..*e }).collect();
+-        collision.file_mirrors(&named);
+-        self.touching = collision.record.touching;
+-        let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
+-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met: None, props: others, knocks: &[] });
+-        collision.record.search_ground = self.searches_terrain(world);
+-    }
+-
+     /// **[`Machine::step_met`] among the knockable props** (S335): with `props`, every prop of the set
+     /// with a collidable mesh is in the collision object's search after the world
+     /// ([`Collision::search_props`]) and in its tires' sort; the props its rays struck are woken with
+diff --git i/crates/game-sim/src/flight.rs w/crates/game-sim/src/flight.rs
+index a04b613b8..e829d778a 100644
+--- i/crates/game-sim/src/flight.rs
++++ w/crates/game-sim/src/flight.rs
+@@ -464,6 +464,10 @@ pub struct Met {
+     /// hull's owner with no wreck bike in [`Met::downed`] hears, a parked car's struck listener
+     /// ([`crate::wreck_plane::search_downed_parked`]).
+     pub hit: Vec<Vec<contact::Contact>>,
++    /// The parked cars in its world (S489, [`crate::car::InPlane`]), each its body at its place in
++    /// [`Met::wrecks`]: a woken one (or one its rays wake this tick) searches after it, and steps in
++    /// its world, its listeners after the plane's and the wreck bikes'.
++    pub cars: Vec<crate::car::InPlane>,
+ }
+ 
+ impl Flight {
+@@ -1127,6 +1131,49 @@ impl Flight {
+                 }
+             }
+         }
++        // The parked cars in its world (S489): one its rays struck woken, and each awake one searched
++        // after it, from where the last post left them all: its mirrors at the head of the car's list,
++        // the car's own entries on its hull after them, and their mirrors on its list.
++        let mut cars = met.as_deref_mut().map(|m| std::mem::take(&mut m.cars)).unwrap_or_default();
++        if !cars.is_empty() {
++            let first = met.as_deref().map_or(0, |m| m.vehicles.len()) + at;
++            let hit = met.as_deref().map(|m| m.hit.clone()).unwrap_or_default();
++            for c in &mut cars {
++                c.stepped = false;
++                let mirrors = hit.get(c.place).map_or(&[][..], Vec::as_slice);
++                if !mirrors.is_empty() {
++                    c.parked.struck();
++                }
++                if !c.parked.awake() {
++                    continue;
++                }
++                let from = c.parked.machine.body.position;
++                let f = self.flown(0, from, &*ground);
++                let hull = self.hull(0).map(|h| {
++                    let mut at = h.at;
++                    at.0[3] = crate::nearest_copy(&*ground, from, at.0[3]);
++                    let (to_world, centre, radius) = world::Prop::posed(h.mesh, &at);
++                    flight_search::Knock { mesh: h.mesh, to_world, centre, radius, velocity: f.body.velocity, capacity: h.capacity }
++                });
++                let theirs = c.search(&mut *ground, dt, mirrors, hull);
++                let near = self.body.position;
++                let r = &mut self.record;
++                if !theirs.is_empty() {
++                    (r.touching, r.on_object, r.touching_other) = (true, true, true);
++                }
++                let room = r.capacity.saturating_sub(r.contacts.len());
++                r.contacts.extend(
++                    theirs.into_iter().take(room).map(|e| contact::Contact { other: Some(first + c.place), point: crate::nearest_copy(&*ground, near, e.point), ..e }),
++                );
++                // Its body in the frame is its own, where the plane's copy of it stands.
++                let body = &mut bodies[at + c.place];
++                c.by = body.body.position.sub(c.parked.machine.body.position);
++                let mine = c.parked.machine.body;
++                body.body = mine;
++                (body.body.position, body.body.last_position) = (mine.position.add(c.by), mine.last_position.add(c.by));
++                body.collider = c.parked.collision.collider;
++            }
++        }
+         // The mirrors of its strikes on their hulls at the head of their lists (F35): the plane searched
+         // first, before the wreck bike filed its own.
+         for (&j, mirrors) in wrecked.iter().zip(hit).filter(|(_, m)| !m.is_empty()) {
+@@ -1145,12 +1192,21 @@ impl Flight {
+             d.place += at;
+             d.cars.iter_mut().for_each(|c| *c += at);
+         }
+-        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies, downed };
++        let live: Vec<usize> = cars.iter().enumerate().filter(|(_, c)| c.stepped).map(|(k, _)| k).collect();
++        for c in &mut cars {
++            c.place += at;
++        }
++        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies, downed, cars, live };
+         WORLD.step(dt, &mut listeners);
+         let seam = listeners.seam;
+         let pushed = listeners.props[at..].to_vec();
+         let mut downed = std::mem::take(&mut listeners.downed);
++        let mut cars = std::mem::take(&mut listeners.cars);
++        for c in &mut cars {
++            c.place -= at;
++        }
+         if let Some(m) = listeners.met {
++            m.cars = cars;
+             m.wrecks = pushed;
+             for d in &mut downed {
+                 d.place -= at;
+@@ -1981,6 +2037,29 @@ struct Listeners<'a> {
+     props: &'a mut [crate::prop_contact::Pushed],
+     /// The wreck bikes in its world (F32), bodies `1..` of its lists, their bodies among `props`.
+     downed: Vec<crate::wreck_plane::InWorld>,
++    /// The parked cars in its world (S489), and which of them are awake in it: bodies after the
++    /// wreck bikes, their bodies among `props`.
++    cars: Vec<crate::car::InPlane>,
++    live: Vec<usize>,
++}
++
++impl Listeners<'_> {
++    /// The parked car body `i` of the lists is, if it is one: its index in `cars`.
++    fn car(&self, i: i32) -> Option<usize> {
++        let k = (i as usize).checked_sub(1 + self.downed.len())?;
++        self.live.get(k).copied()
++    }
++
++    /// Car `k`'s listener `call`, its body and the plane's (the copy nearest it) handed over, and the
++    /// plane's written back as its resolve left it.
++    fn car_listens(&mut self, k: usize, call: impl FnOnce(&mut crate::car::InPlane, &mut crate::prop_contact::Pushed, &mut crate::prop_contact::Pushed, &mut dyn world::World, &ride::Tables)) {
++        let c = &mut self.cars[k];
++        let from = c.parked.machine.body.position;
++        let f = self.plane.flown(0, from, &*self.ground.0);
++        let mut by = crate::prop_contact::Pushed { collection: 0, object: 0, collider: f.collider, body: f.body, mass: f.mass };
++        call(c, &mut self.props[c.place], &mut by, &mut *self.ground.0, self.tables);
++        self.plane.pushed(&crate::rider_contact::Flown { collider: by.collider, body: by.body, mass: by.mass, ..f });
++    }
+ }
+ 
+ thread_local! {
+@@ -2002,10 +2081,14 @@ impl Dynamics for Listeners<'_> {
+     fn count(&self, list: List) -> i32 {
+         match list {
+             List::Constraints => 0,
+-            _ => 1 + self.downed.len() as i32,
++            _ => 1 + (self.downed.len() + self.live.len()) as i32,
+         }
+     }
+     fn preforce(&mut self, i: i32, dt: F) {
++        if let Some(k) = self.car(i) {
++            self.car_listens(k, |c, body, plane, world, t| c.preforce(body, plane, world, dt, &t.acos, &t.curve));
++            return;
++        }
+         if i > 0 {
+             let d = &mut self.downed[i as usize - 1];
+             d.preforce(&mut self.props[d.place]);
+@@ -2014,6 +2097,11 @@ impl Dynamics for Listeners<'_> {
+         self.plane.preforce(dt);
+     }
+     fn force(&mut self, i: i32, h: F) {
++        if let Some(k) = self.car(i) {
++            // A parked car's, after the plane's and the wreck bikes': the plane's body on its resolve.
++            self.car_listens(k, |c, body, plane, world, t| c.force(body, plane, world, h, &t.acos, &t.curve));
++            return;
++        }
+         if i > 0 {
+             // A wreck bike's, after the plane's: the plane's body on its resolve.
+             let d = &mut self.downed[i as usize - 1];
+@@ -2047,10 +2135,15 @@ impl Dynamics for Listeners<'_> {
+     fn enabled(&self, i: i32) -> bool {
+         match i {
+             0 => self.plane.body.enabled,
++            _ if self.car(i).is_some() => self.props[self.cars[self.car(i).unwrap_or_default()].place].body.enabled,
+             _ => self.props[self.downed[i as usize - 1].place].body.enabled,
+         }
+     }
+     fn integrate(&mut self, i: i32, h: F) {
++        if let Some(k) = self.car(i) {
++            self.props[self.cars[k].place].body.integrate(h);
++            return;
++        }
+         if i > 0 {
+             self.props[self.downed[i as usize - 1].place].body.integrate(h);
+             return;
+@@ -2062,6 +2155,10 @@ impl Dynamics for Listeners<'_> {
+         }
+     }
+     fn end_substep(&mut self, i: i32) {
++        if let Some(k) = self.car(i) {
++            self.props[self.cars[k].place].body.end_substep();
++            return;
++        }
+         if i > 0 {
+             self.props[self.downed[i as usize - 1].place].body.end_substep();
+             return;
+@@ -2079,6 +2176,10 @@ impl Dynamics for Listeners<'_> {
+     }
+     fn constrain(&mut self, _: i32, _: bool) {}
+     fn post(&mut self, i: i32, dt: F) {
++        if let Some(k) = self.car(i) {
++            self.car_listens(k, |c, body, plane, world, t| c.post(body, plane, world, dt, &t.acos, &t.curve));
++            return;
++        }
+         if i > 0 {
+             let d = &mut self.downed[i as usize - 1];
+             d.post(&self.props[d.place]);
+diff --git i/crates/game-sim/src/lib.rs w/crates/game-sim/src/lib.rs
+index ac4239d6f..0133e7a40 100644
+--- i/crates/game-sim/src/lib.rs
++++ w/crates/game-sim/src/lib.rs
+@@ -343,31 +343,6 @@ impl Sim {
+         self.parked_cars.iter_mut().map(|p| p.frame(world, dt, &tables.acos, &tables.curve)).collect()
+     }
+ 
+-    /// The woken parked cars' frame in a plane ride (S487): after the plane's, as the original steps its
+-    /// bike world after the plane's post, each with the mirrors the plane's rays put on its hull
+-    /// (`hit`, by car) on its record, the plane's hull in its own search, and the plane's body the other
+-    /// side of both ([`car::Parked::frame_mirrored`]), written back as the car's resolve left it.
+-    fn parked_cars_flown(&mut self, dt: F, world: &mut dyn World, hit: &[Vec<contact::Contact>]) -> Vec<bool> {
+-        let tables = &self.tables.ride;
+-        let Some(plane) = self.plane.as_mut() else { return self.parked_cars_frame(dt, world) };
+-        let mut resting = Vec::with_capacity(self.parked_cars.len());
+-        for (k, c) in self.parked_cars.iter_mut().enumerate() {
+-            let from = c.machine.body.position;
+-            let f = plane.flown(0, from, &*world);
+-            let mut by = prop_contact::Pushed { collection: 0, object: 0, collider: f.collider, body: f.body, mass: f.mass };
+-            let hull = plane.hull(0).map(|h| {
+-                let mut at = h.at;
+-                at.0[3] = nearest_copy(&*world, from, at.0[3]);
+-                let (to_world, centre, radius) = world::Prop::posed(h.mesh, &at);
+-                flight_search::Knock { mesh: h.mesh, to_world, centre, radius, velocity: f.body.velocity, capacity: h.capacity }
+-            });
+-            let mirrors = hit.get(k).map_or(&[][..], Vec::as_slice);
+-            resting.push(c.frame_mirrored(world, dt, &tables.acos, &tables.curve, mirrors, hull, &mut by));
+-            plane.pushed(&rider_contact::Flown { collider: by.collider, body: by.body, mass: by.mass, ..f });
+-        }
+-        resting
+-    }
+-
+     /// The parked cars [`Sim::parked_cars_frame`] found at rest put to sleep, after the bikes struck
+     /// them (S486, [`car::Parked::sleep`]); when one does, [`Sim::parked`] (one hull a car) stands
+     /// the AI riders' hulls where they now rest.
+@@ -507,6 +482,13 @@ impl Sim {
+             // repeat.
+             let mut riders: Vec<&mut crate::rider::Rider> = self.others.iter_mut().map(|p| &mut p.rider).collect();
+             let (downed, wrecked_cars) = wreck_plane::search_downed_parked(&mut riders, plane, &cars, dt, world, &mut met);
++            // The parked cars step in the plane's world (S489): a car woken this tick steps in it, but
++            // sleeps at the earliest after the next (S487).
++            let was_awake: Vec<bool> = self.parked_cars.iter().map(car::Parked::awake).collect();
++            for (p, _) in self.parked_cars.iter_mut().zip(&wrecked_cars).filter(|(_, s)| **s) {
++                p.struck();
++            }
++            met.cars = std::mem::take(&mut self.parked_cars).into_iter().enumerate().map(|(k, p)| car::InPlane::new(p, k)).collect();
+             let meets = Some(&mut met);
+             let (_struck, seam) = if self.traffic.props.is_empty() {
+                 plane.frame_met(dt, pad, world, &self.tables.ride, &bikes, meets)
+@@ -516,6 +498,8 @@ impl Sim {
+                 // A prop it wakes searches in the props' pass (B34).
+                 plane.frame_props_in(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0, &mut prop_movers)
+             };
++            let stepped: Vec<bool> = met.cars.iter().map(|c| c.stepped).collect();
++            self.parked_cars = std::mem::take(&mut met.cars).into_iter().map(|c| c.parked).collect();
+             wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, true);
+             drop(riders);
+             // The bikes the plane's resolve pushed take their chassis back; its mirrors on their
+@@ -530,11 +514,9 @@ impl Sim {
+             }
+             // The original steps its bike world after the plane's post every tick (S99's clock), so
+             // the other riders ride on while player 1 flies (B9a).
+-            // A car woken this tick steps in it, but sleeps at the earliest after the next (S487).
+-            let was_awake: Vec<bool> = self.parked_cars.iter().map(car::Parked::awake).collect();
+             self.parked_from_plane(&met, &wrecked_cars);
+-            let resting = self.parked_cars_flown(dt, world, &met.hit);
+-            let resting: Vec<bool> = resting.iter().zip(&was_awake).map(|(r, a)| *r && *a).collect();
++            let resting: Vec<bool> =
++                self.parked_cars.iter().zip(stepped.iter().zip(&was_awake)).map(|(p, (s, a))| *s && *a && p.machine.at_rest(&p.car)).collect();
+             self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
+             self.parked_cars_sleep(&resting);
+             self.traffic.frame_late(dt, world);
