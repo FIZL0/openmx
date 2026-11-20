@@ -1040,6 +1040,12 @@ pub fn met_car(riders: &[(&Rider, &Phy)], on: &[bool], me: usize, named: usize, 
     met
 }
 
+/// [`met_car`] on online's seats (F78).
+pub fn met_car_among(sims: &[Sim], on: &[bool], me: usize, named: usize, mirrors: Vec<Contact>, at: Vf, world: &dyn World) -> crate::flight::Met {
+    let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
+    met_car(&riders, on, me, named, mirrors, at, world)
+}
+
 /// [`met_plane`] on online's seats.
 pub fn met_plane_among(sims: &[Sim], me: usize, named: usize, mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
     let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
