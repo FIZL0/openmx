@@ -343,6 +343,31 @@ impl Sim {
         self.parked_cars.iter_mut().map(|p| p.frame(world, dt, &tables.acos, &tables.curve)).collect()
     }
 
+    /// The woken parked cars' frame in a plane ride (S487): after the plane's, as the original steps its
+    /// bike world after the plane's post, each with the mirrors the plane's rays put on its hull
+    /// (`hit`, by car) on its record, the plane's hull in its own search, and the plane's body the other
+    /// side of both ([`car::Parked::frame_mirrored`]), written back as the car's resolve left it.
+    fn parked_cars_flown(&mut self, dt: F, world: &mut dyn World, hit: &[Vec<contact::Contact>]) -> Vec<bool> {
+        let tables = &self.tables.ride;
+        let Some(plane) = self.plane.as_mut() else { return self.parked_cars_frame(dt, world) };
+        let mut resting = Vec::with_capacity(self.parked_cars.len());
+        for (k, c) in self.parked_cars.iter_mut().enumerate() {
+            let from = c.machine.body.position;
+            let f = plane.flown(0, from, &*world);
+            let mut by = prop_contact::Pushed { collection: 0, object: 0, collider: f.collider, body: f.body, mass: f.mass };
+            let hull = plane.hull(0).map(|h| {
+                let mut at = h.at;
+                at.0[3] = nearest_copy(&*world, from, at.0[3]);
+                let (to_world, centre, radius) = world::Prop::posed(h.mesh, &at);
+                flight_search::Knock { mesh: h.mesh, to_world, centre, radius, velocity: f.body.velocity, capacity: h.capacity }
+            });
+            let mirrors = hit.get(k).map_or(&[][..], Vec::as_slice);
+            resting.push(c.frame_mirrored(world, dt, &tables.acos, &tables.curve, mirrors, hull, &mut by));
+            plane.pushed(&rider_contact::Flown { collider: by.collider, body: by.body, mass: by.mass, ..f });
+        }
+        resting
+    }
+
     /// The parked cars [`Sim::parked_cars_frame`] found at rest put to sleep, after the bikes struck
     /// them (S486, [`car::Parked::sleep`]); when one does, [`Sim::parked`] (one hull a car) stands
     /// the AI riders' hulls where they now rest.
@@ -419,8 +444,6 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
-            // The parked cars a bike woke, stepped ahead of the bikes, as [`Sim::step_all`] does (S486).
-            let resting = self.parked_cars_frame(dt, world);
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
             // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a
@@ -507,7 +530,11 @@ impl Sim {
             }
             // The original steps its bike world after the plane's post every tick (S99's clock), so
             // the other riders ride on while player 1 flies (B9a).
+            // A car woken this tick steps in it, but sleeps at the earliest after the next (S487).
+            let was_awake: Vec<bool> = self.parked_cars.iter().map(car::Parked::awake).collect();
             self.parked_from_plane(&met, &wrecked_cars);
+            let resting = self.parked_cars_flown(dt, world, &met.hit);
+            let resting: Vec<bool> = resting.iter().zip(&was_awake).map(|(r, a)| *r && *a).collect();
             self.step_flown_riders(dt, std::mem::take(&mut met.struck), lists, world);
             self.parked_cars_sleep(&resting);
             self.traffic.frame_late(dt, world);

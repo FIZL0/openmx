@@ -37,7 +37,16 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
 - Truck settles within 0.11 ft of the original's body.
 - Taxi rows 1488..1568: throttle exact, plane within 0.02 ft and 0.1 ft/s.
   The first tick after the load reads the idle pad.
-- Row 1569: wakes on the same row, shove 13.88 vs 14.02, plane 21.859 vs 21.864.
-- After: the Sim's plane stops dead about 13 ticks on, the truck moves ~5 ft and sleeps from about
-  row 1595. Not matched; filed as a follow-up.
+- Row 1569: wakes on the same row, shove 14.12 vs 14.02, plane 21.859 vs 21.864.
+- Before S487 the Sim's plane stopped dead about 13 ticks on, and the truck moved ~5 ft and slept
+  from about row 1595.
+- S487: the woken truck now steps after the plane, as the original's bike world does.
+  - Its record takes the plane's mirrors. A spring only pushes its own side, so without them the
+    plane's rays never pushed the truck after the first impulse.
+  - Its own rays strike the plane's hull. This doubles the push, and is what holds the truck.
+  - Rows 1570-1584 now match along z: place within 0.3 ft, speed within 2.6 ft/s. That covers
+    1571-1573 with no plane contact, the 18.9 ft/s kick at 1574 and the climb to 25 ft/s.
+  - Both stay awake to 1640. The truck reaches z 3872.5 by 1628 (original 3877.2).
+- Still off from ~1585: the Sim's plane drags at ~21 ft/s against the original's 24-30. So the
+  truck runs ~7 ft/s slow, ends ~5 ft short and still rolls at 1640.
 - The wreck-bike test is not captured: this boot has no P2.

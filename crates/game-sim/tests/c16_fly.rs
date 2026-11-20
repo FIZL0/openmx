@@ -2039,12 +2039,12 @@ fn fly_by_parked(from: u32, to: u32, pad_of: &dyn Fn(u32) -> Report, reason: u32
 /// **The plane flown into a parked truck wakes it and shoves it its way** (S486a): from image 137910
 /// the truck parked 30 ft ahead of the plane (along `-x`), asleep; the plane's rays reach its hull at
 /// tick 42, and that tick the truck is awake with the plane's way in its velocity (about -11 ft/s in
-/// x, the plane's -25 cut to -16), then settles and sleeps again. Before S486a the plane flew through.
+/// x, the plane's -25 cut to -16). Before S486a the plane flew through.
 /// R48 caught this meeting on the original (no truck in C16's 2p session; R48 booted its own): the
 /// wake on the meeting tick, the shove along the plane's way and the plane's lost speed are held to it
 /// by [`r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick`], the original's shove
-/// 1.33 times the plane's lost speed (14.0 of 10.5 ft/s). Its truck did not sleep again while the
-/// plane's throttle stayed on it; "sleeps again" here is the Sim's, where the plane stops dead.
+/// 1.33 times the plane's lost speed (14.0 of 10.5 ft/s); its truck does not sleep again while the
+/// plane's throttle stays on it ([`r48_the_plane_keeps_pushing_the_truck`]).
 #[test]
 fn the_plane_flown_into_a_parked_truck_wakes_and_pushes_it() {
     let ahead = |plane: Vf, _: Vf| Vf::new(plane.x() - 30.0, plane.y(), plane.z() + 2.0, 1.0);
@@ -2055,7 +2055,6 @@ fn the_plane_flown_into_a_parked_truck_wakes_and_pushes_it() {
     assert!(at.truck_vel.x() < -5.0, "the truck shoved along the plane's -x: {:?}", at.truck_vel.0);
     assert!(at.plane_vel.x() > before.plane_vel.x() + 5.0, "the plane slowed by the truck: {:?} -> {:?}", before.plane_vel.0, at.plane_vel.0);
     assert!(ticks[hit + 1].truck.x() < at.truck.x(), "the truck moves on its own frame next tick");
-    assert!(ticks[hit..].iter().any(|t| !t.awake), "the truck sleeps again");
 }
 
 /// **A downed rider's wreck bike in the plane lane meets a parked truck** (S486a): P2 wrecked
@@ -2240,9 +2239,7 @@ fn r48_the_plane_taxis_to_the_truck_as_the_original() {
 /// **The plane taxied into the parked truck wakes it and shoves it, on the original's tick** (R48):
 /// row 1569 has the truck awake on both, shoved along the plane's `+z` at 14.0 ft/s (the Sim's
 /// 13.9), the plane's 32.4 ft/s cut to 21.9 (the Sim's to the same 0.01), and the next row the truck
-/// has moved its way. Not held: the push after it. The original's plane keeps its throttle on the
-/// truck and drives it about 40 ft (to z 3877 by row 1628), the truck awake to the capture's end; the
-/// Sim's plane is stopped dead about 13 ticks on, the truck 5 ft moved and asleep from about row 1595.
+/// has moved its way. The push after it: [`r48_the_plane_keeps_pushing_the_truck`].
 #[test]
 fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
     let Some(cap) = r48_capture() else { return };
@@ -2261,4 +2258,34 @@ fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
     let moved = at(R48_MEET + 1).truck.z() - at(R48_MEET).truck.z();
     let moved_there = cap.f(R48_MEET + 1, "truck_pos.z") - cap.f(R48_MEET, "truck_pos.z");
     assert!(moved > 0.3 && moved_there > 0.3, "the truck moves its way next row: {moved} ft (the original's {moved_there})");
+}
+
+/// The last row [`r48_the_plane_keeps_pushing_the_truck`] holds the plane and the truck to the
+/// capture's.
+const R48_PUSH_THROUGH: u32 = 1584;
+
+/// **The plane taxied into the truck keeps pushing it** (S487): the woken truck steps after the plane,
+/// with the plane's rays' mirrors on its record and the plane's hull in its own search
+/// ([`game_sim::car::Parked::frame_mirrored`]). Through `R48_PUSH_THROUGH` the plane and the truck
+/// follow the capture along `+z` (place within 0.3 ft, speed within 2.6 ft/s: the rows 1571-1573
+/// with no plane contact, the truck's 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to
+/// row 1640, and the truck driven past z 3870 by row 1628 (the original's 3877). Not held: from about
+/// row 1585 the Sim's plane drags (21 ft/s against the original's 24-30), so the truck runs 7 ft/s
+/// slow, ends ~5 ft short and is still moving at 1640 where the original's has stopped.
+#[test]
+fn r48_the_plane_keeps_pushing_the_truck() {
+    let Some(cap) = r48_capture() else { return };
+    let Some((ticks, _, _)) = r48_fly(1640) else { return };
+    let at = |f: u32| &ticks[(f - R48_FROM - 1) as usize];
+    for f in R48_MEET..1640 {
+        assert!(at(f).awake && cap.u(f, "truck_awake") == 1, "row {f}: the truck awake on both");
+    }
+    for f in R48_MEET + 1..=R48_PUSH_THROUGH {
+        let t = at(f);
+        let (p, pv) = (cap.f(f, "body_pos.z"), cap.f(f, "body_vel.z"));
+        let (c, cv) = (cap.f(f, "truck_pos.z"), cap.f(f, "truck_vel.z"));
+        assert!((t.plane.z() - p).abs() < 0.3 && (t.plane_vel.z() - pv).abs() < 2.6, "row {f}: plane z {} at {} vs {p} at {pv}", t.plane.z(), t.plane_vel.z());
+        assert!((t.truck.z() - c).abs() < 0.3 && (t.truck_vel.z() - cv).abs() < 2.6, "row {f}: truck z {} at {} vs {c} at {cv}", t.truck.z(), t.truck_vel.z());
+    }
+    assert!(at(1628).truck.z() > 3870.0 && cap.f(1628, "truck_pos.z") > 3877.0, "the truck driven to {} by row 1628", at(1628).truck.z());
 }
