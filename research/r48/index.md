@@ -73,7 +73,7 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
 - The Sim does it differently. The truck steps after the plane's whole frame, files the mirrors after
   its own entries, and its strikes' mirrors never reach the plane's list.
 
-## The truck in the plane's world (S489, not merged)
+## The truck in the plane's world (S489, landed in S489a)
 
 - `s489-truck-in-plane-world.patch` (applies to 33a1f54e7): the woken truck searches after the plane
   and steps as a body of the plane's world, as the oracle orders it.
@@ -91,3 +91,28 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
     strikes it harder and drags.
   - Likely the woken truck's tire/suspension state: the Sim's comes from `Parked::settled`, the
     original's from its parked state in the image.
+
+## The struck truck's brakes (S489a)
+
+- The patch landed (car::InPlane, Met::cars). The file `s489-truck-in-plane-world.patch` is deleted.
+- The R48 tests now put the truck where the tape's state holds it (`r48_seat_truck`: body, tires,
+  machine words and engine words off the image), after the settle check.
+- What the woken truck lacked: drive torque on the rear tires.
+  - Oracle wake tick 1569: `car_tire_add_drive` (0x39b660) gives rear tire 2 a torque of 92.74 on
+    substep 1. That is output_torque 9.048 × ratio 25 × (1 − 0.18) / 2. The Sim gave 0.
+  - The Sim zeroes drive while braked, and its undriven truck had rear_brake 1.
+  - The original's brakes (car +0x3f4/+0x3f8) were 0. A store log (`ee.log`) over each node update shows
+    why. On a tick the plane strikes the truck:
+    1. the enable 0x398c50 writes driven (+0x4ac) = 1 (pc 0x398c54),
+    2. the controls step's driven path writes the brakes 0 (pc 0x396aac / 0x396ab4),
+    3. only then the car step clears driven (pc 0x3e1934, when the body is awake).
+  - On a tick it is not struck (1571-1573) the undriven path writes them 1 (pc 0x396bbc / 0x396bc0).
+  - So "the first step clears +0x4ac before its controls read it" (oracle.txt, S484) is wrong:
+    the clear comes after the controls.
+- Fix: `InPlane::struck` sets the driven word with the wake; `InPlane::preforce` clears it after the
+  controls step. The riders' world (`Parked::struck`, S485) is not changed.
+- Now: wake tick end plane 21.624 / truck 14.537 (oracle 21.624 / 14.535). Rows 1570-1579 within
+  0.01 ft. `R48_PUSH_THROUGH` is 1587 (was 1584).
+- Left: from 1573 the braked rear tires stick-slip (force z flips ±4000 each substep). Small
+  differences (rear spin after 1570: Sim 0.024 / -6.486, oracle 0.088 / -6.382) grow. The truck is
+  3 ft/s slow at 1588, and from 1615 the two part (the Sim's truck climbs, vy 6-15).

@@ -2141,8 +2141,8 @@ struct R48Tick {
 /// ([`seeded_plane_at`]), the human's rider standing at its parked bike, free09's truck parked at its
 /// map spot (`[Monster2]`, (4688, 3838), nose `-z`, settled: [`Parked::settled`]), on the tape's pads
 /// (two fields a tick; the first tick after the load reads the state's idle controls) and the
-/// capture's frame times, ticks `R48_FROM..to`. Also the settled truck's offset from the image's body
-/// and its turn.
+/// capture's frame times, ticks `R48_FROM..to`, the truck then put as the tape's state holds it
+/// ([`r48_seat_truck`]). Also the settled truck's offset from the image's body and its turn.
 fn r48_fly(to: u32) -> Option<(Vec<R48Tick>, Vf, Vf)> {
     use game_sim::car::{Car, CarModel, Kind, Parked};
     let ee = r48_image()?;
@@ -2185,6 +2185,8 @@ fn r48_fly(to: u32) -> Option<(Vec<R48Tick>, Vf, Vf)> {
         let truck = Parked::settled(Arc::new(car), &model, Rays::of(&rays), Arc::new(hull), world, Vf::new(4688.0, 135.0, 3838.0, 1.0), Vf::new(0.0, 0.0, -1.0, 0.0), &t.acos, &t.curve);
         assert!(!truck.awake(), "the truck settled and asleep");
         let settled = (truck.machine.body.position, truck.machine.body.quat);
+        let mut truck = truck;
+        r48_seat_truck(&ee, &mut truck);
         sim.park_cars(vec![truck]);
         let dt = |t: u32| F(cap.f(t + 1, "dt"));
         sim.poll(dt(R48_FROM), &[pad(R48_FROM - 1), Report::missing()]);
@@ -2206,6 +2208,89 @@ fn r48_fly(to: u32) -> Option<(Vec<R48Tick>, Vf, Vf)> {
         let off = Vf::new(settled.0.x() - image_at.0.x(), settled.0.y() - image_at.0.y(), settled.0.z() - image_at.0.z(), 0.0);
         Some((out, off, settled.1))
     })
+}
+
+/// **R48's truck as the tape's state holds it** (S489a): its body, its four tires and its engine
+/// taken off the image into the settled one. R48's truck is not where the load's settle left it: it
+/// sleeps 0.09 ft higher, its springs 0.08 ft less pressed and its body still sinking at 0.29 ft/s
+/// (something woke it after the load, and it slept again mid-bounce). A woken body takes that up
+/// where it stopped, so the Sim's push is held to the original's only from the same truck.
+fn r48_seat_truck(ee: &Ee, parked: &mut game_sim::car::Parked) {
+    let t = R48_TRUCK;
+    let word = |at: u32| F(ee.f32_at(at));
+    let flag = |at: u32| ee.u32_at(at) != 0;
+    let m = &mut parked.machine;
+    let b = ee.u32_at(t + 0x160);
+    let body = &mut m.body;
+    body.enabled = flag(b);
+    for (v, o) in [
+        (&mut body.last_position, 0x50),
+        (&mut body.position, 0x60),
+        (&mut body.velocity, 0x70),
+        (&mut body.last_force, 0x80),
+        (&mut body.force, 0x90),
+        (&mut body.accel, 0xa0),
+        (&mut body.shock_peak, 0xb0),
+        (&mut body.shock, 0xc0),
+        (&mut body.step, 0xf0),
+        (&mut body.last_quat, 0x150),
+        (&mut body.quat, 0x170),
+        (&mut body.moment, 0x190),
+        (&mut body.last_moment, 0x1a0),
+        (&mut body.rates, 0x1b0),
+        (&mut body.ang_accel, 0x1c0),
+        (&mut body.twist_peak, 0x1d0),
+        (&mut body.twist, 0x1e0),
+    ] {
+        *v = quad(ee, b + o);
+    }
+    for (k, w) in m.wheels.iter_mut().enumerate() {
+        let at = ee.u32_at(t + 0x548 + 4 * k as u32);
+        let s = &mut w.s;
+        (s.grounded, s.low_speed_grip, s.slipping, s.sliding, s.locked) = (flag(at + 0xc0), flag(at + 0x1e0), flag(at + 0x1e4), flag(at + 0x1e8), flag(at + 0x1ec));
+        s.handoff = flag(at + 0xc8).then(|| word(at + 0xcc));
+        (s.compression, s.last_compression, s.load) = (word(at + 0xdc), word(at + 0xe0), word(at + 0xe4));
+        (s.angle, s.spin, s.torque, s.last_torque) = (word(at + 0x1a0), word(at + 0x1a4), word(at + 0x1f0), word(at + 0x1f4));
+        (s.slip_ratio, s.slip_angle, s.slip_tan) = (word(at + 0x20c), word(at + 0x210), word(at + 0x214));
+        (s.steer, s.side_ratio, s.camber) = (word(at + 0x260), word(at + 0x2b0), word(at + 0x9bc));
+        for (v, o) in [(&mut s.contact, 0x140), (&mut s.velocity, 0x220), (&mut s.last_velocity, 0x230), (&mut s.force, 0x240), (&mut s.last_force, 0x250)] {
+            *v = quad(ee, at + o);
+        }
+        (w.solid, w.sorted, w.terrain_held, w.lone_front) = (flag(at + 0xb4), flag(at + 0xb8), flag(at + 0xbc), flag(at + 0xc4));
+        w.probes = ee.u32_at(at + 0xd8) as i32;
+        for (v, o) in [
+            (&mut w.lever, 0xf0),
+            (&mut w.ground_point, 0x110),
+            (&mut w.ground_normal, 0x120),
+            (&mut w.car_normal, 0x130),
+            (&mut w.upper, 0x150),
+            (&mut w.lower, 0x160),
+            (&mut w.point_velocity, 0x170),
+            (&mut w.body_velocity, 0x180),
+            (&mut w.local_velocity, 0x190),
+            (&mut w.probe_normal, 0x1d0),
+        ] {
+            *v = quad(ee, at + o);
+        }
+        w.frame = game_sim::math::Mat4([0, 16, 32, 48].map(|i| quad(ee, at + 0x270 + i)));
+    }
+    let c = |o: u32| t + o;
+    m.last_cofg = quad(ee, c(0x250));
+    m.ground_velocity = quad(ee, c(0x2a0));
+    (m.latched, m.latch) = (flag(c(0x2bc)), flag(c(0x2c0)));
+    (m.grounded, m.was_grounded) = (flag(c(0x530)), flag(c(0x534)));
+    (m.ground_speed, m.alpha, m.side_slip) = (word(c(0x55c)), word(c(0x560)), word(c(0x564)));
+    (m.world_rates, m.velocity, m.forward, m.up, m.euler) = (quad(ee, c(0x570)), quad(ee, c(0x580)), quad(ee, c(0x590)), quad(ee, c(0x5a0)), quad(ee, c(0x5b0)));
+    m.matrix = game_sim::math::Mat4([0, 16, 32, 48].map(|i| quad(ee, c(0x5c0 + i))));
+    let e = ee.u32_at(c(0x544));
+    let d = &mut m.drivetrain;
+    d.gear = ee.u32_at(e + 0xcc) as i32;
+    (d.ratio, d.inv_ratio, d.wheel_rpm) = (word(e + 0xe4), word(e + 0xe8), word(e + 0xec));
+    (d.converter_torque, d.multiplication, d.output_torque) = (word(e + 0xf4), word(e + 0xf8), word(e + 0xfc));
+    (d.cursor_index, d.cursor_frac) = (ee.u32_at(e + 0x104), word(e + 0x108));
+    (d.engine_torque, d.braking_torque) = (word(e + 0x110), word(e + 0x114));
+    d.drive_torque = [0x118, 0x11c, 0x120, 0x124].map(|o| word(e + o));
+    (d.rpm, d.slip_rpm) = (word(e + 0x128), word(e + 0x12c));
 }
 
 /// The capture's word `w` (`body_pos`, `truck_vel`, ..) in row `f` as a vector.
@@ -2236,10 +2321,17 @@ fn r48_the_plane_taxis_to_the_truck_as_the_original() {
     }
 }
 
+/// The meeting tick's end in the original's replay ([`r48_the_originals_node_update_replays_the_push`]):
+/// the plane's `z` speed and the truck's velocity. The capture's row 1569 is torn (read after the
+/// first substep's impulse: plane 21.86, truck 14.02), so the Sim is held to these.
+const R48_MEET_PLANE: f32 = 21.624;
+const R48_MEET_TRUCK: [f32; 3] = [-0.406, -0.589, 14.535];
+
 /// **The plane taxied into the parked truck wakes it and shoves it, on the original's tick** (R48):
-/// row 1569 has the truck awake on both, shoved along the plane's `+z` at 14.0 ft/s (the Sim's
-/// 13.9), the plane's 32.4 ft/s cut to 21.9 (the Sim's to the same 0.01), and the next row the truck
-/// has moved its way. The push after it: [`r48_the_plane_keeps_pushing_the_truck`].
+/// row 1569 has the truck awake on both, and at the tick's end (the original's replayed, as the
+/// row is torn) the truck shoved along the plane's `+z` at 14.54 ft/s and the plane's 32.4 ft/s cut to
+/// 21.62, the Sim's within 0.02; the next row the truck has moved its way. The push after it:
+/// [`r48_the_plane_keeps_pushing_the_truck`].
 #[test]
 fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
     let Some(cap) = r48_capture() else { return };
@@ -2249,11 +2341,9 @@ fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
     assert_eq!(cap.u(R48_MEET - 1, "truck_awake"), 0);
     assert_eq!(cap.u(R48_MEET, "truck_awake"), 1);
     assert_eq!(woke, R48_MEET, "the truck wakes on the original's row");
-    let (shove, was) = (r48_row(&cap, R48_MEET, "truck_vel"), r48_row(&cap, R48_MEET, "body_vel"));
     let t = at(R48_MEET);
-    assert!((t.truck_vel.z() - shove.z()).abs() < 0.5, "the shove {:?} vs the original's {:?}", t.truck_vel.0, shove.0);
-    assert!(t.truck_vel.x().abs() < 0.5 && t.truck_vel.z() > 13.0, "the truck shoved along the plane's +z: {:?}", t.truck_vel.0);
-    assert!((t.plane_vel.z() - was.z()).abs() < 0.1, "the plane cut to {:?} vs the original's {:?}", t.plane_vel.0, was.0);
+    assert!((0..3).all(|i| (t.truck_vel.0[i] - R48_MEET_TRUCK[i]).abs() < 0.02), "the shove {:?} vs the original's {R48_MEET_TRUCK:?}", t.truck_vel.0);
+    assert!((t.plane_vel.z() - R48_MEET_PLANE).abs() < 0.02, "the plane cut to {:?} vs the original's {R48_MEET_PLANE}", t.plane_vel.0);
     assert!(at(R48_MEET).plane_vel.z() < at(R48_MEET - 1).plane_vel.z() - 10.0, "the plane slowed by the truck");
     let moved = at(R48_MEET + 1).truck.z() - at(R48_MEET).truck.z();
     let moved_there = cap.f(R48_MEET + 1, "truck_pos.z") - cap.f(R48_MEET, "truck_pos.z");
@@ -2262,16 +2352,16 @@ fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
 
 /// The last row [`r48_the_plane_keeps_pushing_the_truck`] holds the plane and the truck to the
 /// capture's.
-const R48_PUSH_THROUGH: u32 = 1584;
+const R48_PUSH_THROUGH: u32 = 1587;
 
-/// **The plane taxied into the truck keeps pushing it** (S487): the woken truck steps after the plane,
-/// with the plane's rays' mirrors on its record and the plane's hull in its own search
-/// ([`game_sim::car::Parked::frame_mirrored`]). Through `R48_PUSH_THROUGH` the plane and the truck
-/// follow the capture along `+z` (place within 0.3 ft, speed within 2.6 ft/s: the rows 1571-1573
-/// with no plane contact, the truck's 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to
-/// row 1640, and the truck driven past z 3870 by row 1628 (the original's 3877). Not held: from about
-/// row 1585 the Sim's plane drags (21 ft/s against the original's 24-30), so the truck runs 7 ft/s
-/// slow, ends ~5 ft short and is still moving at 1640 where the original's has stopped.
+/// **The plane taxied into the truck keeps pushing it** (S487, S489a): the woken truck searches and
+/// steps in the plane's dynamics world ([`game_sim::car::InPlane`]), and on a tick the plane strikes
+/// it its controls drive, brakes off ([`game_sim::car::InPlane::struck`]). Through `R48_PUSH_THROUGH`
+/// the plane and the truck follow the capture along `+z` (place within 0.3 ft, speed within 2.6 ft/s;
+/// rows 1570-1579 within 0.01 ft and 0.6 ft/s: the rows 1571-1573 with no plane contact, the truck's
+/// 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to row 1640, and the truck driven past
+/// z 3870 by row 1628 (the original's 3877). Not held: from about row 1588 the braked rear tires'
+/// stick-slip has grown the small differences, the truck runs 3 ft/s slow and then the two part.
 #[test]
 fn r48_the_plane_keeps_pushing_the_truck() {
     let Some(cap) = r48_capture() else { return };
@@ -2329,5 +2419,10 @@ fn r48_the_originals_node_update_replays_the_push() {
             assert!((0..3).all(|i| (g.0[i] - w.0[i]).abs() < 1e-3), "row {f}: {:?} vs the capture's {:?}", g.0, w.0);
         }
         assert_eq!(ee.u32_at(truck) != 0, cap.u(f, "truck_awake") == 1, "row {f}: the truck's awake word");
+        // S489a: a tick the plane strikes the truck its enable's driven word outlives its controls
+        // step, so its brakes (car +0x3f4/+0x3f8) come off; a tick it is not struck (1571) they're on.
+        if f == R48_MEET + 1 || f == R48_MEET + 2 {
+            assert_eq!(ee.f32_at(R48_TRUCK + 0x3f8), if f == R48_MEET + 1 { 0.0 } else { 1.0 }, "row {f}: the truck's rear brake");
+        }
     }
 }
