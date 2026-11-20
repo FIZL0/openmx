@@ -14333,3 +14333,19 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   Snap path (filter byte clear): output words +0x260/+0x270 keep the goal as handed in, unswept.
 #   Plane helpers: 0x0022b730 has-normal, 0x0022b650 signed distance, 0x001080c0 scale, 0x0022b630 add.
 #   Debug flags 0x0048ea20..22 all 0 in the spawn image.
+
+# S479 — the AI riders while player 1 flies (tests/ai/flown.rs; port: Sim::step_flown_riders,
+#   Sim::props_step_flown, tests/prop_strike_paths.rs another_rider_strikes_while_player_1_flies)
+#   biplane.p2m2's state, 12 whole frames (S328 recipe), neutral pad. Each tick, in order:
+#   - plane node 0x0060b200 collides its 5 records (+0x30 count, +0x38 list): the plane's 0x01e73b00,
+#     then the AI bikes' 0x018c1bd0 0x019a9790 0x01970060 0x007ffdf0. The human's bike record
+#     0x018bfc30 is not on it. So the AI bikes strike the props (and all else) as riding bikes do.
+#   - player updates 0x0027c890: ai 0x01881b10, 0x019a44b0, 0x018f7290, then the human 0x01890cd0.
+#   - looks 0x00248a70: the human's (rider+0x64 = 0x009ffc50) first, then the AI riders' (+0xdb4).
+#   - AI cards fed 0x0027dc80, then one score_grow 0x00267a90.
+#   - engine notes 0x0030fcb0 for all four riders (+0x1494), the human's parked bike's too; all on.
+#   - no race_manager_tick 0x002fcff0: a free ride has no race manager.
+#   The flying human's bike levers +0x628/62c/63c/640/644/658/890 are all 0.
+#   Port: bikes strike via prop_strike_after with the other sides past the planes; the props' step
+#   runs after the riders (props_step_flown, the plane at striker 0); bodies_look and notes_frame
+#   run on default controls for player 1 (listener = the plane). race_frame stays off.
