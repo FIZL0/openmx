@@ -69,7 +69,11 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 /// and unplaced, and both sides switch to Riding and pose it. The original poses from its animated
 /// skeleton (bones within ~0.1 ft of the image's). The Sim has no `rider.skeleton` before the first
 /// pose, so it poses from the rig's fixed pose, ~1 ft off (all four riders, ~1.26 ft, decaying to
-/// ~0.2 by tick 15).
+/// ~0.2 by tick 15). S347b1: each body is seeded with that skeleton (the actor's joint records) and
+/// its parts' drawn matrices, and tick 4's foot is within 0.01 ft of the original's across the ground
+/// (0.09 ft high, from ~0.7 ft off). The marks do not move: from tick 14 on both skeletons agree to
+/// 0.005 ft, yet ai0's bones sit ~0.14 ft further along z than the original's from 15 through 133,
+/// seeded or not. That steady gap, not the first pose, is what parts the foot dust at 134.
 const C33_AGREES_THROUGH: [u64; 5] = [318, 303, 1802, 279, 133];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
@@ -432,7 +436,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         kits.push(kit);
         (body, doll)
     }).collect();
-    c33_riding_seed(&ee, &mut sim, &Arc::new(kits.swap_remove(0)));
+    c33_riding_seed(&ee, &mut sim, &Arc::new(kits.swap_remove(0)), &mut bodies);
     // S328c: the bikes' emitters, as the image holds them, on the lane's generator.
     sim.dust = Some(Box::new(c33_dust_seed(&ee, &sim)));
     // S448: the tyre tracks, as the image holds them, and each one's entry in its rider's manager.
@@ -672,16 +676,64 @@ fn c33_notes(ee: &Ee) -> engine_note::Notes {
 /// own body actor), on the ragdoll's kit, with the holds of its last request and the clip it read.
 ///
 /// [`s483_riding_of`]: super::wreck_dust::s483_riding_of
-fn c33_riding_seed(ee: &Ee, sim: &mut Sim, kit: &Arc<game_sim::ragdoll_ride::Kit>) {
+///
+/// S347b1: with the skeleton the original's first pose reads ([`c33_posed`]) and its parts' drawn
+/// matrices (part `+0x60`), so tick 4's Held-to-Riding pose is the original's and not the rig's.
+fn c33_riding_seed(
+    ee: &Ee,
+    sim: &mut Sim,
+    kit: &Arc<game_sim::ragdoll_ride::Kit>,
+    bodies: &mut [(game_render::rider::Body, game_render::rider::Ragdolled)],
+) {
     for (k, &(r, _, _)) in C33_RIDERS.iter().enumerate() {
         let p = c33_player(ee, k);
         let rider = if p == 0 { &mut sim.rider } else { &mut sim.others[p - 1].rider };
         rider.carries_ragdoll(Arc::clone(kit));
-        let (riding, holds) = super::wreck_dust::s483_riding_of(ee, kit, &rider.ride.transform(), super::wreck_dust::rider_actor(ee, r));
+        let a = super::wreck_dust::rider_actor(ee, r);
+        let m = rider.ride.transform();
+        let (mut riding, holds) = super::wreck_dust::s483_riding_of(ee, kit, &m, a);
+        let parts = ee.u32_at(a + 0x2f4);
+        let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|o| ee.u32_at(at + o)));
+        let drawn = (0..kit.rig.parts.len() as u32).map(|i| game_sim::math::Mat4([0, 0x10, 0x20, 0x30].map(|o| quad(parts + 0xb0 * i + 0x60 + o)))).collect();
+        riding.seed_drawn(drawn);
         rider.body.veh.state = riding.actor.clip;
         rider.riding = Some(Box::new(riding));
         rider.holds = Some(Arc::new(holds));
+        let (body, doll) = &mut bodies[k];
+        rider.skeleton = Some(Arc::new(c33_posed(ee, a, r, body, doll, &m)));
     }
+}
+
+/// S347b1: body actor `a`'s animated skeleton (rider `r`'s) as the shell hands it to the riding body
+/// ([`game_sim::rider::Rider::skeleton`]), in the frame of the ride transform `m`: replay.rs's
+/// `r24_posed` on an [`Ee`]. The actor's joint records (`+0x234`, stride 0x60: `+0x40` the
+/// translation, `+0x50` the quaternion) go into the render body's pose, and the bones it poses hang
+/// under the bike node (`rider + 0x18`), taken into `m`'s frame.
+fn c33_posed(ee: &Ee, a: u32, r: u32, body: &mut game_render::rider::Body, doll: &game_render::rider::Ragdolled, m: &game_sim::math::Mat4) -> game_sim::ragdoll_ride::Posed {
+    use game_sim::math::{self, Mat4};
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|o| ee.u32_at(at + o)));
+    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|o| quad(at + o)));
+    let (n, arr) = (ee.u32_at(a + 0x230) as usize, ee.u32_at(a + 0x234));
+    assert_eq!(n, body.rig.set.skeleton.bones.len(), "the actor's joints are the render skeleton's");
+    assert_eq!(ee.u32_at(a + 0x488) - 0xb80, r, "actor {a:#x}'s rider");
+    let bnode = mat(ee.u32_at(r + 0x18) + 0x40);
+    let pose = &mut body.rig.set.pose;
+    for j in 0..n {
+        let q = quad(arr + 0x60 * j as u32 + 0x50);
+        pose.rot[j] = [q[0], q[1], q[2], q[3]];
+        pose.turned[j] = true;
+    }
+    let t = quad(arr + 0x40);
+    pose.pos[0] = [t[0], t[1], t[2], 1.0];
+    pose.moved[0] = true;
+    let posed = body.ragdoll_posed(doll);
+    let to = math::mul(&bnode, &math::inverse(m).unwrap());
+    let turn = |v: Vf| {
+        let r = |k: usize| v[0] * to.0[0][k] + v[1] * to.0[1][k] + v[2] * to.0[2][k];
+        Vf::new(r(0), r(1), r(2), 0.0)
+    };
+    let bones = posed.bones.iter().map(|b| game_sim::ragdoll_pose::Bone { at: math::transform_point(&to, b.at), forward: turn(b.forward), up: turn(b.up) }).collect();
+    game_sim::ragdoll_ride::Posed { bones, rests: posed.rests }
 }
 
 /// S482b: each rider's body machine after the step, as the shell's frame runs an AI rider's
