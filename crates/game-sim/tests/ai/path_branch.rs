@@ -361,3 +361,141 @@ fn s339_the_ticks_path_branch_rides_to_a_target_jump_as_the_race_image() {
     let n = |k| seen.get(k).copied().unwrap_or(0);
     assert!(n("goal placed") == 24 && n("handed over") > 3 && n("branches") > 100, "{seen:?}");
 }
+
+/// The human's free09 recording (C41): a free-ride machine race, its MachineRacer monster truck parked
+/// at its spawn with its brain built (`ai_mx_spawn` mode 4) and handed the MachineRace's race file
+/// (`Tracks\free09\free09MR1.tdf`, one looping path of 118 nodes) as its net.
+const C41_STATE: &str = "first_recording.p2m2_SaveState.eeMemory.bin";
+/// The machine racer's brain in that image (the truck's +0xb30).
+const C41_BRAIN: u32 = 0x0106_1340;
+
+/// S339's proof on the machine racer's own brain and net (C41): the free09 recording's truck brain,
+/// its spot not yet placed, on the MachineRace's `mr1.tdf` net, from `ai_seek_path_branch` to
+/// `ai_seek_path_end` against `Racer::path_branch`, given in turn eight target jumps poked into free
+/// RAM whose setup legs stand on nodes spread along the one path, and once with no jump; then on with
+/// the truck moved along its heading at its target speed (as S309's test) until the branch hands
+/// over to the seeker or 300 branches pass. Each branch compares what S339's test compares. The
+/// original never runs this branch on this brain (mode 4 drives through the gate driver, not the
+/// seeker); the proof is of the port's follower on a machine race's net.
+#[test]
+fn c41_the_ticks_path_branch_rides_the_machine_racers_own_net() {
+    use game_sim::ai::{RIDE, seek};
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let image = kit.ctx("states").join(C41_STATE);
+    if !image.exists() {
+        return skip(&format!("{} is not there: it is the human's free09 recording's save state", image.display()));
+    }
+    let Some(at) = named(&["boot_gp", "ai_seek_path_branch", "ai_seek_path_end", "rand_state", "activity_manager"]) else { return };
+    let [gp, branch, end, rand_state, manager] = at[..] else { unreachable!() };
+    let r = C41_BRAIN;
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    for g in 0..9 {
+        let mut ee = ps2_oracle::Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+        ee.set(28, u64::from(gp));
+        ee.hooks.insert(end, Box::new(|ee| ee.set(31, ps2_oracle::DONE as i32 as i64 as u64)));
+        // The MachineRace is the activity manager's ninth activity.
+        let race_act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58) + 0x20);
+        let net = ee.u32_at(r + 0xdc);
+        assert_eq!((ee.u32_at(r + 0xd0), net, ee.u32_at(r + 0xd8)), (4, ee.u32_at(race_act + 0xb8), race_act + 0x50), "the machine racer's mode, net and race");
+        assert_eq!((ee.u32_at(r + 0x354), ee.u32_at(r + 0x34c)), (0, 0), "the machine racer: seeker state 0, no target jump");
+        let (mut t, recs, nodes) = s309_paths(&ee, net);
+        assert_eq!((t.paths.len(), t.paths[0].nodes.len()), (1, 118), "free09's mr1 net");
+        let f = s309_follower(&ee, r, &recs, &nodes).expect("the image's spot is on the net");
+        assert_eq!(f.spot.path, 0, "the parked racer's spot is not placed");
+
+        let mut world = seek::World::default();
+        let jump = (g < 8).then(|| {
+            let own = &t.paths[0].nodes;
+            let p = own[own.len() * g / 8].points[0];
+            let goal = Vf::new(p.x(), p.y(), p.z(), 1.0);
+            assert!((0..0x120).step_by(4).all(|o| ee.u32_at(S339_JUMP + o) == 0), "{S339_JUMP:#x} is free in the image");
+            put(&mut ee, S339_JUMP + 0xe0, goal);
+            ee.set_u32(r + 0x34c, S339_JUMP);
+            world.jumps.push(seek::Jump { setup: seek::Leg { point: goal, ..Default::default() }, ..Default::default() });
+            0
+        });
+
+        let mut racer = game_sim::ai::spawn(&mut Rng::from_state(1), 1, Some(RIDE), 2).racer;
+        let mut b = racer.brain;
+        racer.follower = f;
+        b.flags = f.flags;
+        racer.seeker.state = f.state;
+        racer.seeker.jump = jump;
+        (racer.seeker.aim, racer.seeker.heading, racer.seeker.speed) = (f.aim, f.heading, f.speed);
+        (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed) = (f.position, f.forward, f.own_speed);
+        racer.reach = f.reach;
+        (racer.controls.aim, racer.controls.heading, racer.controls.roll) = (F(f.angles.x()), F(f.angles.y()), F(f.angles.z()));
+        let view = |racer: &game_sim::ai::Racer, b: &game_sim::ai::Brain| {
+            let mut v = racer.follower;
+            (v.flags, v.state) = (b.flags, racer.seeker.state);
+            (v.position, v.forward, v.own_speed) = (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed);
+            (v.aim, v.heading, v.speed) = (racer.seeker.aim, racer.seeker.heading, racer.seeker.speed);
+            v.reach = racer.reach;
+            let c = &racer.controls;
+            v.angles = Vf::new(c.aim.0, c.heading.0, c.roll.0, v.angles.w());
+            v
+        };
+
+        let race = ee.u32_at(r + 0xd8);
+        let race_word = (race != 0).then(|| ee.u32_at(race + 0x5c));
+        let mut rng = Rng::from_state(ee.read(rand_state, 8) as u64);
+        let dt = F(1.0 / 30.0);
+        for step in 0..300 {
+            let before = view(&racer, &b);
+            ee.set(19, u64::from(r));
+            ee.set_f(22, dt.0);
+            ee.call(branch, &[u64::from(net)], &[], BUDGET * 20);
+            racer.path_branch(&mut b, &mut t, &mut world, race_word, &mut rng, dt);
+            let mine = view(&racer, &b);
+            let what = format!("goal {g} step {step}: {before:?}");
+            let Some(theirs) = s309_follower(&ee, r, &recs, &nodes) else {
+                panic!("{what}: the original's spot names a node off the net");
+            };
+            assert_eq!(s309_bits(&theirs), s309_bits(&mine), "{what}\n original {theirs:?}\n port     {mine:?}");
+            if jump.is_some() {
+                let kept = s309_spot(&ee, S339_JUMP + 0x110, &recs, &nodes).expect("the goal's spot is on the net");
+                assert_eq!(kept, world.jumps[0].setup.spot, "{what}: the goal's spot");
+                assert_eq!(ee.u32_at(r + 0x34c), S339_JUMP, "{what}: the target jump stays");
+                if step == 0 && kept.path != 0 {
+                    *seen.entry("goal placed").or_default() += 1;
+                }
+            }
+            let (now, _, _) = s309_paths(&ee, net);
+            let (a, c) = (&now.paths[0], &t.paths[0]);
+            assert_eq!((a.flags, a.dist.0.to_bits(), a.best), (c.flags, c.dist.0.to_bits(), c.best), "{what}: the path's scratch words");
+            assert_eq!(
+                (now.free_routes, now.free_parents, now.free_candidates),
+                (t.free_routes, t.free_parents, t.free_candidates),
+                "{what}: the pools"
+            );
+            assert_eq!(rng.state(), ee.read(rand_state, 8) as u64, "{what}: the generator");
+
+            let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+            count("branches");
+            if step == 0 && mine.spot.path != 0 {
+                count("spot placed");
+            }
+            if mine.spot.piece != before.spot.piece {
+                count("moved on a node");
+            }
+            if racer.seeker.state == 1 {
+                count("handed over");
+                break;
+            }
+
+            let go = mine.speed.0 * dt.0;
+            let p = mine.position;
+            let position = Vf([p.x() + mine.heading.x() * go, p.y(), p.z() + mine.heading.z() * go, p.w()]);
+            (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed) = (position, mine.heading, mine.speed);
+            put(&mut ee, r + 0xc0, position);
+            put(&mut ee, r + 0xb0, mine.heading);
+            ee.set_f32(r + 0x80, mine.speed.0);
+        }
+    }
+    eprintln!("c41 path branch: {seen:?}");
+    let n = |k| seen.get(k).copied().unwrap_or(0);
+    assert!(n("spot placed") == 9 && n("goal placed") == 8 && n("branches") > 100, "{seen:?}");
+}
