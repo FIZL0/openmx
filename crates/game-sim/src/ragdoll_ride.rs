@@ -493,7 +493,26 @@ impl Down {
         crash: &crate::ride::Crash,
         world: &mut dyn World,
         bike_in: bool,
+        knockable: Option<&mut crate::prop_set::PropSet>,
+    ) {
+        self.step_posed_parked(kit, posed, dt, crash, world, bike_in, knockable, &mut []);
+    }
+
+    /// [`Down::step_posed_among`] among the parked cars too (F73, the cars the ride is lent for the
+    /// frame, [`crate::ride::Ride::parked`]): the search lists each one near the bones after the path
+    /// cars, a sphere is paired with its hull and measured against its body, and each one a sphere's
+    /// record took is marked struck, for the Sim to wake ([`crate::ragdoll_scene::ParkedCar`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_posed_parked(
+        &mut self,
+        kit: &Kit,
+        posed: Option<&Posed>,
+        dt: F,
+        crash: &crate::ride::Crash,
+        world: &mut dyn World,
+        bike_in: bool,
         mut knockable: Option<&mut crate::prop_set::PropSet>,
+        parked: &mut [crate::ragdoll_scene::ParkedCar],
     ) {
         let frame = wreck_frame(&crash.bike.record.node);
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
@@ -585,6 +604,8 @@ impl Down {
         if let (Some(b), Some(probe), true) = (&mut bike_scene, self.search.stood, self.search.built) {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
+            // The parked cars after them (F73): their hulls on the riders' node, asleep or awake.
+            b.parked = crate::ragdoll_scene::ParkedCar::near(parked, probe, reach);
             // The seams the bones reach across on a world that wraps (MD167a).
             let seams = crate::tiles::seam_shifts(&*world, probe, reach);
             // And the static props it listed (S165), the plants' trunks among them (S206), measured
@@ -629,6 +650,14 @@ impl Down {
             for c in b.cars.iter().filter(|c| c.struck) {
                 if let Some(p) = props.props.get(c.prop) {
                     p.strike_heard();
+                }
+            }
+        }
+        // And the parked cars a sphere's record took, for the Sim to wake (F73).
+        if let Some(b) = &bike_scene {
+            for c in b.parked.iter().filter(|c| c.struck) {
+                if let Some(p) = parked.get_mut(c.car) {
+                    p.struck = true;
                 }
             }
         }

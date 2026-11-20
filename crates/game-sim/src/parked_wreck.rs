@@ -31,10 +31,13 @@
 //! nose 0.68 ft behind the original's frame phase and stops 0.6 ft short of theirs, so its wreck bike
 //! coasts on at the bike's 3.6 ft/s into the nose late. With the spot moved to line the approach up,
 //! the wreck bike stops where theirs does, slides back as theirs (within 0.01 ft for 4 frames) and
-//! leaves the nose 8 frames after the strike: neither at-rest wake is the wreck bike's. The likely
-//! cause is the thrown rider: the port's ragdoll bones fly through the truck's body, whose
-//! collidable they do not meet (tests/replay.rs
+//! leaves the nose 8 frames after the strike: neither at-rest wake is the wreck bike's (tests/replay.rs
 //! `the_lined_up_wreck_bike_slides_back_off_the_truck_as_the_original`).
+//!
+//! F73: they are the thrown rider's. The downed rider's bones are lent the parked cars for the frame
+//! ([`crate::Sim::lend_parked`], [`crate::ragdoll_scene::ParkedCar`]), meet their hulls, and each car
+//! a bone struck is woken after the frame ([`crate::Sim::parked_back`]): lined up, the truck wakes at
+//! rest on rows 68 and 70's frames.
 
 use crate::rider::Rider;
 use crate::rider_contact::Flown;
@@ -104,6 +107,41 @@ impl crate::Sim {
 }
 
 impl crate::Sim {
+    /// **The parked cars lent to player `i`'s downed rider's bones for the frame** (F73,
+    /// [`crate::ragdoll_scene::ParkedCar`]): each one's hull where its collision node stands and its
+    /// body, the copies nearest the wreck bike on a world that wraps. Nothing for a rider who is up
+    /// or a ghost (whose bodies meet nobody).
+    pub(crate) fn lend_parked(&mut self, i: usize, world: &dyn World) {
+        if self.parked_cars.is_empty() {
+            return;
+        }
+        let n = self.players();
+        let crate::Sim { rider, others, parked_cars, .. } = self;
+        let r = if i == 0 { rider } else { &mut others[i - 1].rider };
+        let Some(c) = r.crash.as_ref().filter(|_| !r.ghost.on) else { return };
+        let from = c.bike.origin();
+        r.ride.parked = parked_cars
+            .iter()
+            .enumerate()
+            .map(|(k, p)| {
+                let mut at = p.hull(n + k).at;
+                at.0[3] = crate::nearest_copy(world, from, at.0[3]);
+                crate::ragdoll_scene::ParkedCar::lent(std::sync::Arc::clone(&p.hull), &at, p.flown(n + k, from, world), k)
+            })
+            .collect();
+    }
+
+    /// The parked cars player `i`'s bones were lent ([`crate::Sim::lend_parked`]) taken back, and
+    /// each one a bone struck woken by its struck listener (F73).
+    pub(crate) fn parked_back(&mut self, i: usize) {
+        let r = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+        for c in std::mem::take(&mut r.ride.parked) {
+            if let (true, Some(p)) = (c.struck, self.parked_cars.get_mut(c.car)) {
+                p.struck();
+            }
+        }
+    }
+
     /// **The parked cars as a flown plane's lane meets them** (S486a,
     /// [`crate::wreck_plane::search_downed_parked`]): each one's hull where its body's node stands and
     /// its body, the copies nearest the plane at `flying`, named after the players as their hulls are

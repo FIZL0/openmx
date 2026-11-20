@@ -887,6 +887,8 @@ impl Sim {
             self.wreck_meets_parked(i, dt, world);
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
+            // A downed rider's bones meet the parked cars (F73).
+            self.lend_parked(i, &*world);
             // An AI rider's levers are the bike's controls (S323); its brain thinks after the frame.
             let c = &self.levers_of(i).unwrap_or(*c);
             rode[i] = *c;
@@ -901,6 +903,7 @@ impl Sim {
             };
             self.rng_back(i, kept);
             self.props_back(i);
+            self.parked_back(i);
             self.think(i, dt, world);
             // Its particle emitters, after its brain (S328c).
             self.dust_frame(i, dt);
@@ -993,12 +996,14 @@ impl Sim {
             // A downed rider's wreck bike by a parked car, unless the plane's lane ticked it (S486).
             self.wreck_meets_parked(i, dt, world);
             self.lend_props(i);
+            self.lend_parked(i, &*world);
             let c = self.levers_of(i).unwrap_or(pads[i]);
             let kept = self.lend_rng(i);
             let p = &mut self.others[i - 1];
             p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());
             self.rng_back(i, kept);
             self.props_back(i);
+            self.parked_back(i);
             self.think(i, dt, world);
             self.dust_frame(i, dt);
             self.race_bike(i, c.clutch);

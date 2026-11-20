@@ -385,8 +385,10 @@ fn the_walk_names_every_field_once() {
     // frames and never walked. F27a moved it to 2496: what the body rays' material listener heard
     // (`Ride::heard`), sound only, cleared each tick, not walked and not on the wire. B27 moved it to
     // 2512: the chassis' impact the material table reads (`Ride::impact`), sound only, likewise.
+    // F73 moved it to 2536: the parked cars lent to the downed rider's bones for a frame
+    // (`Ride::parked`), empty between frames and never walked.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2512, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2536, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

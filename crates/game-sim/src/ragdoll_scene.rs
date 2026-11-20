@@ -14,7 +14,9 @@
 //!
 //! The same search lists the path cars (S142), every one of them every frame, each re-measured; a
 //! sphere is tested against a car's mesh too when the car is within its reach, on the same record,
-//! and the push-out measures the bone against the car's motion ([`PathCar`]).
+//! and the push-out measures the bone against the car's motion ([`PathCar`]). After them the parked
+//! cars' hulls (F73), asleep or awake, measured against each car's body; one struck is woken
+//! ([`ParkedCar`]).
 //!
 //! The search lists the track's static props too (S165): the scene's collision meshes stand in the
 //! same tree as the bike ([`crate::flight_search::prop_box`]'s keys), and a regather lists each one
@@ -690,6 +692,58 @@ impl PathCar {
     }
 }
 
+/// **A parked car as the bones' search lists it** (F73): its hull (the car's `f.col`) where its
+/// collision object's node stands it, on the riders' node (S485, [`crate::car::Parked`]), a moving
+/// collidable asleep or awake. The search lists it after the path cars, every frame, re-measured; a
+/// sphere is paired with it when its distance is within the sphere's radius, the push-out measures
+/// the bone against the car's body ([`crate::rider_contact::Flown`], a copy), and a sphere's record it
+/// takes runs its struck listener, which wakes the car ([`crate::car::Parked::struck`]). The
+/// [`crate::Sim`] lends them to the ride for the frame ([`crate::ride::Ride::parked`]) and wakes those
+/// struck after it. Its class is no segment probe's, so the bones' sweep never meets it.
+#[derive(Clone, Debug)]
+pub struct ParkedCar {
+    pub mesh: std::sync::Arc<track::Mesh>,
+    pub frame: Node,
+    /// Its collision node, which its sphere is placed by.
+    pub at: Mat4,
+    /// How far its hull's sphere's reach is from where the first collision's sphere last stood (set
+    /// by [`ParkedCar::near`]).
+    pub distance: F,
+    pub body: crate::rider_contact::Flown,
+    /// Its index among the lent cars.
+    pub car: usize,
+    /// A sphere's record took it this frame: its struck listener runs.
+    pub struck: bool,
+}
+
+impl ParkedCar {
+    /// The car whose hull `mesh` stands at `at` (its collision node, the copy nearest the rider on a
+    /// world that wraps) with its body `body`, lent as car `car`.
+    pub fn lent(mesh: std::sync::Arc<track::Mesh>, at: &Mat4, body: crate::rider_contact::Flown, car: usize) -> ParkedCar {
+        let (to_world, _, _) = crate::world::Prop::posed(&mesh, at);
+        let [x, y, z, origin] = to_world.0;
+        ParkedCar { mesh, frame: Node { rows: [x, y, z], origin }, at: *at, distance: F::ZERO, body, car, struck: false }
+    }
+
+    /// **The lent cars a frame's spheres can be paired with**: every one whose hull's distance from
+    /// `probe` is within `reach` (the largest sphere's radius), in the lent order.
+    pub fn near(lent: &[ParkedCar], probe: Vf, reach: F) -> Vec<ParkedCar> {
+        lent.iter()
+            .filter_map(|p| {
+                let (_, centre, radius) = crate::world::Prop::posed(&p.mesh, &p.at);
+                let distance = reach_distance((centre, radius), probe);
+                (distance <= reach).then(|| ParkedCar { distance, struck: false, ..p.clone() })
+            })
+            .collect()
+    }
+
+    /// The sphere test against the car's hull on a record holding a hit at `held`; `Some` when this
+    /// car took the record.
+    pub fn touch(&self, centre: Vf, radius: F, held: Option<F>) -> Option<Touch> {
+        touch_mesh(&self.mesh, Normals::Unpacked, &self.frame, centre, radius, held)
+    }
+}
+
 /// **A static prop as the bones' search lists it** (S165): a scene collision mesh, standing where
 /// the scene put it ([`crate::world::Prop`]'s `to_world`, the collidable's frame), measured from
 /// where the first collision's sphere last stood. It does not move: a contact on it is with the
@@ -1006,6 +1060,9 @@ pub struct WreckBikeScene<'a> {
     /// (S240), after the static tree's entries and before the cars. Empty before the search is built.
     /// Contact `k + 1 + cars` is with prop `k`.
     pub knocked: Vec<KnockedProp>,
+    /// The parked cars the search lists near the bones this frame (F73), after the path cars.
+    /// Contact `k + 1 + cars + knocked` is with car `k`. Empty before the search is built.
+    pub parked: Vec<ParkedCar>,
 }
 
 impl<'a> WreckBikeScene<'a> {
@@ -1027,6 +1084,7 @@ impl<'a> WreckBikeScene<'a> {
             with: None,
             sphere: None,
             knocked: Vec::new(),
+            parked: Vec::new(),
         }
     }
 }
@@ -1106,6 +1164,17 @@ impl Scene for WreckBikeScene<'_> {
                     car.struck = true;
                 }
             }
+            let parked_from = first + self.knocked.len();
+            for (k, car) in self.parked.iter_mut().enumerate() {
+                if !(car.distance <= radius) {
+                    continue;
+                }
+                if let Some(t) = car.touch(centre, radius, best.map(|b| b.distance)) {
+                    best = Some(t);
+                    self.with = Some(parked_from + k);
+                    car.struck = true;
+                }
+            }
         }
         best.map(|t| vec![t.world])
     }
@@ -1142,6 +1211,11 @@ impl Scene for WreckBikeScene<'_> {
     }
 
     fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        if let Some(p) = other.checked_sub(1 + self.cars.len() + self.knocked.len()).and_then(|k| self.parked.get_mut(k)) {
+            let b = &mut p.body;
+            let mut w = Weighed { body: &mut b.body, mass: b.mass };
+            return moving(at, Against::Other(&mut Other { collider: &mut b.collider, side: Side::Body(&mut w) }));
+        }
         if let Some(p) = other.checked_sub(1 + self.cars.len()).and_then(|k| self.knocked.get_mut(k)) {
             let (collider, mut w) = p.pushed.weighed();
             return moving(at, Against::Other(&mut Other { collider, side: Side::Body(&mut w) }));
