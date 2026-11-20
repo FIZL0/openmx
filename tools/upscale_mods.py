@@ -15,7 +15,14 @@ changed (`textures/upscaled/sources.json`); delete a PNG to redo it. Rerun after
 
 The disc's own textures: `openmx --dump-textures` writes them to `mods/textures-src/`; upscale that folder
 with the same chain in chaiNNer's window (or make it a texture pack, `mods/<name>/mod.json` with
-`"kind": "textures"` and the PNGs under its `textures/`).
+`"kind": "textures"` and the PNGs under its `textures/`). Or headless, into such a pack:
+
+    python3 tools/upscale_mods.py MODEL.pth --disc mods/upscaled-disc [--xbox mods/xbox-textures] [--check]
+
+`--xbox` (P383) upscales the Xbox disc's picture of a texture in place of the PS2 one wherever that pack
+(`tools/xbox_textures.py pack`) has it; the result is still named by the PS2 texture's key. Both packs then
+name the same textures: with neither in settings.txt's `texture_packs`, the one whose folder sorts first is
+on top (`upscaled-disc` over `xbox-textures`, the upscale over its source); order them there otherwise.
 
 Slow (~2.5 s an image whatever its size)? chaiNNer 0.25.1 starts each node's work from a worker thread without
 waking its event loop. In `resources/src/api/lazy.py` `Lazy.from_coroutine`, replace the `create_task` + polling
@@ -79,6 +86,24 @@ def todo(roots, openmx):
                 yield d, png, out
 
 
+def disc_todo(src, pack, xbox):
+    """P383: (pack folder, source PNG bytes, upscaled path) for every disc texture `openmx --dump-textures`
+    wrote to `src` not upscaled into texture pack `pack` yet (`textures/upscaled/<same path>`) or changed
+    since; the source is texture pack `xbox`'s picture of the same key where it has one (the Xbox disc's,
+    `tools/xbox_textures.py pack`), else the dump's."""
+    better = {}
+    if xbox:
+        for f in sorted(Path(xbox, 'textures').rglob('*.png')):
+            better.setdefault(f.stem.rpartition('-')[2], f)
+    done = sources(pack)
+    for f in sorted(Path(src).rglob('*.png')):
+        rel = f.relative_to(src).as_posix()
+        png = better.get(f.stem.rpartition('-')[2], f).read_bytes()
+        out = pack / 'textures/upscaled' / rel
+        if not out.exists() or done.get(rel) != hashlib.sha1(png).hexdigest():
+            yield pack, png, out
+
+
 def unused(roots, openmx):
     """(mod folder, upscaled path) of every upscale no texture of the mod names any more (a rebuilt or dropped
     one's): the game never draws it, but it still ships in the mod's zip."""
@@ -100,8 +125,13 @@ def main():
     ap.add_argument('--batch', type=int, default=500, help='images per chaiNNer run')
     ap.add_argument('--check', nargs='*', metavar='MODS_DIR', help="only list what's missing or stale (default mods/)")
     ap.add_argument('--prune', nargs='*', metavar='MODS_DIR', help='delete unused upscales (default mods/)')
+    ap.add_argument('--disc', type=Path, metavar='PACK', help='upscale mods/textures-src (the disc\'s) into texture pack PACK instead')
+    ap.add_argument('--src', type=Path, default=REPO / 'mods/textures-src', help='with --disc: the dump to upscale')
+    ap.add_argument('--xbox', type=Path, metavar='PACK', help='with --disc: take this pack\'s picture of a key as its source (mods/xbox-textures)')
     a = ap.parse_args()
     try:
+        if a.disc is not None:
+            return disc(a)
         if a.check is not None:
             return check(a.check or [REPO / 'mods'], a.openmx)
         if a.prune is not None:
@@ -122,6 +152,29 @@ def run(a):
     print(f'{len(jobs)} textures to upscale')
     done = 0
     # batches, so an interrupted run keeps what it finished
+    for k in range(0, len(jobs), a.batch):
+        done += upscale(jobs[k:k + a.batch], a)
+        print(f'{done}/{len(jobs)} upscaled')
+    if done < len(jobs):
+        sys.exit('some textures were not written; rerun to retry them')
+
+
+def disc(a):
+    """--disc: the disc's textures upscaled into a texture pack; with --check only how many are left."""
+    jobs = list(disc_todo(a.src, a.disc, a.xbox))
+    if a.check is not None:
+        print(f'{len(jobs)} disc textures to upscale into {a.disc}')
+        for _, _, out in jobs:
+            print(f"  {out.relative_to(a.disc)}{'' if out.exists() else ' (missing)'}")
+        if jobs:
+            sys.exit(1)
+        return
+    if a.model is None:
+        sys.exit('the model is required unless --check')
+    a.disc.mkdir(parents=True, exist_ok=True)
+    if not (a.disc / 'mod.json').exists():
+        (a.disc / 'mod.json').write_text(json.dumps({'standard': 1, 'kind': 'textures', 'id': a.disc.name, 'name': 'Upscaled disc textures'}) + '\n')
+    done = 0
     for k in range(0, len(jobs), a.batch):
         done += upscale(jobs[k:k + a.batch], a)
         print(f'{done}/{len(jobs)} upscaled')
