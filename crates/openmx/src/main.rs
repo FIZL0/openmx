@@ -1219,6 +1219,7 @@ fn dress_tagged(p: &mut PeerDress, tag: &str, pick: &roster::Pick, fonts_of: Opt
         fov_ease: Default::default(),
         look_back: Default::default(),
         thrill: Default::default(),
+        first_person: Default::default(),
         odometer: overlay::Odometer::default(),
         preload_meter: overlay::PreloadMeter::default(),
         pilot_lean: vehicle::PilotLean::default(),
@@ -1543,6 +1544,9 @@ struct Rig {
     look_back: (chase::LookBack, chase::LookBack),
     /// The other-camera button and the thrill camera it brings up over the bike's follow camera (P157).
     thrill: chase::OtherCamera,
+    /// The first-person camera out of `fppreset.ini` (P384), which the camera button walks onto after
+    /// the bike's presets.
+    first_person: chase::FirstPersonCamera,
     /// The distance this player's odometer shows (V26).
     odometer: overlay::Odometer,
     /// This player's preload meter, a tick at a time (V53).
@@ -3585,6 +3589,9 @@ struct Args {
     /// framing, over the front end's Camera page. Unset, the page's, and without a front end the
     /// shipped default.
     camera_view: Option<menu::CameraView>,
+    /// `--fp-adjust BOB,UP,FORWARD,FOV` (P384): the first-person camera's trim, MXA's onboard adjust
+    /// as an idea ([`chase::FpAdjust`]). Unset, the disc's camera untouched.
+    fp_adjust: chase::FpAdjust,
     /// `--trace-camera` (P119): one line a frame for each view of what its follow camera did — the
     /// preset, the distance, the pitch, the field of view, the eye and the look-at — for finding a
     /// camera that swings.
@@ -6232,7 +6239,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The preset the session starts on, by name rather than by its place in the file. A name the
     // file does not have is an error rather than a quiet fall back to the first record, so that a
     // typo cannot pass for the camera it named.
-    if !camera.cam.presets.is_empty() {
+    // `--camera "First Person"` starts on the first-person camera (P384), over the default preset.
+    let fp_start = args.camera.eq_ignore_ascii_case(chase::FIRST_PERSON);
+    if !camera.cam.presets.is_empty() && !fp_start {
         let Some(start) = Preset::find(&camera.cam.presets, &args.camera) else {
             let names: Vec<&str> = camera.cam.presets.iter().map(|p| p.name.as_str()).collect();
             return Err(format!("--camera: the track has no preset called {:?}; it has {names:?}", args.camera));
@@ -7414,6 +7423,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
+    // The first-person camera's own file beside `cpresets.ini` (P384), `appstart\fppreset.ini`, and
+    // whether `--camera "First Person"` starts every seat on it.
+    let fppreset = archives.iter().find_map(|a| a.read_suffix("fppreset.ini").ok());
+    let fp_start = args.camera.eq_ignore_ascii_case(chase::FIRST_PERSON);
     // The pause's Tricks page (P259) lists what this ride can do: the 24, the packs' and their moves.
     if let Some(s) = shell.as_deref_mut() {
         s.front.menu.trick_rows = menu::trick_list::rows(&stunts, phy.tricks.as_ref());
@@ -8098,6 +8111,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             fov_ease: Default::default(),
             look_back: Default::default(),
             thrill: Default::default(),
+            first_person: Default::default(),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
             pilot_lean: vehicle::PilotLean::default(),
@@ -8135,6 +8149,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             fov_ease: Default::default(),
             look_back: Default::default(),
             thrill: Default::default(),
+            first_person: Default::default(),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
             pilot_lean: vehicle::PilotLean::default(),
@@ -10424,6 +10439,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             fov_ease: Default::default(),
                             look_back: Default::default(),
                             thrill: Default::default(),
+                            first_person: Default::default(),
                             odometer: overlay::Odometer::default(),
                             preload_meter: overlay::PreloadMeter::default(),
                             pilot_lean: vehicle::PilotLean::default(),
@@ -11848,6 +11864,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if steered && seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on && !rig.thrill.up) {
                 println!("{who}camera: {}", follow.cam.preset().name);
             }
+            // The first-person camera (P384), read once out of the track's `fppreset.ini` for the
+            // layout's viewport; a put-back or a marker's Up snaps it as it snaps the follow camera.
+            let fp_viewport = match layout {
+                Layout::Full => 0,
+                Layout::Stacked => 1,
+                Layout::SideBySide => 2,
+                _ => 3,
+            };
+            rig.first_person.ensure(fppreset.as_deref(), fp_viewport, display == Display::Wide, fp_start && args.camera_asked);
+            if let (Some(fp), true) = (&mut rig.first_person.cam, follow.cam.snap) {
+                fp.reset = true;
+            }
             let presets = follow.cam.presets.len();
             if steered && presets > 1 {
                 let pad = seat.sim.input.pad(0);
@@ -11861,8 +11889,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     Kind::Bike => scheme.changes_camera_on(pad, seat.sim.table()),
                     _ => plane.changes_camera(scheme, pad, seat.inverted),
                 };
-                if changes {
-                    follow.cam.next_preset();
+                // The bike's walk has the first-person camera after its last cycling preset (P384).
+                let first_person = seat.garage.up == Kind::Bike && rig.first_person.cam.is_some();
+                if changes && first_person && rig.first_person.next(&mut follow.cam) {
+                    println!("{who}camera: {}", chase::FIRST_PERSON);
+                    rig.ride_hud.note_camera(Instant::now(), chase::FIRST_PERSON);
+                } else if changes {
+                    if !first_person {
+                        follow.cam.next_preset();
+                    }
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
                     // The seat's next ride on this machine starts on it (P163).
@@ -11970,6 +12005,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 Some(view)
             };
+            // The first-person camera over the follow camera while it has the screen (P384), its eye
+            // on the rider's Head node; the wreck camera and the thrill camera still take it over. The
+            // renderer keeps the world's up, so the camera's own up, which carries its roll, is not drawn.
+            let fp_view = match (&view, seat.garage.up, &seat.sim.rider.crash) {
+                (Some(_), Kind::Bike, None) if rig.first_person.on => {
+                    let ride = &seat.sim.rider.ride;
+                    let head = rig.body.as_ref().filter(|b| b.posed).and_then(|b| {
+                        let m = b.rig.world().get(b.rig.set.skeleton.find("Head")?)?.mul(chassis_at(ride));
+                        Some(Vf::new(m.0[3][0], m.0[3][1], m.0[3][2], 1.0))
+                    });
+                    rig.first_person.frame(ride, head, args.fp_adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
+                }
+                _ => None,
+            };
+            let fp_shown = fp_view.is_some();
+            let view = fp_view.or(view);
             let view = match (view, &wreck_targets) {
                 (Some(_), Some(targets)) if wreck.on => Some(wreck.update(
                     dt.0,
@@ -11990,7 +12041,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!(
                     "camera {i} {} {} preset {:?} distance {} pitch {} yaw {} fov {} eye {} {} {} at {} {} {}",
                     pacer.ticks(),
-                    if rig.thrill.up { "thrill" } else if wreck.on { "wreck" } else { "follow" },
+                    if rig.thrill.up { "thrill" } else if wreck.on { "wreck" } else if fp_shown { "first-person" } else { "follow" },
                     c.preset().name,
                     c.distance.0,
                     c.pitch.0,
@@ -17155,6 +17206,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         camera: START_CAMERA.to_string(),
         camera_asked: false,
         camera_view: None,
+        fp_adjust: chase::FpAdjust::ORIGINAL,
         trace_camera: false,
         moment: None,
         wrecks: true,
@@ -17501,6 +17553,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                         .ok_or_else(|| format!("--camera-view: original, default or five numbers like 4,115,110,120,115, not {v:?}"))?,
                 });
             }
+            "--fp-adjust" => {
+                let v = next("four numbers: bob,up,forward,fov")?;
+                args.fp_adjust = chase::FpAdjust::parse(&v).ok_or_else(|| format!("--fp-adjust: four numbers like 1,0,0.5,5, not {v:?}"))?;
+            }
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();
                 let out: std::path::PathBuf = next("a path for the frame")?.into();
@@ -17826,7 +17882,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--atv NAME] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
-                            [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
+                            [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT] [--fp-adjust BOB,UP,FORWARD,FOV]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
