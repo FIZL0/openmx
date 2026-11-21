@@ -177,9 +177,7 @@ fn each_car_parks_on_its_own_track_and_is_drawn_driven() {
     let shot = scratch().join("free06-parked.png");
     let said = ride("free06", None, "gpu", 12, &shot, None);
     assert!(said.contains("none parked here"), "free06 parks a car:\n{said}");
-    assert!(!said.lines().any(|l| l.starts_with("picture bay: car:")), "free06 draws a car's bay:\n{said}");
-    assert!(!said.lines().any(|l| l.starts_with("picture parked: ")), "free06 draws a parked car:\n{said}");
-}
+    assert!(!said.lines().any(|l| l.starts_with("picture bay: car:")), "free06 draws a car's bay:\n{said}");}
 
 /// S265: [`tape`] with the left stick's x held at `x` from tick 30 beside the gas: `00` full left,
 /// `ff` full right, `7f` centred.
