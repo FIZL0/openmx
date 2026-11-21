@@ -10,7 +10,9 @@ Task F79. 2026-11-21.
   (P350a) puts the other seats' cards after the Sim's own.
 - The shell (main.rs `race_guests_in`, before seat 0's pass) fills it from seats 2+ (`Ridden::of`, so a
   downed or ghost rider's bike is left out, as the Sim's own are) whenever seat 0's Sim has AI riders,
-  and empties it otherwise.
+  and empties it otherwise. Scope choice: race or not (the brief names a race). The original's walk holds
+  every bike in any ride, so a split-screen free ride with AI riders gets them too.
+- The snapshot decode (snapshot.rs, outside the task's files) gets two lines so `Sim` still builds.
 - Nothing taken from ../opentennis (it has no AI scene walk).
 
 ## What the original does

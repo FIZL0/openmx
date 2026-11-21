@@ -195,10 +195,11 @@ pub struct Sim {
     /// steps and hashes as before; on the wire behind their own tag, the rotor's rays and the hull
     /// kept this machine's.
     pub parked_helis: Vec<parked_heli::ParkedHeli>,
-    /// The other local seats' bikes in a race over several seats (F79, [`ai::Ridden`]), as the
-    /// shell tells them before this Sim's pass with [`race::Race::guests`]: the AI riders' scene
-    /// walks them after the Sim's own players' ([`Sim::think`]). Empty — every ride but a split
-    /// screen race — walks as before. The shell's each pass: not walked, hashed or sent.
+    /// The other local seats' bikes when several seats ride with this Sim's AI riders (F79,
+    /// [`ai::Ridden`]), told by the shell before this Sim's pass as it tells [`race::Race::guests`]:
+    /// the AI riders' scene walk hands them out after the Sim's own players' ([`Sim::think`]), as
+    /// the original's walks every bike in its moving structure. Empty — one seat, or no AI rider —
+    /// thinks as before. Refilled every pass, so not in the state hash or on the wire.
     pub ridden_guests: Vec<ai::Ridden>,
 }
 

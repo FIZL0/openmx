@@ -2848,7 +2848,8 @@ impl<P: sim_world::World> World<P> {
     /// players' bikes tell their cards after their frames ([`game_sim::race::CardFeed::of`]), and each
     /// that rode its bike this pass counted on its card's tracker as a player's bike counts in its
     /// Sim's step (S319). Nothing without a race, or with the first seat alone. Its AI riders'
-    /// avoidance is told their bikes too (F79, [`game_sim::Sim::ridden_guests`]).
+    /// avoidance is told their bikes too, race or not, as the original's walk holds every bike (F79,
+    /// [`game_sim::Sim::ridden_guests`]); with the first seat alone that list is emptied.
     fn race_guests_in(&mut self, dt: F) {
         let (first, rest) = self.seats.split_first_mut().expect("a seat");
         let players = first.sim.players();
