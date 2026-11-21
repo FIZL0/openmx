@@ -304,6 +304,11 @@ pub struct Supercross {
     pub seat_flags: [u32; 2],
     /// Set at construction, cleared by the race manager's first countdown (`+0x4d8`).
     pub first_start: u32,
+    /// The outro scenes' lengths in seconds (S480), by cue from 1: the race-end ditties the loader
+    /// makes (`+0x450`..`+0x46c`, `[RaceEndDitties]`' `Sound1`..`Sound8` in the race events'
+    /// `event.aud`), each its stream's `Duration`. `None` for a scene with nothing to play; a cue
+    /// past the list has nothing either. The shell reads them off the disc.
+    pub outros: Vec<Option<F>>,
 }
 
 impl Supercross {
@@ -334,6 +339,7 @@ impl Supercross {
             fresh: 0,
             seat_flags: [0; 2],
             first_start: 1,
+            outros: Vec::new(),
         }
     }
 
@@ -864,6 +870,10 @@ impl Race {
                 laps.start();
             }
         }
+        // S480: the activity hears the race's Over from inside the laps' tick.
+        if frame.laps.finish.iter().any(|n| matches!(n, FinishNotice::Over { .. })) {
+            self.race_end();
+        }
         // The manager's clock, last of its running ticks, before its children (S386).
         if started {
             self.clock = F(fpu::add(self.clock.0, dt.0));
@@ -878,6 +888,42 @@ impl Race {
             *run = F(fpu::add(run.0, dt.0));
         }
         frame
+    }
+
+    /// **The race's end in play** (S480): the activity's answer to the Over
+    /// ([`Supercross::race_end`], a single race of the laps' length) on the laps' cards in list
+    /// order, a card with [`card_flags::PLAYER`] a player's — its seat its rank among the players'
+    /// cards in player order, its words its tracker's preloads and clutches. The tips set
+    /// [`Race::tip_words`] ([`tip_words`]). The outro scene it cues is the race's stage, whose length
+    /// arms the tip clock on the next tick; a scene with nothing to play arms it at once, 7 s away.
+    /// Nothing without an activity or laps.
+    fn race_end(&mut self) {
+        let (Some(activity), Some(laps)) = (&mut self.activity, &self.laps) else { return };
+        let player = |e: &Entry| e.card.lap.flags & card_flags::PLAYER != 0;
+        let cards: Vec<(i32, Option<EndSeat>)> = laps
+            .cards
+            .iter()
+            .map(|e| {
+                let seat = player(e).then(|| EndSeat {
+                    seat: laps.cards.iter().filter(|o| player(o) && o.player < e.player).count() as i32,
+                    preloads: e.stats.preloads as u32,
+                    clutches: e.stats.clutches as u32,
+                });
+                (e.card.lap.place, seat)
+            })
+            .collect();
+        let event = ResultEvent { activity: 2, laps: laps.rules.lap.laps.clamp(0, 255) as u8, ..ResultEvent::default() };
+        let end = activity.race_end(&cards, &event, false);
+        self.tip_words = tip_words(&end.tips);
+        let Some(cue) = end.cue else { return };
+        match activity.outro_length(cue) {
+            Some(length) => self.stage = Some(length),
+            None => {
+                activity.cue_ended();
+                self.tip_armed = true;
+                self.tip_in = OUTRO_WAIT;
+            }
+        }
     }
 
     /// How long the tip's popup takes to fade in over the race: a quarter of a second when it has a
@@ -4899,11 +4945,40 @@ impl Supercross {
         }
         out.cue = Some(self.hud_stage);
         if cue_ends {
-            self.hud_armed = 1;
-            self.hud_fade = OUTRO_WAIT;
+            self.cue_ended();
         }
         out
     }
+
+    /// The outro's cue had nothing to play: the scene armed at once, the tip 7 s away.
+    pub fn cue_ended(&mut self) {
+        self.hud_armed = 1;
+        self.hud_fade = OUTRO_WAIT;
+    }
+
+    /// The length of outro scene `cue` (from 1), if it has something to play ([`Supercross::outros`]).
+    pub fn outro_length(&self, cue: i32) -> Option<F> {
+        let k = usize::try_from(cue).ok()?.checked_sub(1)?;
+        self.outros.get(k).copied().flatten()
+    }
+}
+
+/// The preload and clutch popup's words as the race's end leaves them (`tip_popup_arm`): each tip
+/// writes its seat's preload word at `+0xc0 + 4 × seat` and its clutch word at `+0xc8 + 4 × seat`,
+/// in list order, and the popup has a word to show when any of `+0xc0`..`+0xcc` is set — the first
+/// two seats' words, and a third and fourth seat's preload words, which land on the clutch slots.
+pub fn tip_words(tips: &[EndTip]) -> bool {
+    let mut words = [false; 8];
+    for t in tips {
+        let Ok(seat) = usize::try_from(t.seat) else { continue };
+        if let Some(w) = words.get_mut(seat) {
+            *w = t.no_preload;
+        }
+        if let Some(w) = words.get_mut(seat + 2) {
+            *w = t.no_clutch;
+        }
+    }
+    words[..4].iter().any(|&w| w)
 }
 
 // --- a race's laps in a ride (P313) -----------------------------------------------------------------

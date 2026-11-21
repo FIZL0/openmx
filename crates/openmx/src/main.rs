@@ -6899,15 +6899,26 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // P327: a race starts on its grid, behind the closed start gate off the scene's drop-gate prop,
     // the reset's countdown to the drop drawn from the race events' start calls.
     let race_start = args.race.as_ref().and_then(|r| {
-        let drops = second
+        let event_aud = second
             .as_ref()
             .and_then(|m| disc.res(m).ok())
             .and_then(|res| res.read("aud\\event.aud").ok())
-            .map(|b| race_start::drop_times(&ini::text(&b), &args.bike))
-            .unwrap_or_default();
+            .map(|b| ini::text(&b));
+        let drops = event_aud.as_deref().map(|a| race_start::drop_times(a, &args.bike)).unwrap_or_default();
+        // S480: the outro scenes' lengths, the race-end ditties' streams on the app's stream list.
+        let streams = disc.res("appstart.res").ok().and_then(|res| Some((res.read("aud\\streams.txt").ok()?, res.read("aud\\streams.juk").ok()?)));
+        let outros = match (&event_aud, &streams) {
+            (Some(a), Some((list, index))) => race_start::outro_lengths(a, &ini::text(list), &ini::text(index)),
+            _ => Vec::new(),
+        };
         let prop = race_start::drop_prop(&look.models, |m| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris)));
         // P350: every local seat has a lane of the grid, so it holds at least as many riders.
-        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), (r.riders as i32).max(if args.online.is_none() { riders as i32 } else { 1 }), race_seed.unwrap_or_default()));
+        let mut start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), (r.riders as i32).max(if args.online.is_none() { riders as i32 } else { 1 }), race_seed.unwrap_or_default()));
+        if let Some(s) = &mut start {
+            let said: Vec<String> = outros.iter().map(|o| o.map_or("-".into(), |l| format!("{:.2}", l.0))).collect();
+            println!("race: outro scenes {}", said.join(" "));
+            s.activity.outros = outros;
+        }
         if start.is_none() {
             println!("race: {} has no start gate ({} start calls, drop gate {}) — a ride from the start line", args.track, drops.len(), if prop.is_some() { "found" } else { "not found" });
         }
@@ -11549,7 +11560,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     }
                 }
             }
-            if race_watch.wait(dt.0) {
+            // S480: a race with an activity ends its outro when the tip's popup has faded in.
+            let outro_up = world.seats[0].sim.race.as_ref().filter(|r| r.activity.is_some()).map(|r| r.outro_up());
+            if race_watch.wait(dt.0, outro_up) {
                 println!("race: outro over");
                 if front.is_some() {
                     leave = Leave::Menu;

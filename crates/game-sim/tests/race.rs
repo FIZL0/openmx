@@ -11000,3 +11000,66 @@ fn the_odometer_holds_s386s_live_sx01_race() {
     assert!(missed[3] == 0 && missed[2] * 20 < moved[2], "moves per bike {moved:?}, missed {missed:?}");
     assert!(touching > 500 && off > 300, "{touching} touching, {off} off the ground");
 }
+
+// --- S480: the race's outro armed in play -------------------------------------------------------------
+
+/// A started race with a Supercross activity holding `outros`, and three cards in place order (their
+/// race times too), the human's (seat 0) in `place` and two computers', the race ending on the next
+/// tick (the rules' Over not yet told).
+fn ending_race(outros: Vec<Option<F>>, place: i32, preloads: i32) -> Race {
+    let mut race = Race::new(Gate::new(), &[], F::ZERO, Rng::from_state(5));
+    race.countdown.running = false;
+    let mut act = Supercross::new();
+    act.outros = outros;
+    race.activity = Some(act);
+    let mut rules = race::supercross_rules(2);
+    rules.lap.flags |= race_flags::OVER;
+    let mut computers = 1..;
+    let cards = (1..=3)
+        .map(|at: i32| {
+            let (player, flags) = if at == place { (0, race::HUMAN_CARD) } else { (computers.next().unwrap(), race::COMPUTER_CARD) };
+            let lap = LapCard { flags: flags | card_flags::OUT, place: at, race_time: F(100.0 + at as f32), ..LapCard::default() };
+            let stats = race::Tracker { preloads: if player == 0 { preloads } else { 0 }, ..race::Tracker::default() };
+            race::Entry { player, card: RaceCard { lap, ..RaceCard::default() }, stats }
+        })
+        .collect();
+    let course = Course { line: Gate::new(), line_spot: Spot::default(), lap_length: F(100.0) };
+    race.laps = Some(Box::new(race::Laps { rules, course, lists: LineLists::default(), cards, track: std::sync::Arc::new(TrackPaths::default()) }));
+    race
+}
+
+/// **S480**: at the race's Over the Sim's race runs the activity's end: the human's place picks the
+/// outro scene (third: scene 6, the disc's `UI\3rd_race`, 8.514920 s), the race takes that scene's
+/// length as its stage, and the tip arms on the next tick 2.05 s before the scene's end — S13d's
+/// 6.46 (`+0x410` on the row after its Over) — the popup having the preload word to show. A scene
+/// with nothing to play arms the tip at once, 7 s away, as the original's failed cue does.
+#[test]
+fn the_races_over_cues_the_outro_and_arms_the_tip_from_its_length() {
+    let mut outros = vec![Some(F(12.488254)); 8];
+    outros[5] = Some(F(8.514920));
+    let mut race = ending_race(outros, 3, 0);
+    race.tick(F(1.0 / 30.0), &[]);
+    assert_eq!(race.activity.as_ref().unwrap().hud_stage, 6, "third place cues scene 6");
+    assert_eq!(race.stage, Some(F(8.514920)));
+    assert!(race.tip_words, "no preload: the popup has a word to show");
+    assert!(!race.tip_armed && race.tip_in == F::ZERO, "the stage arms the tip on the tick after");
+    race.tick(F(1.0 / 30.0), &[]);
+    assert!(race.tip_armed);
+    assert_eq!(race.tip_in.0.to_bits(), F(fpu::sub(fpu::sub(8.514920, 0.75), 1.3)).0.to_bits());
+    assert!((race.tip_in.0 - 6.46492).abs() < 1e-5, "{:?}", race.tip_in);
+    // The Over is heard once: the tip clock runs down from there.
+    race.tick(F(1.0 / 30.0), &[]);
+    assert!(race.tip_in < F(6.46492));
+
+    // First, with a preload: scene 2; it has nothing to play, so the tip is 7 s away at once.
+    let mut race = ending_race(vec![Some(F(8.514920)), None], 1, 1);
+    race.tick(F(1.0 / 30.0), &[]);
+    let act = race.activity.as_ref().unwrap();
+    assert_eq!((act.hud_stage, act.hud_armed, act.hud_fade), (2, 1, F(7.0)));
+    assert_eq!((race.stage, race.tip_armed, race.tip_in), (None, true, F(7.0)));
+    assert!(!race.tip_words, "the winner has no tip");
+    // With no outros read at all, the same.
+    let mut race = ending_race(Vec::new(), 2, 0);
+    race.tick(F(1.0 / 30.0), &[]);
+    assert_eq!((race.activity.as_ref().unwrap().hud_stage, race.tip_armed, race.tip_in), (4, true, F(7.0)));
+}

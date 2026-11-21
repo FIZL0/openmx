@@ -119,6 +119,34 @@ pub fn drop_times(event_aud: &str, bike: &str) -> Vec<F> {
     mine.or_else(|| starts().next()).map(|(_, t)| t.clone()).unwrap_or_default()
 }
 
+/// S480: the outro scenes' lengths ([`Supercross::outros`]) out of the race events' `event.aud` and
+/// the app's stream list (`appstart.res`'s `aud\streams.txt`, one file name a line) and its index
+/// (`aud\streams.juk`, `[Song N]` for the list's Nth). The loader names the scenes in
+/// `[RaceEndDitties]`' `Sound1`..`Sound8`; each is a stream looked up as `Aud\` and its name with
+/// its extension made `.vag`, then `.vig`, against the list ignoring case, and its length is that
+/// stream's `Duration`. A scene not on the list has nothing to play (`None`). Empty without the
+/// section.
+pub fn outro_lengths(event_aud: &str, streams: &str, index: &str) -> Vec<Option<F>> {
+    let aud = game_render::ini::parse(event_aud);
+    let Some(ditties) = aud.iter().find(|s| s.name.eq_ignore_ascii_case("RaceEndDitties")) else { return Vec::new() };
+    let names: Vec<&str> = streams.lines().map(str::trim).collect();
+    let songs = game_render::ini::parse(index);
+    let length = |name: &str| {
+        let base = format!("Aud\\{}", name.trim());
+        let stem = match base.rfind('.') {
+            Some(dot) => &base[..dot],
+            None => &base,
+        };
+        [".vag", ".vig"].iter().find_map(|ext| {
+            let want = format!("{stem}{ext}");
+            let k = names.iter().position(|n| n.eq_ignore_ascii_case(&want))?;
+            let song = songs.iter().find(|s| s.name.eq_ignore_ascii_case(&format!("Song {}", k + 1)))?;
+            Some(F(song.number("Duration").unwrap_or(0.0)))
+        })
+    };
+    (1..=8).map(|k| ditties.get(&format!("Sound{k}")).and_then(length)).collect()
+}
+
 /// A race's start for `riders` riders off the drop-gate prop and the start calls' drop times: the
 /// activity reset (the intro counted as seen, so it is skipped), the lanes shuffled with every rider
 /// a player's, and card 0's grid spot. `None` without a prop or a start call.
@@ -322,6 +350,8 @@ pub struct Watch {
     over: bool,
     /// Seconds since the Over, for the outro's wait.
     pub since_over: Option<f32>,
+    /// S480: the race's outro was seen up, and its wait ran out.
+    outro_seen: bool,
     /// What `race_over` answered at each card's finish, in finishing order.
     pub overs: Vec<race::RaceOver>,
 }
@@ -370,12 +400,17 @@ impl Watch {
         out
     }
 
-    /// A tick of the outro's wait: whether it ran out this tick.
-    pub fn wait(&mut self, dt: f32) -> bool {
+    /// A tick of the outro's wait: whether it ran out this tick. S480: on a race with an activity
+    /// (`outro_up` is [`Race::outro_up`]) it runs out when the tip's popup has faded in over the
+    /// race, as the race's outro scene armed it; without one, [`OUTRO_WAIT`] after the Over.
+    pub fn wait(&mut self, dt: f32, outro_up: Option<bool>) -> bool {
         let Some(t) = &mut self.since_over else { return false };
         let was = *t;
         *t += dt;
-        was < OUTRO_WAIT && *t >= OUTRO_WAIT
+        match outro_up {
+            Some(up) => up && !std::mem::replace(&mut self.outro_seen, true),
+            None => was < OUTRO_WAIT && *t >= OUTRO_WAIT,
+        }
     }
 }
 
@@ -780,7 +815,7 @@ mod tests {
         // Its laps counted from none to the last at once: a finish, no lap between.
         assert_eq!(w.look(&laps), vec![Change::Finished { player: 1, place: 2 }, Change::Over]);
         assert!(w.look(&laps).is_empty());
-        let ticks = (0..300).filter(|_| w.wait(1.0 / 30.0)).count();
+        let ticks = (0..300).filter(|_| w.wait(1.0 / 30.0, None)).count();
         assert_eq!(ticks, 1);
         assert!(w.since_over.is_some_and(|t| t >= OUTRO_WAIT));
         let hand = hand_over(&laps, 2, "Me", &w.overs);
@@ -797,6 +832,31 @@ mod tests {
         let hand = hand_over(&laps, 2, "Me", &w.overs);
         assert_eq!(hand.cards[1].words[4..], [2.0, 1.0, 81.5, 2.25, 3.0, 4.0, 5.0, 6.0, 7.0].map(F));
         assert_eq!(hand.cards[0].words[11..], [F(1.0), F::ZERO]);
+    }
+
+    /// S480: on a race with an activity the outro's wait runs out once, on the first tick the race
+    /// says its tip's popup is up, however long after the Over that is — and never before the Over.
+    #[test]
+    fn the_outro_wait_runs_out_when_the_races_outro_is_up() {
+        let mut w = Watch::default();
+        assert!(!w.wait(1.0 / 30.0, Some(true)), "no wait before the Over");
+        w.since_over = Some(0.0);
+        let ups = (0..600).map(|k| w.wait(1.0 / 30.0, Some(k >= 400))).collect::<Vec<_>>();
+        assert_eq!(ups.iter().filter(|&&u| u).count(), 1);
+        assert!(ups[400], "it runs out on the first tick up, past the 7 s");
+    }
+
+    /// S480: the outro scenes' lengths: each `[RaceEndDitties]` sound found on the stream list (a
+    /// `.vag` first, then a `.vig`, ignoring case) takes its song's `Duration`; one not on the list
+    /// has nothing to play, a song with no `Duration` reads 0, and a file without the section none.
+    #[test]
+    fn the_outro_lengths_are_the_ditties_streams_durations() {
+        let aud = "[RaceStart50]\nSound1 = x\n[RaceEndDitties]\nSound1 = UI\\1st_game\nSound2 = ui\\1ST_RACE.wav\nSound3 = UI\\gone\nSound4 = UI\\both\nSound6 = UI\\3rd_race\nSound8 = UI\\bare\n";
+        let streams = "Aud\\Music\\song.vig\r\nAud\\UI\\1st_game.vig\nAud\\UI\\1st_race.vig\nAud\\UI\\both.vig\nAud\\UI\\both.vag\nAud\\UI\\3rd_race.vig\nAud\\UI\\bare.vig\n";
+        let index = "[Song 1]\nDuration = 204.081894\n[Song 2]\nDuration = 12.488254\n[Song 3]\nDuration = 9.5\n[Song 4]\nDuration = 1.0\n[Song 5]\nDuration = 2.0\n[Song 6]\nFilename = Aud\\UI\\3rd_race.vig\nDuration = 8.514920\n[Song 7]\nSize = 4\n[Songs]\nNumberOfSongs = 7\n";
+        let got = outro_lengths(aud, streams, index);
+        assert_eq!(got, vec![Some(F(12.488254)), Some(F(9.5)), None, Some(F(2.0)), None, Some(F(8.514920)), None, Some(F::ZERO)]);
+        assert!(outro_lengths("[RaceStart50]\n", streams, index).is_empty());
     }
 
     #[test]

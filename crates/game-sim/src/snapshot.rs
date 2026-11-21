@@ -1335,7 +1335,7 @@ impl<T: Wire + Clone> Wire for std::sync::Arc<T> {
 wire!(crate::race::Gate { flags, centre, normal, across, width, height, reach_sq });
 wire!(crate::race::Seen { now, last });
 wire!(crate::race::Countdown { length, elapsed, running, interval, acc });
-wire!(crate::race::Supercross { start_delay, start_cue, weight, lane_offsets, lanes, hud_fade, hud_stage, hud_armed, intro_clips, intro, drop_times, call, lights_on, lights_off, warn_on, warn_off, countdown, intro_seen, intro_queued, fresh, seat_flags, first_start });
+wire!(crate::race::Supercross { start_delay, start_cue, weight, lane_offsets, lanes, hud_fade, hud_stage, hud_armed, intro_clips, intro, drop_times, call, lights_on, lights_off, warn_on, warn_off, countdown, intro_seen, intro_queued, fresh, seat_flags, first_start, outros });
 wire_enum!(crate::state::Kind { Plain, Wrecked });
 wire!(crate::wreck_page::Page { fade, updates });
 wire_enum!(crate::wreck_page::Fade { Off, Out, In });

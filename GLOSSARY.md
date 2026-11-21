@@ -18,3 +18,8 @@ _In code_: race::Tracker::odometer
 **race clock**:
 The score manager's clock: seconds since the tick after the race's drop, standing once the tip's popup is up; the stats commit reads it as time played and raced
 _In code_: race::Race::clock
+
+**outro scene**:
+The short tune that plays when a race ends, picked by the best place a player took; the tip popup comes up 2.05 s before it ends, or 7 s on when it has nothing to play
+_In code_: race::Supercross::outros, race::Race::stage, race_start::outro_lengths
+_Avoid_: race-end ditty

@@ -12546,7 +12546,23 @@ race_tip_fade               boot 0x002fcff0 (race manager tick) its tip clock (+
 #                                           (act +0x148, mgr +0xf8 and the flash object freeze), 0.25 s at
 #                                           1/30. Who reads the fader to stop the activity was not traced.
 #                                           Ported (S334): race::Race::{outro, outro_up, OUTRO_FADE}
-race_prop_raiser            boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot +0x38 = 0x002feb40) the
+race_end_ditties            boot 0x002fdc40 (activity) the outro scene cues (S480): the event's audio
+#                                           ini's [RaceEndDitties] Sound1..Sound8 (0x43c440 is the intros'
+#                                           "CutSceneDitties") each made a sound by 0x00165b90 with flags
+#                                           0x42 (0xc2 for Sound8) into +0x450 + 4*(k-1), so the race_end's
+#                                           cue +0x44c[stage] is Sound<stage>. Flag 2 takes the stream path
+#                                           0x00165ef0: its length (+0x24) is the stream's Duration.
+#                                           race::Supercross::outros, race_start::outro_lengths
+stream_index_read           boot 0x0019a4c0 reads "aud\streams.juk" ([Song N] Duration, Pitch,
+#                                           DataOffset, Size; [Songs] NumberOfSongs) and the name list
+#                                           "aud\streams.txt", line i the name of Song i+1.
+stream_find                 boot 0x0019a270 (name) "Aud\" + name, its extension made ".vag" then ".vig",
+#                                           against the list case-blind (0x00410c50 lowers each byte);
+#                                           -1 when not there. The sound's length then reads -106.0
+#                                           (0xc2d40000); the port takes such a scene as nothing to play.
+stream_length               boot 0x0019d8c0 (index) the stream's Duration from the index read above.
+#                                           S13d: scene 6 (UI\3rd_race, 8.514920) arms the tip at 6.46.
+race_prop_raiser           boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot +0x38 = 0x002feb40) the
 #                                           activity's +0x3a8, built when activity +0x3a4 != 0 and put on
 #                                           the score manager's node (pass 2) before the flashes. 0x002fe050
 #                                           gathers the scene's (app+0x3cc) props whose name (+0x144) matches
