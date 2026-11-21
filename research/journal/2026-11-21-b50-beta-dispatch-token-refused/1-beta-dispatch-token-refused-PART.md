@@ -12,7 +12,8 @@ Task B50. 2026-11-21.
   or wrong?)"), but before B43 that was a warning. B43 made the token required, so the job now fails.
   The secret was set 2026-10-28.
 - `.github/workflows/pages.yml`: the beta job first checks the token with one plain call and, on a refusal, says
-  "BETA_DISPATCH_TOKEN was refused (expired or revoked?)" and points at plan/HUMAN.md.
+  "BETA_DISPATCH_TOKEN can't read FIZL0/openmx-beta (gh's error)", with what to do on a 401 (plan/HUMAN.md).
+  B43 dropped the old refusal warning when it made the token required.
 - `plan/HUMAN.md`: the token item no longer says it is optional (it is needed since B43) and says what to do when
   it expires.
 - Wizard for the person: `context/notes/wizards/B50.sh` (make the token, set the secret, re-run the job).
@@ -23,8 +24,9 @@ Not applicable: CI only.
 
 ## How it was proved
 
-- `pages.yml` parses as YAML. `gh api repos/FIZL0/openmx-beta -q .full_name` (the new check's call) works with
-  a good token here.
+- `pages.yml` parses as YAML. The new check's line, run here with `GH_TOKEN=bogus`, fails and captures
+  `gh: Bad credentials (HTTP 401)` (the same text as the CI log); with this machine's login it passes.
+- The check prints gh's own error, so a 404 or an outage isn't passed off as an expired token (spec review).
 
 ## Not verified / not 1:1
 

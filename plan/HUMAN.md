@@ -291,7 +291,7 @@ website on https://openmx.dev. What only you can do:
 2. **The beta dispatch token** (needed since B43: without a working one pages.yml's beta job fails and
    beta.openmx.dev is not updated): a fine-grained token (github.com/settings/personal-access-tokens), repository
    FIZL0/openmx-beta only, permission Contents read and write, then `gh secret set BETA_DISPATCH_TOKEN -R FIZL0/openmx`.
-   When it expires the beta job says "BETA_DISPATCH_TOKEN was refused": make a new one the same way (B50; the
+   When it expires the beta job (since B50) says "BETA_DISPATCH_TOKEN can't read … HTTP 401": make a new one the same way (B50; the
    2026-10-28 one was refused by 2026-11-21).
 3. **The release signing key**, before the first release: `sudo pacman -S minisign`, then
    `mkdir -p ~/.config/openmx && minisign -G -p ~/.config/openmx/release.pub -s ~/.config/openmx/release.key`

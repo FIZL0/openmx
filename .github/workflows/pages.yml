@@ -115,8 +115,8 @@ jobs:
             echo "beta already at newer ${cur::7}, skipping"; exit 0
           fi
           # B50: an expired or revoked token answers 401 to everything; say so, not that deploy.yml is old
-          GH_TOKEN=$DISPATCH gh api "repos/$BETA" -q .full_name >/dev/null \
-            || { echo "::error::BETA_DISPATCH_TOKEN was refused (expired or revoked?): make a new one, plan/HUMAN.md's beta dispatch token"; exit 1; }
+          err=$(GH_TOKEN=$DISPATCH gh api "repos/$BETA" -q .full_name 2>&1 >/dev/null) \
+            || { echo "::error::BETA_DISPATCH_TOKEN can't read $BETA ($err): on HTTP 401 it expired or was revoked, make a new one (plan/HUMAN.md's beta dispatch token)"; exit 1; }
           # the beta repo's workflow must be tools/beta-site.yml's B43 one (it takes the bundle from a draft there);
           # an older one still reads this repo's `beta` release, so that stays until the workflow is updated
           GH_TOKEN=$DISPATCH gh api "repos/$BETA/contents/.github/workflows/deploy.yml" -q .content | base64 -d | grep -q beta-site.tar.gz \
