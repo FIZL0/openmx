@@ -1,4 +1,4 @@
-# P194: everything may be crawled; the page's canonical link is https://openmx.dev/ (beta.openmx.dev says noindex)
+# P194: everything may be crawled; the page's canonical link is https://openmx.dev/
 User-agent: *
 Allow: /
 

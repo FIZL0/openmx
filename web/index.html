@@ -29,8 +29,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>openMX: MX Unleashed remaster for PC, browser and online</title>
 <meta name="description" content="openMX is a free, open-source remaster of the PS2 game MX Unleashed: rewritten from scratch, it plays in your browser, on PC and Steam Deck, and online, with mods and MX vs. ATV Unleashed tracks. Bring your own disc.">
-<!-- P194, as opentennis's M107: search and link previews. The site's one address is openmx.dev; the beta site's
-     canonical points back to it and it says noindex (the script below). The originals are named only as what this is
+<!-- P194, as opentennis's M107: search and link previews. The site's one address is openmx.dev (P392: no other site
+     carries this page). The originals are named only as what this is
      a remaster of (the name is openMX). The pictures are docs/screenshots, copied into shots/ by tools/web.sh. -->
 <link rel="canonical" href="https://openmx.dev/">
 <meta property="og:type" content="website">
@@ -78,15 +78,6 @@
     "author": { "@type": "Organization", "name": "Rainbow Studios" },
     "publisher": { "@type": "Organization", "name": "THQ" }
   }
-}
-</script>
-<script>
-// P194: the beta site has the same page; only openmx.dev is for search engines (the canonical link above says so too)
-if (location.hostname.startsWith('beta.')) {
-  const m = document.createElement('meta');
-  m.name = 'robots';
-  m.content = 'noindex';
-  document.head.append(m);
 }
 </script>
 <script>
@@ -413,7 +404,7 @@ footer a { color: var(--bone); }
 
   <!-- the landing hero; with a disc stored its first buttons play -->
   <header class="hero backdrop">
-    <!-- F14 (opentennis's B660): the build small in the corner, a release's version or a beta's commit -->
+    <!-- F14 (opentennis's B660): the build small in the corner, a release's version or the build's commit -->
     <span class="corner" id="corner" hidden></span>
     <div class="wrap">
       <div class="htext">
@@ -1155,12 +1146,11 @@ footer a { color: var(--bone); }
   }
 
   // ---- the build ----
-  // beta.openmx.dev is every push to main, its builds under download/ (B43: no GitHub release); openmx.dev is the latest release (.github/workflows/pages.yml).
+  // openmx.dev is the latest release (.github/workflows/pages.yml); its downloads are that release's (P392: no beta).
   // version.txt is the build tools/web.sh made; read again every minute and when the tab comes back, a different one means
   // the site has moved on, and the page offers a reload (a ride in progress is never cut short). With the game on the
   // canvas the offer is the game's (P193, opentennis's hstLatest): the newer build goes to it, and its main menu shows it
   // with a reload, never the ride; the page's banner is for the site page alone. `openmxRecheck()` reads it at once.
-  const BETA = location.hostname.startsWith('beta.');
   const RELEASES = 'https://github.com/FIZL0/openmx/releases';
   // FIZL0's shared sideloading source (github.com/FIZL0/apps), which openMX's iPhone build joins (P200/P201).
   const SOURCE = 'https://fizl0.github.io/apps/source.json';
@@ -1172,10 +1162,9 @@ footer a { color: var(--bone); }
     navigator.clipboard.writeText(SOURCE).then(() => { e.target.textContent = 'Copied'; },
       () => { getSelection().selectAllChildren($('#srcurl')); e.target.textContent = 'Select and copy the URL below'; });
   };
-  for (const a of document.querySelectorAll('[data-file]')) a.href = BETA ? `download/${a.dataset.file}` : `${RELEASES}/latest/download/${a.dataset.file}`;
-  // P351: the Mac app is built by tools/release.sh only, so the beta has none: the beta site offers the latest release's
+  for (const a of document.querySelectorAll('[data-file]')) a.href = `${RELEASES}/latest/download/${a.dataset.file}`;
   $('#macdl').href = `${RELEASES}/latest/download/openmx-macos-arm64.dmg`;
-  $('#builds').href = BETA ? 'download/' : `${RELEASES}/latest`;
+  $('#builds').href = `${RELEASES}/latest`;
   const built = () =>
     fetch('version.txt', { cache: 'no-store' })
       .then(r => (r.ok ? r.text() : ''))
@@ -1186,7 +1175,7 @@ footer a { color: var(--bone); }
   const label = v => { const w = v.split(/\s+/); return w.length > 1 && /^v\d/.test(w[0]) ? w[0] : w[w.length - 1]; };
   built().then(v => {
     ours = v;
-    if (v) $('#build').textContent = `${BETA ? 'Beta build' : 'Build'} ${v}.`;
+    if (v) $('#build').textContent = `Build ${v}.`;
     if (v && v.length < 60 && !v.includes('<')) { $('#corner').textContent = label(v); $('#corner').hidden = false; }
   });
   let newer = '';
