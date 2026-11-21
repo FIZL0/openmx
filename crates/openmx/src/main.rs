@@ -3594,7 +3594,7 @@ mod split_contact {
     /// framed before every bike and slept after them all. The disc's truck is settled 25 ft up the
     /// pusher's way. Seat 1's bike rolls into its tail at 30 ft/s with an AI rider in seat 0's Sim
     /// 200 ft off: the truck goes tick for tick where it goes with no AI rider, and both seats hold
-    /// it. Then the AI rider rolls into it with seat 1 100 ft off: woken and pushed, both seats hold
+    /// it. Then the AI rider rolls into it with seat 1 200 ft off: woken and pushed, both seats hold
     /// that one truck. Before F75b every seat kept its own copy and seat 1's push never reached seat 0's.
     #[test]
     fn split_seats_share_the_parked_truck_beside_ai_riders() {
