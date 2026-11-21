@@ -9289,7 +9289,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             // else its handling mod's knobs over the disc's file (P387a)
             let mut stock = match room_handling_phy(handling_pack.as_ref(), &first.pick.bike, &tables.ride.curve) {
-                Some(phy) => phy,
+                Some(phy) => room_handling_over_mod(&first.pick, phy),
                 None => room_mod_phy(disc, &first.pick, &bytes, &tables.ride.curve)?.unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve)),
             };
             // the room's trick packs over it (MD19, MD77), as the host's machine has
@@ -9335,7 +9335,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // on the room's handling (N21), then its trick pack, as on every machine
                     // else the seat's handling mod's knobs over the disc's file (P387a)
                     let mut phy = match room_handling_phy(handling_pack.as_ref(), &seat.pick.bike, &tables.ride.curve) {
-                        Some(phy) => phy,
+                        Some(phy) => room_handling_over_mod(&seat.pick, phy),
                         None => room_mod_phy(disc, &seat.pick, &bytes, &tables.ride.curve)?.unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve)),
                     };
                     lay_room_tricks(&packs, &mut phy, &seat.pick.bike);
@@ -16645,6 +16645,16 @@ fn room_mod_phy(disc: &lobby::DiscFiles, pick: &openmx_net::Pick, bytes: &[u8], 
         println!("{}: the handling mod {id}", set.word());
     }
     Ok(phy)
+}
+
+/// A lobby seat's bike on the room's handling (N21), `phy`, though its pick carries a handling mod
+/// (P387a): the mod edits the disc's file, which the room's handling is not, so the room's wins on
+/// every machine, and the line says the mod is left off.
+fn room_handling_over_mod(pick: &openmx_net::Pick, phy: Phy) -> Phy {
+    if let Some(id) = phy_editor::picked(&pick.packs) {
+        println!("{}: the room's handling, not the handling mod {id}, which edits the disc's file", pick.bike);
+    }
+    phy
 }
 
 /// A frame of the physics editor (P387): what its page asked done — a knob turned or put back, the
