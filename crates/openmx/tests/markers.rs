@@ -687,7 +687,7 @@ fn a_filled_slot_has_a_radar_mark() {
     // Its post, from 60 ft behind the marker looking at it, and from beside it looking away.
     let at = sim.markers.slots[0].as_ref().unwrap().position();
     let foot = game_render::v3(at.x(), at.y(), at.z());
-    let toward = game_render::world::Camera { eye: game_render::v3(at.x(), at.y() + 8.0, at.z() - 60.0), at: foot, fov: 1.0, near: 0.05, far: 4000.0 };
+    let toward = game_render::world::Camera { eye: game_render::v3(at.x(), at.y() + 8.0, at.z() - 60.0), at: foot, fov: 1.0, near: 0.05, far: 4000.0, up: None };
     let post = overlay::marker_post(&toward, (640, 448), [at.x(), at.y(), at.z()]).expect("a post in view");
     assert!(post.top.1 < post.foot.1 - 20.0, "the post stands up: {post:?}");
     assert!((post.foot.0 - 320.0).abs() < 2.0 && (post.top.0 - 320.0).abs() < 2.0, "{post:?}");

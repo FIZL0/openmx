@@ -175,6 +175,55 @@ fn the_camera_rolls_by_the_files_share_of_the_bikes_roll() {
     assert!(close(up.x(), 0.0, 1e-3), "{up:?}");
 }
 
+/// The tilt of the level horizon ahead of a view, in radians as it is drawn into a 4:3 frame:
+/// positive where its +x end, off to the side, stands higher in the picture.
+fn horizon_tilt(camera: &game_render::world::Camera) -> f32 {
+    let (w, h) = (640, 480);
+    let vp = camera.view_projection(w, h);
+    let forward = camera.at.sub(camera.eye).norm();
+    let ahead = camera.eye.add(game_render::v3(forward.x, 0.0, forward.z).norm().scale(1000.0));
+    let side = game_render::v3(forward.z, 0.0, -forward.x).norm().scale(100.0);
+    let pixel = |p: game_render::V3| {
+        let c = vp.clip(p);
+        [c[0] / c[3] * w as f32 / 2.0, c[1] / c[3] * h as f32 / 2.0]
+    };
+    let (a, b) = (pixel(ahead.sub(side)), pixel(ahead.add(side)));
+    // The +x end's height over the other, along the horizon's run across the frame.
+    let (run, rise) = (b[0] - a[0], b[1] - a[1]);
+    let rise = if side.x >= 0.0 { rise } else { -rise };
+    rise.atan2(run.abs())
+}
+
+#[test]
+fn a_rolled_first_person_up_tilts_the_drawn_horizon() {
+    let curve = CurveTable::build();
+    let level = Vf::new(0.0, 0.0, 1.0, 0.0);
+    // The camera as the shell draws it (main.rs): the view's eye and look, its own up.
+    let drawn = |r: f32| {
+        let mut cam = FirstPerson::new(FpPreset::read_bytes(&file()), 0, false);
+        let lean = Vf::new(r.sin(), r.cos(), 0.0, 0.0);
+        let on = Onboard { eye: Vf::new(0.0, 5.0, 0.0, 1.0), forward: level, up: lean, roll: FirstPerson::roll_of(level, lean), ..Onboard::default() };
+        let (mut view, mut up) = cam.update(DT, &on, &curve, &mut Nothing);
+        for _ in 0..30 {
+            (view, up) = cam.update(DT, &on, &curve, &mut Nothing);
+        }
+        let v = |p: Vf| game_render::v3(p.x(), p.y(), p.z());
+        game_render::world::Camera { eye: v(view.position), at: v(view.look_at), fov: 1.0, near: 0.1, far: 4000.0, up: Some(v(up)) }
+    };
+    let r = 0.4f32;
+    // A level bike, a level horizon, as the world's up draws it.
+    let flat = drawn(0.0);
+    assert!(horizon_tilt(&flat).abs() < 1e-4, "{}", horizon_tilt(&flat));
+    assert!(horizon_tilt(&game_render::world::Camera { up: None, ..flat }).abs() < 1e-4);
+    // Leaning towards +x, the camera rolls by ObjectRollScale (0.5) of it: the horizon's +x end
+    // stands higher in the picture by that angle, and the other lean tilts it the other way.
+    let leaning = drawn(r);
+    assert!(close(horizon_tilt(&leaning), 0.5 * r, 3e-3), "{} of {}", horizon_tilt(&leaning), 0.5 * r);
+    assert!(close(horizon_tilt(&drawn(-r)), -0.5 * r, 3e-3));
+    // Without its up, the same view draws level: what the screen showed before V137.
+    assert!(horizon_tilt(&game_render::world::Camera { up: None, ..leaning }).abs() < 1e-4);
+}
+
 /// Ground 10 ft up everywhere.
 struct Raised;
 impl Surface for Raised {

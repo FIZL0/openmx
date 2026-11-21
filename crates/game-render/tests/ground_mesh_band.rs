@@ -177,7 +177,7 @@ fn ride(shooter: &mut Shooter, light: &Lighting, (x, start): (f32, f32), high: f
     let mut frames = Vec::new();
     for f in 0..=length {
         let z = start + f as f32;
-        let camera = Camera { eye: v3(x, high, z), at: v3(x, 0.0, z + looking), fov: 0.9, near: 1.0, far: 4000.0 };
+        let camera = Camera { eye: v3(x, high, z), at: v3(x, 0.0, z + looking), fov: 0.9, near: 1.0, far: 4000.0, up: None };
         let rgb = shooter.shoot(&Assets::default(), light, &camera);
         let inv = unprojection(&camera);
         let mut patches = vec![Patch::default(); cols * rows];

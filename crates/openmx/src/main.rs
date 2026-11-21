@@ -12175,8 +12175,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 Some(view)
             };
             // The first-person camera over the follow camera while it has the screen (P384), its eye
-            // on the rider's Head node; the wreck camera and the thrill camera still take it over. The
-            // renderer keeps the world's up, so the camera's own up, which carries its roll, is not drawn.
+            // on the rider's Head node; the wreck camera and the thrill camera still take it over. Its
+            // own up, which carries its roll, is the one the view is drawn with (V137).
             let fp_view = match (&view, seat.garage.up, &seat.sim.rider.crash) {
                 (Some(_), Kind::Bike, None) if rig.first_person.on => {
                     let ride = &seat.sim.rider.ride;
@@ -12189,25 +12189,26 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let trim = front.as_deref().map(|f| f.menu.settings.fp_adjust[i.min(menu::SEATS_MAX - 1)]).unwrap_or(menu::FpTrim::ORIGINAL);
                         chase::FpAdjust::from(trim.adjust())
                     });
-                    rig.first_person.frame(ride, head, adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
+                    rig.first_person.frame(ride, head, adjust, dt, &seat.sim.tables.ride.curve, &mut world.place)
                 }
                 _ => None,
             };
             let fp_shown = fp_view.is_some();
-            let view = fp_view.or(view);
+            let mut up = fp_view.as_ref().map(|(_, up)| vector(*up));
+            let view = fp_view.map(|(v, _)| v).or(view);
             let view = match (view, &wreck_targets) {
-                (Some(_), Some(targets)) if wreck.on => Some(wreck.update(
-                    dt.0,
-                    targets,
-                    aspect::short_viewport(display, view_w, view_h),
-                    NEAR_CLIP,
-                    &mut world.place,
-                )),
+                (Some(_), Some(targets)) if wreck.on => {
+                    up = None;
+                    Some(wreck.update(dt.0, targets, aspect::short_viewport(display, view_w, view_h), NEAR_CLIP, &mut world.place))
+                }
                 (view, _) => view,
             };
             // The thrill camera over both (P157): the original's wreck switch leaves the screen to it.
             let view = match (view, rig.thrill.view(&rider)) {
-                (Some(_), Some(thrill)) => Some(thrill),
+                (Some(_), Some(thrill)) => {
+                    up = None;
+                    Some(thrill)
+                }
                 (view, _) => view,
             };
             if let (true, Some(v)) = (args.trace_camera, &view) {
@@ -12245,6 +12246,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // that is further (MD3: a mod's map may fog out past it). The GPU's is its own
                     // (`Graphics::far_clip`).
                     far: lights.get(i).unwrap_or(&light).fog_far.max(4000.0),
+                    up,
                 },
                 None => Camera::behind(pos, bike_look),
             });

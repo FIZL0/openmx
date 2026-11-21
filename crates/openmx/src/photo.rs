@@ -188,6 +188,7 @@ impl Photo {
             fov: crate::aspect::fov(self.fov, width, height),
             near,
             far,
+            up: None,
         }
     }
 
@@ -215,7 +216,7 @@ mod tests {
     use super::*;
 
     fn camera() -> Camera {
-        Camera { eye: v3(0.0, 10.0, -20.0), at: v3(0.0, 10.0, 0.0), fov: 1.0, near: 1.0, far: 1000.0 }
+        Camera { eye: v3(0.0, 10.0, -20.0), at: v3(0.0, 10.0, 0.0), fov: 1.0, near: 1.0, far: 1000.0, up: None }
     }
 
     fn close(a: f32, b: f32) -> bool {

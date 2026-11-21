@@ -102,6 +102,7 @@ fn drawn(view: &View, point: Vf, w: usize, h: usize) -> (f32, f32, bool) {
         fov: aspect::fov(view.fov.0, w, h),
         near: NEAR_CLIP,
         far: 4000.0,
+        up: None,
     };
     let m = camera.view_projection(w, h).0;
     let p = [point.x(), point.y(), point.z(), 1.0];

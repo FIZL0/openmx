@@ -65,6 +65,7 @@ impl Pose {
             fov: crate::aspect::fov(self.fov, width, height),
             near,
             far,
+            up: None,
         }
     }
 }

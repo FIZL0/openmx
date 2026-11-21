@@ -292,7 +292,7 @@ pub fn walk_card(shooter: &mut Shooter, assets: &mut Assets, texture: usize, sur
     let mut out = Vec::new();
     let mut d = far;
     while d >= near {
-        let camera = Camera { eye: CARD_AT.sub(look.scale(d)), at: CARD_AT, fov: FOV, near: 0.25, far: 20000.0 };
+        let camera = Camera { eye: CARD_AT.sub(look.scale(d)), at: CARD_AT, fov: FOV, near: 0.25, far: 20000.0, up: None };
         let rgb = shooter.shoot(assets, &light, &camera);
         let inv = unprojection(&camera);
         let patch_of = |x: u32, y: u32| {

@@ -96,7 +96,7 @@ fn ground_seen_edge_on_is_not_blurred_along_its_depth_past_the_floor() {
     gpu.set_sky(None);
     // A rider's eye 6 feet up, looking along x at the edge at 96 feet, 40 feet off: the ground meets
     // the view at 8.5°, so a pixel spans half a foot along the depth and a fourteenth across it.
-    let camera = Camera { eye: v3(56.0, 6.0, 128.0), at: v3(96.0, 0.0, 128.0), fov: 0.9, near: 1.0, far: 2000.0 };
+    let camera = Camera { eye: v3(56.0, 6.0, 128.0), at: v3(96.0, 0.0, 128.0), fov: 0.9, near: 1.0, far: 2000.0, up: None };
     let depth = paint_depth(camera.eye, camera.at.sub(camera.eye).norm(), v3(96.0, 0.0, 128.0));
     let floor = mip.level(depth).exp2();
     println!("paint depth {depth} ft, level {}, floor {floor} ft", mip.level(depth));

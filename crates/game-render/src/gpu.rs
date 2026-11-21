@@ -2391,7 +2391,7 @@ fn view_rect(target: &Target, bleed: [u32; 4], [x, y, w, h]: [u32; 4]) -> [u32; 
 /// near to far.
 fn view_projection(camera: &Camera, width: u32, height: u32, far: f32) -> M4 {
     let aspect = width.max(1) as f32 / height.max(1) as f32;
-    M4::look_at(camera.eye, camera.at, crate::world::view_up(camera.eye, camera.at)).mul(M4::perspective(camera.fov, aspect, camera.near, far.max(camera.near * 2.0)))
+    M4::look_at(camera.eye, camera.at, camera.up()).mul(M4::perspective(camera.fov, aspect, camera.near, far.max(camera.near * 2.0)))
 }
 
 /// [`view_projection`] as the GPU draws it: depth reversed, 1 at the near plane and 0 at the far one.
@@ -4440,7 +4440,7 @@ impl Renderer {
             // The sky's ray, as `Sky::draw` makes it: the screen's right and up, whichever way the
             // cross products came out.
             let forward = camera.at.sub(camera.eye).norm();
-            let mut right = forward.cross(v3(0.0, 1.0, 0.0)).norm();
+            let mut right = forward.cross(camera.up()).norm();
             let probe = vp.clip(camera.eye.add(forward).add(right.scale(0.1)));
             if probe[0] / probe[3] < 0.0 {
                 right = right.scale(-1.0);
@@ -6490,6 +6490,7 @@ mod tests {
             fov: 1.0,
             near: 0.5,
             far: 100.0,
+            up: None,
         };
         let planes = frustum(&view_projection(&camera, 640, 480, camera.far));
         assert!(sees(&planes, v3(0.0, 0.0, 50.0), 1.0));
@@ -6636,6 +6637,7 @@ mod tests {
             fov: 1.0,
             near: 0.1,
             far: 1000.0,
+            up: None,
         };
         (scene, assets, camera)
     }
@@ -7121,6 +7123,7 @@ mod tests {
             fov: 1.0,
             near: 2.4,
             far: 1000.0,
+            up: None,
         }
     }
 
@@ -7258,7 +7261,7 @@ mod tests {
         gpu.set_scene(&scene);
         gpu.set_sky(None);
         gpu.set_ground(&chunks, None, [150.0, 118.0, 86.0]).unwrap();
-        let camera = Camera { eye: v3(790.0, 30.0, 400.0), at: v3(900.0, 20.0, 400.0), fov: 1.0, near: 2.4, far: 1000.0 };
+        let camera = Camera { eye: v3(790.0, 30.0, 400.0), at: v3(900.0, 20.0, 400.0), fov: 1.0, near: 2.4, far: 1000.0, up: None };
         let (w, h) = (160u32, 90u32);
         let texture = gpu.offscreen(w, h);
         let view = texture.create_view(&Default::default());

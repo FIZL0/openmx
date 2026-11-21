@@ -208,7 +208,7 @@ fn holding_the_stick_moves_the_drawn_planes_surfaces() {
     }
     // Behind and above the plane, which is drawn at its own space's origin, nose along +z: both wings,
     // the tail and the rudder in the picture.
-    let camera = Camera { eye: v3(0.0, 16.0, -38.0), at: v3(0.0, 4.0, -4.0), fov: 0.9, near: 0.5, far: 500.0 };
+    let camera = Camera { eye: v3(0.0, 16.0, -38.0), at: v3(0.0, 4.0, -4.0), fov: 0.9, near: 0.5, far: 500.0, up: None };
     let (w, h) = (320usize, 240usize);
     let mut pictures = |plane: &Plane, assets: &mut Assets| -> (Vec<u8>, Option<Vec<u8>>) {
         let at = M4::IDENTITY;

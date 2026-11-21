@@ -520,6 +520,9 @@ pub struct Camera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+    /// The up the frame is drawn with, which tilts the horizon by its roll about the line of sight
+    /// (V137: the first-person camera's rolled up); `None` is the world's ([`view_up`]).
+    pub up: Option<V3>,
 }
 
 impl Camera {
@@ -534,6 +537,7 @@ impl Camera {
             fov: 1.0,
             near: 0.05,
             far: 4000.0,
+            up: None,
         }
     }
 
@@ -560,6 +564,7 @@ impl Camera {
             fov: view_fov(preset.fov, aspect),
             near: 0.05,
             far: 4000.0,
+            up: None,
         }
     }
 
@@ -574,10 +579,15 @@ impl Camera {
         (height as f32 / 2.0) / (self.fov / 2.0).tan()
     }
 
+    /// The up this view is drawn with: its own, or the world's turned by [`view_roll`].
+    pub fn up(&self) -> V3 {
+        self.up.unwrap_or_else(|| view_up(self.eye, self.at))
+    }
+
     /// World to clip, for a frame of the given shape.
     pub fn view_projection(&self, width: usize, height: usize) -> M4 {
         let aspect = width as f32 / height as f32;
-        M4::look_at(self.eye, self.at, view_up(self.eye, self.at))
+        M4::look_at(self.eye, self.at, self.up())
             .mul(M4::perspective(self.fov, aspect, self.near, self.far))
     }
 }

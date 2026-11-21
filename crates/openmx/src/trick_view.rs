@@ -153,7 +153,7 @@ impl Orbit {
 
     fn camera(&self, reach: f32) -> Camera {
         let eye = self.aim.add(self.dir().scale(self.back));
-        Camera { eye, at: self.aim, fov: FOV, near: 0.1, far: self.back + reach * 4.0 }
+        Camera { eye, at: self.aim, fov: FOV, near: 0.1, far: self.back + reach * 4.0, up: None }
     }
 
     /// A line for `seat`'s camera once a second, and whenever it starts or stops turning by itself.
@@ -441,7 +441,7 @@ impl TrickView {
         let chassis = self.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
         let at = M4::placement(self.centre.scale(-1.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0)).mul(motion(row.show, progress));
         // the view's camera is put on by `poses`
-        let camera = Camera { eye: dir_of(YAW_REST, PITCH_REST).scale(10.0), at: v3(0.0, 0.0, 0.0), fov: FOV, near: 0.1, far: 100.0 };
+        let camera = Camera { eye: dir_of(YAW_REST, PITCH_REST).scale(10.0), at: v3(0.0, 0.0, 0.0), fov: FOV, near: 0.1, far: 100.0, up: None };
         Posed { at, chassis, body, camera }
     }
 

@@ -83,7 +83,7 @@ fn a_ground_spot_walked_from_far_to_near_sharpens_without_a_step() {
     let mut frames = Vec::new();
     let mut d = 150.0f32;
     while d >= 8.0 {
-        let camera = Camera { eye: spot.sub(along.scale(d)).add(v3(0.0, 6.0, 0.0)), at: spot, fov: 0.9, near: 0.25, far: 20000.0 };
+        let camera = Camera { eye: spot.sub(along.scale(d)).add(v3(0.0, 6.0, 0.0)), at: spot, fov: 0.9, near: 0.25, far: 20000.0, up: None };
         let rgb = shooter.shoot(&Assets::default(), &light, &camera);
         let inv = unprojection(&camera);
         let patch_of = |x: u32, y: u32| {

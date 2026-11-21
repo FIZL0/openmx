@@ -143,7 +143,7 @@ fn the_roads_are_painted_into_the_ground_and_are_not_props() {
         gpu.set_scene(&look);
         gpu.set_sky(None);
         let mid = [(on[0] + off[0]) / 2.0, (on[1] + off[1]) / 2.0];
-        let camera = Camera { eye: v3(mid[0], 300.0, mid[1] - 1.0), at: v3(mid[0], 0.0, mid[1]), fov: 0.9, near: 1.0, far: 2000.0 };
+        let camera = Camera { eye: v3(mid[0], 300.0, mid[1] - 1.0), at: v3(mid[0], 0.0, mid[1]), fov: 0.9, near: 1.0, far: 2000.0, up: None };
         let (w, h) = (512u32, 512u32);
         let frame = |gpu: &mut Renderer, splat: &Splat| {
             gpu.set_ground_painted(&chunks, GroundPaint::Splat(splat), [150.0, 118.0, 86.0]).unwrap();

@@ -78,7 +78,7 @@ fn frame(gpu: &mut Renderer) -> Vec<u8> {
     let light = Lighting::of(&scene);
     gpu.set_scene(&scene);
     gpu.set_sky(None);
-    let camera = Camera { eye: v3(AT[0] + 288.0, 46.0, AT[1] + 120.0), at: v3(AT[0] + 300.0, 40.0, AT[1] + 160.0), fov: 1.0, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: v3(AT[0] + 288.0, 46.0, AT[1] + 120.0), at: v3(AT[0] + 300.0, 40.0, AT[1] + 160.0), fov: 1.0, near: 0.5, far: 2000.0, up: None };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());

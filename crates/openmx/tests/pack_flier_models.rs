@@ -39,7 +39,7 @@ fn archives() -> Option<(Res, Res)> {
 fn picture(assets: &Assets, parts: &[(&str, M4)]) -> Vec<u8> {
     let scene = game_render::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=5000.00\nMaximumFogDistance=9000.00\n");
     let light = Lighting::of(&scene);
-    let camera = Camera { eye: v3(-20.0, 14.0, -34.0), at: v3(0.0, 3.0, 0.0), fov: 0.9, near: 0.5, far: 500.0 };
+    let camera = Camera { eye: v3(-20.0, 14.0, -34.0), at: v3(0.0, 3.0, 0.0), fov: 0.9, near: 0.5, far: 500.0, up: None };
     let (w, h) = (320usize, 240usize);
     let mut frame = Frame::new(w, h, [0, 0, 0]);
     let vp = camera.view_projection(w, h);

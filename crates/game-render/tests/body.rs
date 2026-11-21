@@ -504,6 +504,7 @@ fn the_level_of_detail_falls_back_as_the_camera_pulls_away() {
         fov: vertical_fov(85.0, 4.0 / 3.0),
         near: 0.05,
         far: 4000.0,
+        up: None,
     };
     let focal = camera.focal(448);
     let radius = body

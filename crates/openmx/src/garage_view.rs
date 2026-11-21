@@ -534,7 +534,7 @@ impl Stage {
                 back
             }
         };
-        Some(Camera { eye: eye.scale(back), at: v3(0.0, 0.0, 0.0), fov: FOV, near: 0.1, far: back + d.radius * 4.0 })
+        Some(Camera { eye: eye.scale(back), at: v3(0.0, 0.0, 0.0), fov: FOV, near: 0.1, far: back + d.radius * 4.0, up: None })
     }
 
     /// How far round the stand is `tick` menu frames in.

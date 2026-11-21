@@ -144,7 +144,7 @@ fn dirt_textures_load() {
     let light = Lighting::of(&scene);
     // A flat stretch of the stadium floor, 256 feet a side, looked straight down on.
     let chunks = [flat_chunk(16, 16.0, 1, 1)];
-    let camera = Camera { eye: v3(384.0, 200.0, 383.0), at: v3(384.0, 0.0, 384.0), fov: 0.9, near: 1.0, far: 1000.0 };
+    let camera = Camera { eye: v3(384.0, 200.0, 383.0), at: v3(384.0, 0.0, 384.0), fov: 0.9, near: 1.0, far: 1000.0, up: None };
     let (w, h) = (256u32, 256u32);
     let mut shoot = |paint: GroundPaint| {
         gpu.set_scene(&scene);

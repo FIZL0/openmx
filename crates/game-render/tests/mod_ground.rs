@@ -200,7 +200,7 @@ fn the_gpu_draws_each_page_where_its_leaves_name_it() {
     gpu.set_ground_painted(&chunks, GroundPaint::Pages(&p), dirt).unwrap();
 
     // Looking almost straight down on the middle of the chunk.
-    let camera = Camera { eye: v3(64.0, 260.0, 63.0), at: v3(64.0, 0.0, 64.0), fov: 0.9, near: 1.0, far: 1000.0 };
+    let camera = Camera { eye: v3(64.0, 260.0, 63.0), at: v3(64.0, 0.0, 64.0), fov: 0.9, near: 1.0, far: 1000.0, up: None };
     let (w, h) = (256u32, 256u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());

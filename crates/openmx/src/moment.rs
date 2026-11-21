@@ -125,6 +125,7 @@ impl Moment {
             fov: self.camera_fov_v.to_radians(),
             near: 0.05,
             far: 4000.0,
+            up: None,
         }
     }
 }

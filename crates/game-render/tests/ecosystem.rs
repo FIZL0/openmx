@@ -144,7 +144,7 @@ fn free09s_ecosystem_places_the_originals_trees_and_bushes() {
     // From beside the first plant, looking along (3, 0, 4): it is its model, turned to the camera's
     // heading and scaled to its size; everything past `EcoDistance2D` is a picture only.
     let eye = first.pos.add(v3(-12.0, 6.0, -16.0));
-    let camera = Camera { eye, at: eye.add(v3(3.0, 0.0, 4.0)), fov: 0.9, near: 0.5, far: 4000.0 };
+    let camera = Camera { eye, at: eye.add(v3(3.0, 0.0, 4.0)), fov: 0.9, near: 0.5, far: 4000.0, up: None };
     let fov = eco::horizontal_fov(&camera, 4.0 / 3.0);
     let mut drawn: Vec<Draw> = Vec::new();
     grove.draws(&camera, fov, 1.0e6, &mut drawn);
@@ -291,7 +291,7 @@ fn worst_off_the_ground(t: &Track) -> (f32, f32) {
     let terrain = track::Terrain::parse(&t.terrain_file).unwrap();
     let camera = |p: game_render::mat::V3, d: f32| {
         let eye = p.add(v3(-d, 5.0, 0.0));
-        Camera { eye, at: eye.add(v3(1.0, 0.0, 0.0)), fov: 0.9, near: 0.5, far: 4000.0 }
+        Camera { eye, at: eye.add(v3(1.0, 0.0, 0.0)), fov: 0.9, near: 0.5, far: 4000.0, up: None }
     };
     let (mut low, mut high) = (f32::MAX, f32::MIN);
     for p in &t.grove.ecosystem.plants {
@@ -478,7 +478,7 @@ fn riding_at(plant: &eco::Plant, d: f32) -> Camera {
     let along = v3(0.6, 0.0, 0.8);
     let eye = plant.pos.add(v3(-along.x * d, 6.0, -along.z * d));
     let at = plant.pos.add(v3(0.0, plant.height / 2.0, 0.0));
-    Camera { eye, at, fov: 0.9, near: 0.5, far: 20000.0 }
+    Camera { eye, at, fov: 0.9, near: 0.5, far: 20000.0, up: None }
 }
 
 /// The ride: 2 feet a frame (82 mph at 60 a second) from 520 feet to 180, through every band.
@@ -704,7 +704,7 @@ fn the_densest_view_draws_no_slower() {
     // The view the shell's `--shot-pose 2750,160,3800,0,-3,85` looks from: north, 3 degrees down.
     let eye = v3(2750.0, 160.0, 3800.0);
     let pitch = (-3.0f32).to_radians();
-    let camera = Camera { eye, at: eye.add(v3(0.0, pitch.sin(), pitch.cos())), fov: 85f32.to_radians(), near: 0.5, far: 20000.0 };
+    let camera = Camera { eye, at: eye.add(v3(0.0, pitch.sin(), pitch.cos())), fov: 85f32.to_radians(), near: 0.5, far: 20000.0, up: None };
     let (w, h) = (640, 448);
     let mut best = [f64::MAX; 2];
     let mut plants = [0; 2];
@@ -1010,7 +1010,7 @@ const BUSH_FAR: f32 = 100.0;
 fn level_at(plant: &eco::Plant, d: f32) -> Camera {
     let mid = plant.pos.add(v3(0.0, plant.height / 2.0, 0.0));
     let fov = (2.0 * (0.6 * plant.height.max(plant.width * 2.0) / d).atan()).max(0.9);
-    Camera { eye: mid.add(v3(-0.6 * d, 0.0, -0.8 * d)), at: mid, fov, near: 0.25, far: 20000.0 }
+    Camera { eye: mid.add(v3(-0.6 * d, 0.0, -0.8 * d)), at: mid, fov, near: 0.25, far: 20000.0, up: None }
 }
 
 /// Of the pixels a bush's leaf cards cover (its model with no alpha test), the share it draws,

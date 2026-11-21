@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn a_moved_camera_sees_the_copy_where_the_camera_sees_the_moved_world() {
         let w = Wrap::of([true, true], [1000.0, 600.0]).expect("wraps");
-        let camera = Camera { eye: v3(990.0, 20.0, 10.0), at: v3(1010.0, 10.0, 5.0), fov: 1.0, near: 1.0, far: 5000.0 };
+        let camera = Camera { eye: v3(990.0, 20.0, 10.0), at: v3(1010.0, 10.0, 5.0), fov: 1.0, near: 1.0, far: 5000.0, up: None };
         let p = v3(15.0, 3.0, 590.0);
         for k in [[1, 0], [0, -1], [1, -1]] {
             let moved = w.moved(&camera, k);

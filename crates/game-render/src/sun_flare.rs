@@ -188,7 +188,7 @@ impl SunFlare {
 /// The view's right, up and forward, as [`crate::mat::M4::look_at`] builds them.
 fn basis(camera: &Camera) -> (V3, V3, V3) {
     let forward = camera.at.sub(camera.eye).norm();
-    let right = v3(0.0, 1.0, 0.0).cross(forward).norm();
+    let right = camera.up().cross(forward).norm();
     let up = forward.cross(right);
     (right, up, forward)
 }
@@ -235,7 +235,7 @@ mod tests {
         FlareRGBA=128.0,128.0,128.0,0\nFlareAlpha=50\nFlareScreenSize=200\n";
 
     fn camera(at: V3) -> Camera {
-        Camera { eye: v3(0.0, 0.0, 0.0), at, fov: 1.0, near: 0.05, far: 4000.0 }
+        Camera { eye: v3(0.0, 0.0, 0.0), at, fov: 1.0, near: 0.05, far: 4000.0, up: None }
     }
 
     #[test]

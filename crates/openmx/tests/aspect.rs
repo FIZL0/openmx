@@ -46,6 +46,7 @@ fn drawn_angles(view: Rect) -> (f32, f32) {
         fov: aspect::fov(PRESET_FOV, view.w, view.h),
         near: 0.1,
         far: 100.0,
+        up: None,
     };
     let m = camera.view_projection(view.w, view.h);
     // How far across the view, as a fraction of its half-width or half-height, a point one foot off

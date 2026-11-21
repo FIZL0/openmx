@@ -13,7 +13,7 @@ const GREY: [u8; 3] = [100, 100, 100];
 
 /// Looking down -z from the origin, level.
 fn camera() -> Camera {
-    Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, -1.0), fov: 1.0, near: 0.05, far: 4000.0 }
+    Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, -1.0), fov: 1.0, near: 0.05, far: 4000.0, up: None }
 }
 
 /// No fog anywhere near.

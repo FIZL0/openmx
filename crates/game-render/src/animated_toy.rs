@@ -536,7 +536,7 @@ mod tests {
         };
         // Ahead, behind, past the far plane, and off to the side with one corner of its box still in.
         let sim = Toys::new(vec![motion], vec![at(0.0, 50.0), at(0.0, -50.0), at(0.0, 500.0), at(60.0, 50.0)]);
-        let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 1.0), fov: 1.2, near: 0.5, far: 300.0 };
+        let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 1.0), fov: 1.2, near: 0.5, far: 300.0, up: None };
         let box_ = (v3(0.0, 0.0, 0.0), v3(5.0, 5.0, 5.0));
         let seen: Vec<bool> = (0..4).map(|k| drawn(&sim, k, box_, &camera, 640, 448)).collect();
         assert_eq!(seen, [true, false, false, false]);

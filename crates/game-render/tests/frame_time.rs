@@ -29,7 +29,7 @@ fn every_way_of_drawing_a_frame_is_timed() {
     let (w, h) = (160u32, 120u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
-    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0, up: None };
 
     for (way, scale, over) in [("one pass", 1.0, false), ("a low render scale", 0.5, false), ("over a picture", 1.0, true)] {
         gpu.render_scale = scale;

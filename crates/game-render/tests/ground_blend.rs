@@ -89,7 +89,7 @@ fn a_layer_edge_fades_over_the_originals_width_not_one_texel() {
     let light = Lighting::of(&look);
     gpu.set_scene(&look);
     gpu.set_sky(None);
-    let camera = Camera { eye: v3(96.0, 300.0, 127.0), at: v3(96.0, 0.0, 128.0), fov: 0.9, near: 1.0, far: 2000.0 };
+    let camera = Camera { eye: v3(96.0, 300.0, 127.0), at: v3(96.0, 0.0, 128.0), fov: 0.9, near: 1.0, far: 2000.0, up: None };
     let depth = paint_depth(camera.eye, camera.at.sub(camera.eye).norm(), v3(96.0, 0.0, 128.0));
     println!("GPU: paint depth {depth} ft, level {}", mip.level(depth));
     gpu.set_ground_painted(&chunks, GroundPaint::Splat(&splat), [150.0, 118.0, 86.0]).unwrap();

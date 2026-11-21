@@ -52,7 +52,7 @@ fn frame(gpu: &mut Renderer, chunks: &[GroundChunk], graphics: Graphics) -> Draw
     gpu.set_sky(None);
     gpu.set_graphics(graphics);
     gpu.set_ground_painted(chunks, GroundPaint::Bare, [150.0, 118.0, 86.0]).unwrap();
-    let camera = Camera { eye: v3(300.0, 60.0, 280.0), at: v3(900.0, 20.0, 900.0), fov: 0.9, near: 1.0, far: 100_000.0 };
+    let camera = Camera { eye: v3(300.0, 60.0, 280.0), at: v3(900.0, 20.0, 900.0), fov: 0.9, near: 1.0, far: 100_000.0, up: None };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());

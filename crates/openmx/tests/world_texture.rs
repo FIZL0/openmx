@@ -123,7 +123,7 @@ fn frame_from(gpu: &mut Renderer, eye: game_render::mat::V3, look: game_render::
     let light = Lighting::of(&scene);
     gpu.set_scene(&scene);
     gpu.set_sky(None);
-    let camera = Camera { eye, at: look, fov: 1.0, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye, at: look, fov: 1.0, near: 0.5, far: 2000.0, up: None };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());

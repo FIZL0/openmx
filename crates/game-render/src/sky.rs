@@ -30,7 +30,7 @@
 
 use crate::disc::Res;
 use crate::ini;
-use crate::mat::{V3, v3};
+use crate::mat::V3;
 use crate::pst::Texture;
 use crate::raster::Frame;
 use crate::world::Camera;
@@ -167,7 +167,7 @@ impl Sky {
         let (w, h) = (frame.width, frame.height);
         let vp = camera.view_projection(w, h);
         let forward = camera.at.sub(camera.eye).norm();
-        let mut right = forward.cross(v3(0.0, 1.0, 0.0)).norm();
+        let mut right = forward.cross(camera.up()).norm();
         // Whichever way the cross product came out, make it the screen's right.
         let probe = vp.clip(camera.eye.add(forward).add(right.scale(0.1)));
         if probe[0] / probe[3] < 0.0 {
@@ -250,6 +250,7 @@ fn paint(face: &mut Texture, v: [(f32, f32, [f32; 3]); 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mat::v3;
 
     /// A sky of 96 packets, each one strip of a single triangle over the patch's top left, coloured
     /// by which face it is on.

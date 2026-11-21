@@ -90,7 +90,7 @@ fn two_views_far_apart_each_draw_their_road_sharp() {
     gpu.set_ground_painted(&chunks, GroundPaint::Splat(&splat), [150.0, 118.0, 86.0]).unwrap();
     let over = |p: [f32; 2]| {
         let mid = [p[0] + side / 2.0, p[1] + side / 2.0];
-        Camera { eye: v3(mid[0], 150.0, mid[1] - 1.0), at: v3(mid[0], 0.0, mid[1]), fov: 0.9, near: 1.0, far: 2000.0 }
+        Camera { eye: v3(mid[0], 150.0, mid[1] - 1.0), at: v3(mid[0], 0.0, mid[1]), fov: 0.9, near: 1.0, far: 2000.0, up: None }
     };
     let (a, b) = (over(here), over(there));
     let (w, h) = (1024u32, 512u32);

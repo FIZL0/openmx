@@ -74,7 +74,7 @@ fn models_given_back_draw_again_on_the_next_frame() {
     let (w, h) = (160u32, 120u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
-    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0, up: None };
     let mut picture = |gpu: &mut Renderer| {
         let actors = [Actor { model: "actor_wall", at: M4::placement(v3(10.0, 0.0, 40.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0)), pose: None, lod_from: None, alpha: 1.0, casts: false }];
         let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
@@ -138,7 +138,7 @@ fn many_models_given_back_come_back_over_frames() {
     let (w, h) = (160u32, 120u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
-    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 1.2, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 1.2, near: 0.5, far: 2000.0, up: None };
     let picture = |gpu: &mut Renderer| {
         let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
         let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };

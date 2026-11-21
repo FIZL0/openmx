@@ -265,7 +265,7 @@ fn frame(gpu: &mut Renderer) -> Vec<u8> {
     let light = Lighting::of(&scene);
     gpu.set_scene(&scene);
     gpu.set_sky(None);
-    let camera = Camera { eye: v3(576.0, 700.0, -500.0), at: v3(576.0, 40.0, 288.0), fov: 1.0, near: 0.5, far: 4000.0 };
+    let camera = Camera { eye: v3(576.0, 700.0, -500.0), at: v3(576.0, 40.0, 288.0), fov: 1.0, near: 0.5, far: 4000.0, up: None };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
@@ -383,7 +383,7 @@ fn frame_from_the_left(gpu: &mut Renderer) -> Vec<u8> {
     let light = Lighting::of(&scene);
     gpu.set_scene(&scene);
     gpu.set_sky(None);
-    let camera = Camera { eye: v3(150.0, 400.0, -300.0), at: v3(500.0, 40.0, 250.0), fov: 1.0, near: 0.5, far: 4000.0 };
+    let camera = Camera { eye: v3(150.0, 400.0, -300.0), at: v3(500.0, 40.0, 250.0), fov: 1.0, near: 0.5, far: 4000.0, up: None };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());

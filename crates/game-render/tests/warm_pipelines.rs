@@ -65,7 +65,7 @@ fn ride(warm: bool) -> Option<(Vec<String>, Vec<u8>)> {
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
     let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
-    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 0.9, near: 0.5, far: 2000.0, up: None };
     let mut frame = |gpu: &mut Renderer, alpha: f32| {
         let at = M4::placement(v3(0.0, 0.0, 30.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0));
         let actors = [Actor { model: "rider", at, pose: None, lod_from: None, alpha, casts: true }];

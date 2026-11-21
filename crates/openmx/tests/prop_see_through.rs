@@ -109,7 +109,7 @@ fn what_is_behind_the_spinning_prop_shows_through_it() {
     };
     // Behind the plane and above its nose, looking ahead through the prop: the disc stands over the
     // cowling, against the wall ahead.
-    let camera = Camera { eye: hub.add(v3(0.0, 2.5, -9.0)), at: hub.add(v3(0.0, 0.0, 20.0)), fov: 0.9, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye: hub.add(v3(0.0, 2.5, -9.0)), at: hub.add(v3(0.0, 0.0, 20.0)), fov: 0.9, near: 0.5, far: 2000.0, up: None };
     let wall_at = translate(M4::IDENTITY, hub.add(v3(0.0, 0.0, 30.0)));
     let (w, h) = (320usize, 240usize);
     let parts = drawn.parts(M4::IDENTITY, false);
