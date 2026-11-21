@@ -2736,7 +2736,23 @@ impl<P: sim_world::World> Game for World<P> {
                 None => game_sim::wreck_plane::Downed::default(),
             };
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
-            self.seats[me].pass(dt, &mut self.place, me, &spots, among, parked.as_deref_mut());
+            // F75b: the first seat's Sim walks its AI riders' bikes in its own step, so on the bike the
+            // shared cars are lent to it for its pass, held outside it (`Sim::parked_cars_held`): its
+            // bikes strike, push and wreck on them there, but the cars were framed above, before
+            // every seat's bike, and sleep after them all ([`World::parked_back`]), as a single
+            // Sim's step has them. Its downed rider's wreck bike meets them in that step too.
+            let lent = unread && self.seats[me].riding && self.seats[me].garage.up == Kind::Bike;
+            if lent && let Some(cars) = parked.as_mut() {
+                let sim = &mut self.seats[me].sim;
+                sim.parked_cars = std::mem::take(cars);
+                sim.parked_cars_held = true;
+            }
+            self.seats[me].pass(dt, &mut self.place, me, &spots, among, parked.as_deref_mut().filter(|_| !lent));
+            if lent && let Some(cars) = parked.as_mut() {
+                let sim = &mut self.seats[me].sim;
+                *cars = std::mem::take(&mut sim.parked_cars);
+                sim.parked_cars_held = false;
+            }
             if me == 0 {
                 self.race_guests_out(dt);
             }
@@ -2978,10 +2994,11 @@ impl<P: sim_world::World> World<P> {
 
     /// F72: the parked cars out of the seats for a pass of several, one copy for them all: seat 0's,
     /// which every seat holds between passes ([`World::parked_back`]); the others' are dropped. A
-    /// lone seat's Sim steps its own (S485, `Sim::step`), and so does every seat while any has AI
-    /// riders, whose bikes meet them in that Sim's step: `None` then.
+    /// lone seat's Sim steps its own (S485, `Sim::step`): `None` then. The first seat's AI riders
+    /// meet the shared copy inside its Sim's step, lent to it for its pass (F75b, [`race_ai`]); AI
+    /// riders in any later seat's Sim, which no pass lends them, keep every seat's own: `None` too.
     fn parked_out(&mut self) -> Option<Vec<game_sim::car::Parked>> {
-        if self.seats.len() < 2 || self.seats[0].sim.parked_cars.is_empty() || self.seats.iter().any(|s| !s.sim.others.is_empty()) {
+        if self.seats.len() < 2 || self.seats[0].sim.parked_cars.is_empty() || self.seats[1..].iter().any(|s| !s.sim.others.is_empty()) {
             return None;
         }
         for s in &mut self.seats[1..] {
@@ -3571,6 +3588,93 @@ mod split_contact {
         assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
         assert!(woken, "the bike's strike never woke the truck");
         assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
+    }
+
+    /// F75b: with AI riders in the first seat's Sim, split screen's seats still share one parked truck,
+    /// framed before every bike and slept after them all. The disc's truck is settled 25 ft up the
+    /// pusher's way. Seat 1's bike rolls into its tail at 30 ft/s with an AI rider in seat 0's Sim
+    /// 200 ft off: the truck goes tick for tick where it goes with no AI rider, and both seats hold
+    /// it. Then the AI rider rolls into it with seat 1 100 ft off: woken and pushed, both seats hold
+    /// that one truck. Before F75b every seat kept its own copy and seat 1's push never reached seat 0's.
+    #[test]
+    fn split_seats_share_the_parked_truck_beside_ai_riders() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let rider = |sim: &Sim, x: f32| {
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            let mut r = Rider::new(&sim.phy, mounts, Vf::new(x, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            r.sense.wrecks_enabled = false;
+            r.carries_bike_col(std::sync::Arc::clone(&col));
+            r
+        };
+        let sim = |x: f32| {
+            let mut sim = Sim::new(0xf75b);
+            std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+            sim.rider = rider(&sim, x);
+            sim
+        };
+        // Per tick: the truck's z in each seat's Sim. `ai` is the AI rider's x in seat 0's Sim, if any;
+        // `pusher` the bike sent at the truck: the AI rider (player 1 of seat 0) or seat 1's.
+        let ride = |ai: Option<f32>, seat1: f32, pusher_is_ai: bool| {
+            let mut first = sim(100.0);
+            if let Some(x) = ai {
+                let r = rider(&first, x);
+                first.add_player((*first.phy).clone(), r);
+            }
+            let mut world = split(vec![first, sim(seat1)]);
+            let in_play = crate::vehicle::InPlay::settled(&spots, &[false, false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+            assert_eq!(in_play.len(), 1, "the truck is parked");
+            for s in &mut world.seats {
+                s.garage.in_play = in_play.fresh();
+            }
+            world.simulate(DT, Input::default(), &mut Default::default());
+            let go = Vf::new(0.0, 0.0, 30.0, 0.0);
+            if pusher_is_ai {
+                world.seats[0].sim.others[0].rider.ride.chassis.vel = go;
+            } else {
+                world.seats[1].sim.rider.ride.chassis.vel = go;
+            }
+            let mut woken = false;
+            let mut track = Vec::new();
+            for t in 0..45 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                let at = |i: usize| world.seats[i].sim.parked_cars.first().map(|p| p.machine.body.position).expect("every seat holds the truck");
+                assert_eq!(at(0), at(1), "tick {t}: the seats hold one truck");
+                assert!(world.seats.iter().all(|s| !s.sim.parked_cars_held), "tick {t}: a seat's Sim still holds the cars outside it");
+                woken |= world.seats[0].sim.parked_cars[0].awake();
+                track.push(at(0).z());
+            }
+            (track, woken)
+        };
+        let (alone, woken) = ride(None, 0.0, false);
+        assert!(woken, "seat 1's bike never woke the truck");
+        let (beside, _) = ride(Some(200.0), 0.0, false);
+        for (t, (a, b)) in alone.iter().zip(&beside).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "tick {t}: beside the AI rider the truck at z {b}, with none {a}");
+        }
+        let (by_ai, woken) = ride(Some(0.0), 200.0, true);
+        let pushed = by_ai[44] - by_ai[0];
+        println!("seat 1 pushes the truck {} ft; the AI rider {pushed} ft", alone[44] - alone[0]);
+        assert!(woken, "the AI rider's bike never woke the truck");
+        assert!(pushed > 0.03, "the truck moved {pushed} ft along the AI rider's way");
     }
 
     /// F75: a split-screen seat's downed rider's wreck bike meets the shared parked truck as a lone

@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars, parked_planes, parked_helis, ridden_guests: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai, seek: _, notes: _, dust: _, tracks: _, parked: _, parked_cars, parked_planes, parked_helis, ridden_guests: _, parked_cars_held: _ } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -652,6 +652,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         parked_helis,
         // The other seats' bikes (F79) are this machine's shell's, told each pass.
         ridden_guests: std::mem::take(&mut sim.ridden_guests),
+        // And whether its parked cars are held outside it (F75b), the shell's.
+        parked_cars_held: sim.parked_cars_held,
     };
     Ok(())
 }

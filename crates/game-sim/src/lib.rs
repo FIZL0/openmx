@@ -201,6 +201,13 @@ pub struct Sim {
     /// the original's walks every bike in its moving structure. Empty — one seat, or no AI rider —
     /// thinks as before. Refilled every pass, so not in the state hash or on the wire.
     pub ridden_guests: Vec<ai::Ridden>,
+    /// The parked cars held outside this Sim's step (F75b): split screen's seats share one copy of
+    /// them, which the shell frames before every seat's bike and sleeps after them all, and lends to
+    /// the Sim with AI riders for its pass. Raised, its bikes still strike, push and wreck on
+    /// [`Sim::parked_cars`], but its step neither frames them ahead of its bikes nor sleeps them after
+    /// ([`Sim::parked_cars_frame`], [`Sim::parked_cars_sleep`]). Lowered — one seat — steps as before.
+    /// The shell's, set every pass, so not in the state hash or on the wire.
+    pub parked_cars_held: bool,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -320,6 +327,7 @@ impl Sim {
             parked_planes: Vec::new(),
             parked_helis: Vec::new(),
             ridden_guests: Vec::new(),
+            parked_cars_held: false,
         }
     }
 
@@ -387,16 +395,24 @@ impl Sim {
     }
 
     /// The woken parked cars' frame, ahead of the bikes' (S485, [`car::Parked::frame`]): which of them
-    /// stepped and are at rest, for [`Sim::parked_cars_sleep`] after the bikes.
+    /// stepped and are at rest, for [`Sim::parked_cars_sleep`] after the bikes. Held outside the Sim
+    /// ([`Sim::parked_cars_held`]), none: the shell framed them before every seat's bike.
     fn parked_cars_frame(&mut self, dt: F, world: &mut dyn World) -> Vec<bool> {
+        if self.parked_cars_held {
+            return Vec::new();
+        }
         let tables = &self.tables.ride;
         self.parked_cars.iter_mut().map(|p| p.frame(world, dt, &tables.acos, &tables.curve)).collect()
     }
 
     /// The parked cars [`Sim::parked_cars_frame`] found at rest put to sleep, after the bikes struck
     /// them (S486, [`car::Parked::sleep`]); when one does, [`Sim::parked`] (one hull a car) stands
-    /// the AI riders' hulls where they now rest.
+    /// the AI riders' hulls where they now rest. Held outside the Sim ([`Sim::parked_cars_held`]),
+    /// nothing: the shell sleeps them after every seat's bike.
     fn parked_cars_sleep(&mut self, resting: &[bool]) {
+        if self.parked_cars_held {
+            return;
+        }
         let mut slept = false;
         for (p, _) in self.parked_cars.iter_mut().zip(resting).filter(|(_, r)| **r) {
             p.sleep();
@@ -1232,6 +1248,7 @@ impl Clone for Sim {
             parked_planes: self.parked_planes.clone(),
             parked_helis: self.parked_helis.clone(),
             ridden_guests: self.ridden_guests.clone(),
+            parked_cars_held: self.parked_cars_held,
         }
     }
 }
