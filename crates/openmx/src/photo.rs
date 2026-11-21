@@ -226,6 +226,8 @@ pub struct Auto {
     due: Option<(u64, Moment)>,
     /// The tick of the last picture taken.
     last: Option<u64>,
+    /// The tick the last moment taken up was heard on.
+    heard_at: Option<u64>,
 }
 
 impl Auto {
@@ -237,6 +239,7 @@ impl Auto {
         }
         let delay = if moment == Moment::Wreck { WRECK_DELAY } else { 0 };
         self.due = Some((now + delay, moment));
+        self.heard_at = Some(now);
     }
 
     /// The moment whose picture falls due on tick `now`, once.
@@ -251,7 +254,7 @@ impl Auto {
     /// The ride put back to an earlier tick than it has heard (a restart, a tape rewound): nothing
     /// waits, and the gap starts again.
     fn rewound(&mut self, now: u64) {
-        let heard = self.last.into_iter().chain(self.due.map(|(at, _)| at.saturating_sub(WRECK_DELAY))).max();
+        let heard = self.last.into_iter().chain(self.heard_at).max();
         if heard.is_some_and(|t| now < t) {
             *self = Auto::default();
         }
@@ -381,6 +384,11 @@ mod tests {
         // A restart's ticks begin again: the gap does too.
         a.heard(Moment::Trick, 3);
         assert_eq!(a.due(3), Some(Moment::Trick));
+        // A trick waiting when the ride is put back a few ticks is the old ride's: dropped.
+        let mut a = Auto::default();
+        a.heard(Moment::Trick, 100);
+        assert_eq!(a.due(95), None);
+        assert_eq!(a.due(100), None);
     }
 
     #[test]

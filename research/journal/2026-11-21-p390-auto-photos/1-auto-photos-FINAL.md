@@ -1,4 +1,4 @@
-# 1 — auto photos (PART)
+# 1 — auto photos (FINAL)
 
 Task P390. 2026-11-21.
 
@@ -18,7 +18,9 @@ Task P390. 2026-11-21.
   and note). The HUD and the FPS counter are left off that frame, as photo mode leaves them off.
 - `main.rs`, the front end: a race left with Race Results on asks for a picture; it is taken on the
   results screen's first frame (drawn on the CPU, as `--shot` draws a menu), into the same folder,
-  via `photo::save`.
+  via `photo::save`. Not P385's `photo_shot`: that lives in the ride loop, and the results screen
+  is drawn by the front end's loop after the ride has ended; `photo::save` writes the same name,
+  folder, PNG and "Photo saved" note.
 - opentennis has no photo mode or auto-shots: nothing taken.
 - MXA (the reference the task names) is not on this machine (context/mxa is missing, see MD259), so
   which moments and what delay it uses were chosen here, not copied.
@@ -52,9 +54,12 @@ untouched (the auto-shot only reads the ride's tick count and its said moments).
   real display (no display here).
 - A wreck or trick on a later split-screen seat shoots the whole frame (every view), not that
   player's view alone.
+- A moment that falls due while photo mode is up waits and is shot once photo mode closes.
+- Split screen: moments are heard on each local seat's tick count and shot on seat 0's; the seats
+  step together, so they agree, but this was not tested with two seats.
 - The plane's crash (biplane, MX vs. ATV machines) is not a wreck moment: only the rider's wreck
   entry (`said.wreck`) is.
 
 ## Next
 
--
+Nothing: done.

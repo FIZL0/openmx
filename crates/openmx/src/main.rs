@@ -4686,6 +4686,8 @@ async fn front_end(args: Args) -> Result<(), String> {
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
+                // A results picture not taken yet is the race's that is gone (P390).
+                results_photo = false;
                 // P327: the menu's Race, or none for its Free Ride.
                 a.race = shell.front.menu.racing().cloned();
                 if !args.mods_asked {
@@ -5169,9 +5171,10 @@ async fn front_end(args: Args) -> Result<(), String> {
         }
         // On the GPU the menu is sprites over its pictures, uploaded once (V30); the CPU draws it
         // for the X window, and for a shot.
-        // Auto Photos' results picture (P390) on the results screen's first frame; gone with it.
-        results_photo &= shell.front.menu.screen() == Some(menu::Screen::Results);
-        let shooting = shot.is_some() && shown >= args.shot_frame || results_photo;
+        // Auto Photos' results picture (P390), asked for as the race is left, on the first frame the
+        // results screen is up (a frame between, a fade or a load, keeps it waiting).
+        let results_now = results_photo && shell.front.menu.screen() == Some(menu::Screen::Results);
+        let shooting = shot.is_some() && shown >= args.shot_frame || results_now;
         // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
         let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
         match (garage_view::shown_flier(&shell.front.menu), garage_view::shown_pick(&shell.front.menu)) {
@@ -5256,7 +5259,8 @@ async fn front_end(args: Args) -> Result<(), String> {
             break;
         }
         // The results picture (P390), written as photo mode's are; a failed write is said, not fatal.
-        if std::mem::take(&mut results_photo) {
+        if results_now {
+            results_photo = false;
             let said = photo::save(&shell.front.dir.join("photos"), frame.width, frame.height, &frame.color);
             println!("auto photo: results — {said} ({}x{})", frame.width, frame.height);
             shell.front.menu.note = Some(said);
@@ -12665,7 +12669,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let photo_on = front.as_deref().is_some_and(|f| f.menu.photo());
         // Auto Photos (P390): a wreck's or a landed trick's picture, due on this tick, taken as photo
         // mode's Cross takes one: this frame's view, the HUD left off it.
-        if let Some(moment) = auto_shots.due(world.seats[0].sim.ticks).filter(|_| photo_shot.is_none() && !photo_on) {
+        // One that falls due while photo mode is up, or on a hand-taken shot's frame, waits for after.
+        if let Some(moment) = (photo_shot.is_none() && !photo_on).then(|| auto_shots.due(world.seats[0].sim.ticks)).flatten() {
             println!("auto photo: {moment:?} at sim tick {}", world.seats[0].sim.ticks);
             photo_shot = Some(photo::next_path(&markers_dir.join("photos")));
         }
