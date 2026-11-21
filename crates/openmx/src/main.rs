@@ -608,10 +608,24 @@ impl Seat {
     /// One player's pass: the pad, then the bike, then the d-pad's markers (P88) — `me` is this
     /// seat and `spots` where every seat's rider was before the pass. `among` is the other seats as
     /// this one meets them (N22): its contacts, the riders it can joust and the bikes its plane can
-    /// strike.
-    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World, me: usize, spots: &[Spot], among: vehicle::Among<'_>) {
+    /// strike. `parked` is split screen's shared copy of the parked cars (F72), car `k` named
+    /// `spots.len() + k`, which a downed rider's wreck bike meets ahead of the bike's frame (F75).
+    fn pass(
+        &mut self,
+        dt: F,
+        place: &mut dyn sim_world::World,
+        me: usize,
+        spots: &[Spot],
+        among: vehicle::Among<'_>,
+        parked: Option<&mut [game_sim::car::Parked]>,
+    ) {
         let Some(controls) = self.pass_front(dt) else { return };
         let mut did = None;
+        // As a Sim's own step has it (S486, `Sim::wreck_meets_parked`), on the bike only: with
+        // another machine up the rider's frame does not run.
+        if let Some(cars) = parked.filter(|_| self.riding && self.garage.up == Kind::Bike) {
+            game_sim::parked_wreck::wreck_meets_cars(&mut self.sim.rider, cars, spots.len(), dt, place);
+        }
         if self.riding {
             let closed = |sim: &Sim| sim.race.as_ref().is_some_and(|r| r.gate.flags & game_sim::race::flags::CLOSED != 0);
             let was_closed = closed(&self.sim);
@@ -2496,7 +2510,8 @@ impl<P: sim_world::World> Game for World<P> {
         // F72: split screen's seats share one copy of them, as the original has one truck: out of the
         // seats for the pass ([`World::parked_out`]), the woken ones stepped ahead of the bikes as a
         // Sim's own step has them (S485), their hulls in the riders' world after the vehicles', and
-        // struck and pushed by every seat's bike; back in every seat after ([`World::parked_back`]).
+        // struck and pushed by every seat's bike, and by its downed rider's wreck bike (F75, in
+        // [`Seat::pass`]); back in every seat after ([`World::parked_back`]).
         let mut parked = self.parked_out();
         let resting: Vec<bool> = match parked.as_mut() {
             Some(cars) => {
@@ -2682,7 +2697,7 @@ impl<P: sim_world::World> Game for World<P> {
                 None => game_sim::wreck_plane::Downed::default(),
             };
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
-            self.seats[me].pass(dt, &mut self.place, me, &spots, among);
+            self.seats[me].pass(dt, &mut self.place, me, &spots, among, parked.as_deref_mut());
             if me == 0 {
                 self.race_guests_out(dt);
             }
@@ -3468,6 +3483,89 @@ mod split_contact {
         assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
         assert!(woken, "the bike's strike never woke the truck");
         assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
+    }
+
+    /// F75: a split-screen seat's downed rider's wreck bike meets the shared parked truck as a lone
+    /// seat's does in its Sim's own step (S486). The disc's truck is settled 25 ft up the bike's way;
+    /// the bike rolls into its tail at 60 ft/s and its rider wrecks on the strike. Alone, and as seat
+    /// 1 with seat 0 standing 100 ft off, the wreck bike tumbles on along the same track into the
+    /// truck's tail and slides back off it, the truck where the lone seat's is.
+    #[test]
+    fn a_split_seats_wreck_bike_meets_the_shared_truck_as_a_lone_seats() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        // The wreck bike and the rider's throw, found by suffix as the shell finds them; no ragdoll,
+        // whose bones meet the shared cars only in a lone seat (F75c).
+        let archives: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
+        let mut suffixed = |s: &str| archives.iter().find_map(|n| disc.res(n).ok()?.read_suffix(s).ok()).unwrap_or_else(|| panic!("no {s}"));
+        let (wreck_bike, thrown) = (suffixed("wreckbike.phy"), suffixed("mrider.phy"));
+        let rider = |x: f32| {
+            let mut sim = Sim::new(0xf75);
+            std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(x, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+            let (part, wrecks) = (game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&thrown));
+            sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            // Off while the bike settles and sets off; on for the strike.
+            sim.rider.sense.wrecks_enabled = false;
+            sim
+        };
+        // Per tick from the strike on: the wreck bike's z (None while the rider is up) and the truck's.
+        let ride = |two: bool| {
+            let me = usize::from(two);
+            let sims = if two { vec![rider(100.0), rider(0.0)] } else { vec![rider(0.0)] };
+            let mut world = split(sims);
+            let in_play = crate::vehicle::InPlay::settled(&spots, &vec![false; me + 1], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+            assert_eq!(in_play.len(), 1, "the truck is parked");
+            for s in &mut world.seats {
+                s.garage.in_play = in_play.fresh();
+            }
+            world.simulate(DT, Input::default(), &mut Default::default());
+            world.seats[me].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 60.0, 0.0);
+            let mut track = Vec::new();
+            for t in 0..60 {
+                world.seats[me].sim.rider.sense.wrecks_enabled = t >= 4;
+                world.simulate(DT, Input::default(), &mut Default::default());
+                let s = &world.seats[me].sim;
+                let wreck = s.rider.crash.as_ref().map(|c| c.bike.origin().z());
+                track.push((wreck, s.parked_cars[0].machine.body.position.z()));
+            }
+            println!("seat {me} of {}: the bike at z {}", world.seats.len(), world.seats[me].sim.rider.ride.position().z());
+            track
+        };
+        let (alone, seat1) = (ride(false), ride(true));
+        let from = alone.iter().position(|t| t.0.is_some()).expect("the lone seat's rider wrecks on the truck");
+        assert_eq!(seat1.iter().position(|t| t.0.is_some()), Some(from), "seat 1's rider wrecks on the same tick");
+        for k in 0..12 {
+            let ((a, at), (s, st)) = (alone[from + k], seat1[from + k]);
+            println!("strike+{k}: wreck bike z {a:?} / {s:?} (alone / split), truck z {at} / {st}");
+            let (a, s) = (a.expect("the lone seat's wreck bike"), s.expect("seat 1's wreck bike"));
+            assert!((a - s).abs() < 1e-4, "strike+{k}: seat 1's wreck bike at z {s}, the lone seat's {a}");
+            assert!((at - st).abs() < 1e-4, "strike+{k}: the shared truck at z {st}, the lone seat's {at}");
+        }
+        // The truck's tail stops it and it slides back off, nudging the truck on.
+        let z: Vec<f32> = alone[from..from + 12].iter().filter_map(|t| t.0).collect();
+        assert!(z.windows(2).any(|w| w[1] < w[0]), "the wreck bike never turned back off the truck: {z:?}");
+        assert!(alone[from + 11].1 > alone[from].1, "the wreck bike never pushed the truck");
     }
 
     /// MD179: a split-screen bike meets the other seat's quad as it meets a car (F26). Seat 1 takes

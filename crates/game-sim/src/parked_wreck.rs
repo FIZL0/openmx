@@ -67,41 +67,48 @@ impl crate::Sim {
         let n = self.players();
         let crate::Sim { rider, others, parked_cars, .. } = self;
         let r = if i == 0 { rider } else { &mut others[i - 1].rider };
-        if !down(r) {
-            return;
-        }
-        let Some(c) = r.crash.as_mut() else { return };
-        let from = c.bike.origin();
-        let hulls: Vec<_> = parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)).collect();
-        let them: Vec<Plane<'_>> = hulls
-            .iter()
-            .zip(parked_cars.iter())
-            .map(|(h, p)| {
-                let mut at = h.at;
-                at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
-                Plane { mesh: h.mesh, at, velocity: p.machine.body.velocity }
-            })
-            .collect();
-        let near = them.iter().any(|p| {
-            let (_, centre, radius) = crate::world::Prop::posed(p.mesh, &p.at);
-            !(crate::actor::distance(centre, from) > radius + REACH)
-        });
-        if !near {
-            return;
-        }
-        let capacity = hulls.iter().map(|h| h.capacity).max().unwrap_or(0);
-        let (ground, props, trees) = world.wooded_near(from);
-        let (movers, mirrors) = c.bike.search_flown(dt, ground.as_deref(), props, trees, &them, capacity);
-        drop(ground);
-        drop((them, hulls));
-        let mut flown: Vec<Flown> = parked_cars.iter().enumerate().map(|(k, p)| p.flown(n + k, from, &*world)).collect();
-        c.bike.step_flown(dt, &movers, &mut flown);
-        c.bike.flown = true;
-        for ((p, f), m) in parked_cars.iter_mut().zip(&flown).zip(&mirrors) {
-            p.pushed(f);
-            if !m.is_empty() {
-                p.struck();
-            }
+        wreck_meets_cars(r, parked_cars, n, dt, world);
+    }
+}
+
+/// **`r`'s wreck bike among `parked_cars`**, ahead of the rider's frame ([`crate::Sim::wreck_meets_parked`]),
+/// car `k`'s hull named `n + k`: split screen's seats share one copy of the cars (F72), which each
+/// seat's downed rider meets so (F75).
+pub fn wreck_meets_cars(r: &mut Rider, parked_cars: &mut [crate::car::Parked], n: usize, dt: F, world: &mut dyn World) {
+    if parked_cars.is_empty() || !down(r) {
+        return;
+    }
+    let Some(c) = r.crash.as_mut() else { return };
+    let from = c.bike.origin();
+    let hulls: Vec<_> = parked_cars.iter().enumerate().map(|(k, p)| p.hull(n + k)).collect();
+    let them: Vec<Plane<'_>> = hulls
+        .iter()
+        .zip(parked_cars.iter())
+        .map(|(h, p)| {
+            let mut at = h.at;
+            at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
+            Plane { mesh: h.mesh, at, velocity: p.machine.body.velocity }
+        })
+        .collect();
+    let near = them.iter().any(|p| {
+        let (_, centre, radius) = crate::world::Prop::posed(p.mesh, &p.at);
+        !(crate::actor::distance(centre, from) > radius + REACH)
+    });
+    if !near {
+        return;
+    }
+    let capacity = hulls.iter().map(|h| h.capacity).max().unwrap_or(0);
+    let (ground, props, trees) = world.wooded_near(from);
+    let (movers, mirrors) = c.bike.search_flown(dt, ground.as_deref(), props, trees, &them, capacity);
+    drop(ground);
+    drop((them, hulls));
+    let mut flown: Vec<Flown> = parked_cars.iter().enumerate().map(|(k, p)| p.flown(n + k, from, &*world)).collect();
+    c.bike.step_flown(dt, &movers, &mut flown);
+    c.bike.flown = true;
+    for ((p, f), m) in parked_cars.iter_mut().zip(&flown).zip(&mirrors) {
+        p.pushed(f);
+        if !m.is_empty() {
+            p.struck();
         }
     }
 }
