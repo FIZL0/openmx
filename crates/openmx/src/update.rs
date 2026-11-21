@@ -2,8 +2,9 @@
 //! the main menu under the corner (`menu.rs`'s [`crate::menu::Updater`], which this fills at start),
 //! with Square to Update.
 //!
-//! A beta build (pages.yml builds the rolling `beta` release in GitHub Actions, whose `GITHUB_SHA` it
-//! is built with) asks GitHub which commit the `beta` release is at; a release build
+//! A beta build (pages.yml builds the beta in GitHub Actions, whose `GITHUB_SHA` it is built with)
+//! asks beta.openmx.dev which commit its downloads are at ([`BETA_API`], B43: the beta is no GitHub
+//! release); a release build
 //! (`tools/release.sh` builds it with `OPENMX_VERSION=v1.2.3`, which `build.rs` passes on as
 //! `OPENMX_TAG`) asks for the latest `v*` release instead. Both ask at start (the first time the main
 //! menu is up) and every half hour by the wall clock, unless Settings → Updates is Never or
@@ -25,14 +26,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-/// The beta's release page, which Download opens when there is no release to install.
-pub const RELEASES: &str = "https://github.com/FIZL0/openmx/releases/tag/beta";
+/// The beta's downloads page, which Download opens when there is no release to install.
+pub const RELEASES: &str = "https://beta.openmx.dev/download/";
 
 /// The releases/latest JSON a release build asks, unless `OPENMX_UPDATE_API` names another.
 const LATEST_API: &str = "https://api.github.com/repos/FIZL0/openmx/releases/latest";
 
-/// The beta release's JSON, whose `target_commitish` is the commit it was built from.
-const BETA_API: &str = "https://api.github.com/repos/FIZL0/openmx/releases/tags/beta";
+/// The full commit the beta's downloads were built from (`tools/beta-bundle.sh` writes it).
+const BETA_API: &str = "https://beta.openmx.dev/download/commit.txt";
 
 /// This build's release tag (`v0.1.0`, `v1.1.0-rc.1`): only builds made by `tools/release.sh` have
 /// one, and only they check for and install newer releases. A debug build never does.
@@ -142,10 +143,14 @@ fn due(asked: std::time::SystemTime, now: std::time::SystemTime) -> bool {
     now.duration_since(asked).map_or(true, |d| d >= std::time::Duration::from_secs(30 * 60))
 }
 
-/// The commit the `beta` release was built from (`gh release create --target $GITHUB_SHA`: the full one).
+/// The commit the beta's downloads were built from.
 async fn beta() -> Result<String, String> {
-    let j = json(BETA_API).await?;
-    j["target_commitish"].as_str().filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string).ok_or_else(|| "no commit".into())
+    beta_commit(&fetch(BETA_API, 256).await?)
+}
+
+/// `commit.txt`'s full commit (40 hex digits and a newline).
+fn beta_commit(body: &[u8]) -> Result<String, String> {
+    std::str::from_utf8(body).ok().map(str::trim).filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string).ok_or_else(|| "no commit".into())
 }
 
 /// `url`'s JSON.
@@ -685,6 +690,14 @@ Hs5KaCqvNkJ1Vjp/bntiFqm0CkKzxeGJhK9L+76A3G/wL+xeLy8au+kcLCnYzhku/rp99xxUM9X1p8bb
         assert!(steams(Path::new("/home/deck/.local/share/Steam/steamapps/common/openMX/openmx")));
         assert!(steams(Path::new("D:/SteamLibrary/SteamApps/common/openMX/openmx.exe")));
         assert!(!steams(Path::new("/home/deck/Games/openmx/openmx")));
+    }
+
+    #[test]
+    fn the_beta_commit_is_a_full_hash() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(beta_commit(format!("{sha}\n").as_bytes()).as_deref(), Ok(sha));
+        assert!(beta_commit(b"0123456\n").is_err());
+        assert!(beta_commit(b"<html>404</html>").is_err());
     }
 
     #[test]
