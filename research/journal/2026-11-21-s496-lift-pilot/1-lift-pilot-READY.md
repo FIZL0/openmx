@@ -1,6 +1,21 @@
-# 1 — lift pilot (PART)
+# 1 — lift pilot (READY)
 
 Task S496. 2026-11-21.
+
+## What the brief asked that is not done
+
+- **The gate's state machine and drop.** They are not lifted. The drop goes through the activity's
+  vtable, and the race manager's tick around it is large (S13b took 112 min to port it). Only the crossing
+  test the tick calls is lifted.
+- **The AI rider's whole per-tick step.** Only the throttle/steer decision (the ground controller) is
+  lifted. The route follower (waypoint follow, 5936 bytes in the original) and avoid are not.
+- **An arena-resident bike.** The bike does not live in `Mem`, and no bridge hands its pose and chassis to
+  the renderer. The bike stays on game-sim. The bridge swaps the two lifted functions in for the sim's
+  ports.
+- **The lap check is a hand run, not a test.** It is a shell run written up below. No test in the repo
+  repeats it.
+- Why I stopped there: those parts are S12/S13/S281/S282-sized, and the two lifts already give the
+  numbers the pilot is for. Going on is the first question on the pick sheet.
 
 ## What I did
 
@@ -53,7 +68,10 @@ Sizes:
 
 - The lift is 228 lines (controller, about half of it doc and helpers) plus 95 (gate). The port is
   67 + 49 for the same two functions, plus types.
-- The bridge is 144 + 14 (hooks) + 11 (shell) + 4 (Cargo) = 173 lines.
+- The bridge is 144 + 14 (hooks) + 11 (shell) + 3 (Cargo, plus Cargo.lock) = 172 lines.
+- Source: I read each function in the Ghidra decomp (`./kit fn`) and translated it from the disassembly
+  (`./kit dis`), because the disassembly shows the exact `mula`/`madda` chains, the compare forms and
+  the delay-slot stores that a bit-exact lift needs.
 
 ## What the original does
 
@@ -100,9 +118,12 @@ Sizes:
 
 - **The AGENT.md exemption.** `./kit audit` flags only addresses listed in research/oracle.txt or kit.toml
   `[symbols]`, plus `FUN_`/`DAT_` names. It does not flag struct offsets (`ai + 0x1e0`), and it flags
-  nothing in game-lift today. Offsets already appear in race.rs and ai.rs doc comments. So the gate does
-  not need the exemption. What the rule's wording ("bare hex addresses") means for code made of offsets
-  is the user's call. I did not edit AGENT.md (the brief says to ask first).
+  nothing in game-lift today. Offsets already appear in race.rs and ai.rs doc comments.
+  - **The ask, as the brief says:** approve a line in AGENT.md allowing struct offsets in
+    `crates/game-lift`, with retail addresses and decompiler names still banned. It is the first
+    question on the pick sheet.
+  - The gate passes without it, but AGENT.md's "bare hex addresses" reads as banning a lift's code, so I
+    recommend the line. I did not edit AGENT.md.
 - **Globals were the real conflict, and parameters solve them.** The controller's retail globals (the
   curve table pointer, its scale and step, the fine arc cosine) come in as `Tables` from the caller. The
   oracle passes the retail addresses, and the bridge passes its own. The same works for any lifted
@@ -110,11 +131,15 @@ Sizes:
 - **Vtables are the next conflict.** A lifted function that calls through a vtable needs either the
   original's objects and vtables in `Mem` (retail addresses) or a dispatch table the bridge fills. Neither
   is in this pilot.
-- **The bridge costs more than the lift.** For two leaf functions it is 173 lines against 323 lifted. The
+- **The bridge costs more than the lift.** For two leaf functions it is 172 lines against 323 lifted. The
   bridge shrinks per function only if whole subsystems are lifted and share one `Mem`.
 
 ## Not verified / not 1:1
 
+- **No test repeats the lap.** The `--ai 1` lap and the match with the port are hand runs of the release
+  shell, with the logs kept only in my scratchpad. They are not in the gate.
+- **The plain `--ai 1` run (human idle) was not compared with a port run.** Only the `--race-bot` run
+  was compared line for line. The plain run was checked for the gate drop and the AI finishing.
 - **The AI bike's physics, route follower and AI tick are the port's, not lifted.** Only the ground
   controller and the gate crossing run lifted under `--ai`. Lifting the whole AI bike (bike body, ride,
   route follow, AI tick) into one arena would cost what S12/S13/S281/S282 cost together. That is beyond a
