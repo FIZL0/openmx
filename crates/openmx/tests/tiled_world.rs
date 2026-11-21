@@ -599,14 +599,24 @@ fn a_worlds_spawn_is_its_start() {
 /// of the tiles, and the ride is the same tick for tick: every seat's hash after every tick, the
 /// thread on and off, ten seconds on the throttle and two at rest.
 ///
-/// B43: a tick whose rider borrows its body for the riding ragdoll's step stays on the loop (P382),
-/// so these rides have the riding ragdoll off (`OPENMX_RIDING_RAGDOLL=0`).
+/// This ride has the riding ragdoll off (`OPENMX_RIDING_RAGDOLL=0`), where no body is lent (B43).
 #[test]
 fn a_worlds_ticks_on_the_sim_thread_are_the_same_ride() {
-    let tape = spawn_tape("sim-thread", 300, 0);
-    let ride = |mode: &str| shell_env(&format!("sim-thread-{mode}"), "md8_world", &[
+    same_ride_on_the_sim_thread("sim-thread", &[("OPENMX_RIDING_RAGDOLL", "0")]);
+}
+
+/// P382: the same with the riding ragdoll on, each seat's body lent to its rider's step (B43) on the
+/// sim thread while the pictures draw a copy of it.
+#[test]
+fn a_worlds_ticks_with_lent_bodies_on_the_sim_thread_are_the_same_ride() {
+    same_ride_on_the_sim_thread("sim-thread-lent", &[]);
+}
+
+fn same_ride_on_the_sim_thread(name: &str, envs: &[(&str, &str)]) {
+    let tape = spawn_tape(name, 300, 0);
+    let ride = |mode: &str| shell_env(&format!("{name}-{mode}"), "md8_world", &[
         "--players", "2", "--play", tape.to_str().unwrap(), "--frames", "360", "--steady-clock", "--trace-hash", "--no-sound", "--sim-thread", mode,
-    ], &[("OPENMX_RIDING_RAGDOLL", "0")]);
+    ], envs);
     let (Some(off), Some(on)) = (ride("off"), ride("on")) else { return };
     let hashes = |said: &str| -> Vec<String> { said.lines().filter(|l| l.starts_with("tick ") && l.contains(" hash ")).map(str::to_string).collect() };
     let (off_hashes, on_hashes) = (hashes(&off), hashes(&on));

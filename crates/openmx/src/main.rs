@@ -1726,6 +1726,19 @@ fn lend_body(body: &mut Option<Body>, rider: &mut Rider, ragdolled: Option<&game
     true
 }
 
+/// [`lend_body`] for a tick on the sim thread (P382): the body goes with its rider, and a copy of it as
+/// the last tick left it stays in `body` for the pictures drawn meanwhile, which [`take_body`] puts
+/// the body itself back over when the tick lands.
+fn lend_body_kept(body: &mut Option<Body>, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
+    // Copied only where it will be lent: a ride without the riding ragdoll lends nothing.
+    let kept = (ragdolled.is_some() && rider.ragdoll_kit.is_some()).then(|| body.clone()).flatten();
+    let lent = lend_body(body, rider, ragdolled);
+    if lent {
+        *body = kept;
+    }
+    lent
+}
+
 /// [`lend_body`]'s body back from `rider` after its step: whether the step posed it.
 fn take_body(body: &mut Option<Body>, rider: &mut Rider) -> bool {
     let lent = rider.poser.0.take().expect("the lent body is still on its rider");
@@ -10804,12 +10817,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             && landing.is_none()
             && online.is_none()
             && sim_worker.is_some()
-            // B43: a body is lent to its rider's step on the loop, and the picture drawn during a
-            // flight needs it; such ticks stay here.
-            && !(ragdolled.is_some()
-                && riding_ragdoll_on()
-                && (world.seats.iter().zip(&rigs).any(|(s, r)| r.body.is_some() && s.sim.rider.ragdoll_kit.is_some())
-                    || ai_rigs.iter().any(|r| r.body.is_some() && world.seats[0].sim.others.get(r.player.wrapping_sub(1)).is_some_and(|p| p.rider.ragdoll_kit.is_some()))))
             && pacer.ticks() > 0
             && !pacer.backlog(moment)
             && !args.frames.is_some_and(|n| pacer.ticks() + 1 >= u64::from(n))
@@ -10818,11 +10825,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if let (Land::Tiles(copy), Some(t)) = (&mut place, world.place.tiled()) {
                 t.copy_into(copy);
             }
+            // B43 off the loop (P382): each body is lent to its rider's step and goes with the world,
+            // and the pictures drawn meanwhile draw a copy of it as the last tick left it, as they
+            // draw the copy of the seats. The stand-in's riders lend nothing (a lent body is not copied).
+            let lent: Vec<bool> = world.seats.iter_mut().zip(&mut rigs).map(|(s, r)| lend_body_kept(&mut r.body, &mut s.sim.rider, ragdolled.as_ref())).collect();
+            let lent_ai: Vec<bool> = ai_rigs
+                .iter_mut()
+                .map(|r| match world.seats[0].sim.others.get_mut(r.player.wrapping_sub(1)) {
+                    Some(p) => lend_body_kept(&mut r.body, &mut p.rider, ragdolled.as_ref()),
+                    None => false,
+                })
+                .collect();
             let stand_in = World { place, seats: world.seats.clone(), tape: None, played_dt: world.played_dt };
             let input = engine_input(&world.seats[0].reports[0]);
             let now = pace::tick_clock(pacer.ticks());
             let world = std::mem::replace(&mut world, stand_in);
-            flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO, ahead: args.run_ahead });
+            flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO, ahead: args.run_ahead, lent, lent_ai });
             // Run ahead (F24), the pictures until it lands blend the two ticks before it.
             if args.run_ahead {
                 swap_behind!();
@@ -11292,6 +11310,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     std::mem::swap(&mut cuts, &mut behind.cuts);
                 }
                 drawn_land = Some(std::mem::replace(&mut world, ran.world).place);
+                // The bodies lent with it (P382), back over the copies the pictures drew.
+                seat_posed = world.seats.iter_mut().zip(&mut rigs).zip(&ran.lent).map(|((s, r), &l)| l && take_body(&mut r.body, &mut s.sim.rider)).collect();
+                ai_posed = ai_rigs
+                    .iter_mut()
+                    .zip(&ran.lent_ai)
+                    .map(|(r, &l)| l && take_body(&mut r.body, &mut world.seats[0].sim.others[r.player - 1].rider))
+                    .collect();
                 engine = ran.engine;
                 gauge.ticked(ran.took);
                 ran.step.expect("the sim thread ran its tick")
@@ -13959,6 +13984,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         world = ran.world;
         engine = ran.engine;
+        // And its lent bodies back (P382).
+        for ((s, r), &l) in world.seats.iter_mut().zip(&mut rigs).zip(&ran.lent) {
+            if l {
+                take_body(&mut r.body, &mut s.sim.rider);
+            }
+        }
+        for (r, &l) in ai_rigs.iter_mut().zip(&ran.lent_ai) {
+            if l {
+                take_body(&mut r.body, &mut world.seats[0].sim.others[r.player - 1].rider);
+            }
+        }
     }
     if args.trace_hash && sim_worker.is_some() {
         println!("sim thread: {threaded_ticks} ticks ran there");
@@ -14439,6 +14475,10 @@ struct Ticking<P> {
     /// Run ahead (F24): held, once it has run, until the next tick is due, the pictures meanwhile
     /// blending the two before it; else landed at the pass after the one picture drawn beside it.
     ahead: bool,
+    /// Which seats' and AI rigs' bodies went with the world, lent to their riders' steps (P382), to
+    /// be taken back when it lands.
+    lent: Vec<bool>,
+    lent_ai: Vec<bool>,
 }
 
 /// The picture's before-copies of the tick before the loop's own (F24), for a picture a tick

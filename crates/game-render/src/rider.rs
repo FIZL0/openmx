@@ -735,6 +735,10 @@ pub const AIR_POSES: [&str; 3] = ["air_Fwd", "air_Mid", "air_Bck"];
 /// feet on the pegs and hands on the grips. So a posed rider is drawn with the bike's own
 /// transform and nothing else, which is the answer to the question [`bolt_onto`] was written for:
 /// the bind pose needs a placement because the game never draws one, and a posed body does not.
+///
+/// A copy (P382) is what a picture draws while the body itself is lent to its rider's step on the
+/// sim thread: its pose and clocks its own, its clips and archives shared ([`crate::anim::Clips`]).
+#[derive(Clone)]
 pub struct Body {
     /// The chain: the `.sub`'s gear, the `.mcf` it names, and the name of the geometry to load.
     pub rider: Rider,

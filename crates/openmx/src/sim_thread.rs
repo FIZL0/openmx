@@ -17,7 +17,8 @@
 //! filed searches) are caches, which give the same answer built fresh, so which thread runs a tick
 //! does not change it. While the tick runs, the loop draws from a copy of the seats as they were
 //! before it (the picture the last tick ended on, held), over a place with the same ground and no
-//! props, which is all a picture asks of it.
+//! props, which is all a picture asks of it. A rider's body lent to its rider's step (B43) goes with
+//! the world too, and the picture draws a copy of it as the last tick left it (P382).
 //!
 //! Run ahead (F24, `--run-ahead`, on by default), the tick that has run waits for its second half
 //! until the next tick is due, and every picture till then blends the two ticks before it, from

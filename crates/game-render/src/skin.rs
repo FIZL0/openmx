@@ -71,8 +71,8 @@ use crate::psg::{Model, Strip, Tri};
 use game_sim::math;
 use game_sim::motion;
 use ps2_float::{F, Vf};
-use std::cell::Cell;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// What a joint map holds where the skeleton has no joint of that name: the channel is skipped.
 pub const SKIP: u8 = 0xff;
@@ -154,14 +154,21 @@ pub struct PosKey {
 }
 
 /// A joint's rotation over the clip.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RotChannel {
     /// Index into [`Clip::names`].
     pub name: i32,
     pub keys: RotKeys,
     /// The last pair [`RotChannel::sample`] used. The original keeps it in the channel too, so clips
-    /// shared between two riders share the hint; it only ever costs a few extra comparisons.
-    cursor: Cell<usize>,
+    /// shared between two riders share the hint; it only ever costs a few extra comparisons. Atomic
+    /// because a body's copy shares its clips across threads (P382, [`crate::anim::Clips`]).
+    cursor: AtomicUsize,
+}
+
+impl Clone for RotChannel {
+    fn clone(&self) -> RotChannel {
+        RotChannel { name: self.name, keys: self.keys.clone(), cursor: AtomicUsize::new(self.cursor()) }
+    }
 }
 
 /// A joint's translation over the clip.
@@ -588,12 +595,12 @@ fn joint(map: &[u8], name: i32, joints: usize) -> Option<usize> {
 impl RotChannel {
     /// A channel of these keys, the way the clip reader builds one: the pair hint starts at 1.
     pub fn new(name: i32, keys: impl Into<RotKeys>) -> RotChannel {
-        RotChannel { name, keys: keys.into(), cursor: Cell::new(1) }
+        RotChannel { name, keys: keys.into(), cursor: AtomicUsize::new(1) }
     }
 
     /// The pair hint, which a proof against the original has to be able to see.
     pub fn cursor(&self) -> usize {
-        self.cursor.get()
+        self.cursor.load(Ordering::Relaxed)
     }
 
     /// This channel's rotation at `time` seconds, or `None` when it has no keys — which is what the
@@ -616,7 +623,7 @@ impl RotChannel {
         // with a time before the first quarter starts again, and the other way about jumps to the end
         let quarter = last >> 2;
         let three_q = (last >> 1) + quarter;
-        let mut i = self.cursor.get();
+        let mut i = self.cursor();
         if three_q < i && time < k.time(quarter) {
             i = 1;
         } else if i < quarter && k.time(three_q) < time {
@@ -648,7 +655,7 @@ impl RotChannel {
                 break;
             }
         }
-        self.cursor.set(i);
+        self.cursor.store(i, Ordering::Relaxed);
         if held {
             return Some(k.quat(i));
         }

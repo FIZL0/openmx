@@ -70,6 +70,7 @@ use game_sim::motion::{
 use game_sim::trick::{SLOTS, Stunt};
 use game_sim::vehicle_anim;
 use ps2_float::F;
+use std::sync::Arc;
 
 /// A clip bound to a skeleton: the file, and the map from its channel names to that skeleton's
 /// joints.
@@ -99,6 +100,27 @@ impl Bound {
     }
 }
 
+/// A set's bound clips, shared by its copies (P382): a [`Set`] copied for a picture keeps the clips
+/// it was copied with and costs no copy of them; a clip bound after that goes into the set's own list
+/// alone. Reads as the list itself.
+#[derive(Clone, Debug, Default)]
+pub struct Clips(Arc<Vec<Bound>>);
+
+impl Clips {
+    /// Bind one more clip, at the end: the next [`ClipId`].
+    pub fn push(&mut self, bound: Bound) {
+        Arc::make_mut(&mut self.0).push(bound);
+    }
+}
+
+impl std::ops::Deref for Clips {
+    type Target = Vec<Bound>;
+
+    fn deref(&self) -> &Vec<Bound> {
+        &self.0
+    }
+}
+
 /// Why a clip the simulation asked for is not bound.
 ///
 /// The original has one answer for all of these — a null handle, which makes the slot fall back on
@@ -117,6 +139,9 @@ pub enum Missing {
 /// This is the port's implementation of [`Animations`], and the only thing in it that reads a file.
 /// It owns its archives because the trait's `load` takes nothing but a name — which is the point of
 /// the trait: the simulation names a clip and knows nothing about where it comes from.
+///
+/// A copy (P382) has every pose and table of its own and shares the bound clips and the archives.
+#[derive(Clone)]
 pub struct Set {
     /// The `.mcf` the set was built from: its motion list, its content directory, its geometry.
     pub set: MotionSet,
@@ -127,7 +152,7 @@ pub struct Set {
     /// The model's node tree, which is what a clip's channel names are resolved against.
     pub skeleton: Skeleton,
     /// The clips bound so far, in the order they were bound. A [`ClipId`] is an index into this.
-    pub clips: Vec<Bound>,
+    pub clips: Clips,
     /// The live pose: what the last [`Set::apply`] wrote, and the one buffer of joint poses in the
     /// port. The simulation reads it through [`game_sim::motion::Joints`] and never holds it.
     pub pose: Pose,
@@ -136,7 +161,8 @@ pub struct Set {
     pub under: Pose,
     /// Every name that was asked for and could not be bound, in the order they were asked for.
     pub missing: Vec<Missing>,
-    archives: Vec<Res>,
+    /// Shared by the set's copies (P382), which read clips out of the same archives.
+    archives: Arc<Vec<Res>>,
 }
 
 impl Set {
@@ -148,11 +174,11 @@ impl Set {
             set,
             claimed,
             skeleton,
-            clips: Vec::new(),
+            clips: Clips::default(),
             pose: Pose::new(joints),
             under: Pose::new(joints),
             missing: Vec::new(),
-            archives,
+            archives: Arc::new(archives),
         }
     }
 
@@ -592,9 +618,9 @@ impl Set {
     }
 
     /// The archives back, for a loader that builds one set after another out of the same list (V43's
-    /// animated toys, one set per `.mcf`).
+    /// animated toys, one set per `.mcf`). A set with copies still about has to be the last of them.
     pub fn into_archives(self) -> Vec<Res> {
-        self.archives
+        Arc::into_inner(self.archives).expect("the set's copies are gone")
     }
 }
 
@@ -653,6 +679,7 @@ impl Animations for Set {
 /// anything: [`Driver`] decides which motion plays, [`Player`] decides where in it the frame is, and
 /// [`Set`] decides which bytes and which bones. What [`Rig::frame`] adds is the order, which is the
 /// original's.
+#[derive(Clone)]
 pub struct Rig {
     /// The animation set, its clips and the live pose.
     pub set: Set,
