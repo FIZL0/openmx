@@ -569,12 +569,12 @@ impl Sim {
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
         }
+        self.race_ride(0, dt);
         // The bike's body rays against the cars (S137), gathered as the rider-against-rider contacts
         // are, before the bike is stepped.
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let mut strike = self.prop_strike_in(0, dt, &*world);
-        self.race_ride(0, dt);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);

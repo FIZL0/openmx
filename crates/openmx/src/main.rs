@@ -11460,11 +11460,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 // S386: and each seat's odometer, which the bikes' updates run on.
                 if let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
+                    // The tally's seats are the seats with a card, in order (race_start::hand_over_seats).
                     let players = world.seats[0].sim.players();
-                    for (k, s) in hand.tally.seats.iter_mut().enumerate() {
-                        if let Some(e) = laps.cards.iter().find(|e| e.player == race_player(k, players)) {
-                            s.feet = e.stats.odometer;
-                        }
+                    let carded = (0..world.seats.len()).filter_map(|k| laps.cards.iter().find(|e| e.player == race_player(k, players)));
+                    for (s, e) in hand.tally.seats.iter_mut().zip(carded) {
+                        s.feet = e.stats.odometer;
                     }
                 }
             }

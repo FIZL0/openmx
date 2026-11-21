@@ -1,4 +1,4 @@
-# 1 — race clock and odometer (PART)
+# 1 — race clock and odometer (FINAL)
 
 Task S386. 2026-11-21.
 
