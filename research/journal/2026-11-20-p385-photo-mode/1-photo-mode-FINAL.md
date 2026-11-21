@@ -1,4 +1,4 @@
-# 1 — photo mode (PART)
+# 1 — photo mode (FINAL)
 
 Task P385. 2026-11-20.
 
