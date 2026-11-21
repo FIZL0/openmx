@@ -2391,7 +2391,7 @@ fn view_rect(target: &Target, bleed: [u32; 4], [x, y, w, h]: [u32; 4]) -> [u32; 
 /// near to far.
 fn view_projection(camera: &Camera, width: u32, height: u32, far: f32) -> M4 {
     let aspect = width.max(1) as f32 / height.max(1) as f32;
-    M4::look_at(camera.eye, camera.at, v3(0.0, 1.0, 0.0)).mul(M4::perspective(camera.fov, aspect, camera.near, far.max(camera.near * 2.0)))
+    M4::look_at(camera.eye, camera.at, crate::world::view_up(camera.eye, camera.at)).mul(M4::perspective(camera.fov, aspect, camera.near, far.max(camera.near * 2.0)))
 }
 
 /// [`view_projection`] as the GPU draws it: depth reversed, 1 at the near plane and 0 at the far one.

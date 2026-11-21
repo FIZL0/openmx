@@ -280,6 +280,7 @@ mod worlds;
 mod world_dress;
 mod paint_stream;
 mod phy_editor;
+mod photo;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -3556,6 +3557,9 @@ struct Args {
     /// its bind pose (V8) — so a shot meant to show the ride, or the overlay with anything in it,
     /// has to be taken a little later.
     shot_frame: u32,
+    /// `--photo-at` (P385): the frame photo mode takes a picture on, as its Cross would, for a run
+    /// nobody is pressing anything in (`--menu --screen photo`).
+    photo_at: Option<u32>,
     /// `--shot-pose` (MD10): the first view drawn from this pose, not the ride camera, all the run.
     shot_pose: Option<shot_pose::Pose>,
     /// `--shot-pose` given again (P142): the second view's pose, then the third's, and so on.
@@ -4587,9 +4591,9 @@ async fn front_end(args: Args) -> Result<(), String> {
     let (width, height) = frame_size(shell.window.as_ref().expect("the front end has a window"));
     let mut frame = Frame::new(width, height, [0, 0, 0]);
     // A pause asked for by `--screen` is over a ride, so it starts one on the last track; so are its
-    // Tricks page (P259) and its Garage (P341).
+    // Tricks page (P259), its Garage (P341) and its photo mode (P385).
     let mut act = match shell.front.menu.screen() {
-        Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage) => Act::Ride(shell.front.menu.settings.track.clone()),
+        Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage | menu::Screen::Photo) => Act::Ride(shell.front.menu.settings.track.clone()),
         _ => Act::Stay,
     };
     let mut shot = args.shot.clone();
@@ -4669,7 +4673,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 }
                 a.wiring = shell.front.wiring();
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
-                a.shot = shot.take_if(|_| matches!(shell.front.menu.screen(), Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage)));
+                a.shot = shot.take_if(|_| matches!(shell.front.menu.screen(), Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage | menu::Screen::Photo)));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 // A local game (P43): one player a seat its join screen has in play, each on that seat's
                 // controller, drawn in the split layout it picked.
@@ -7439,6 +7443,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut trick_stage: Option<Option<trick_view::TrickView>> = None;
     // Each seat's pad as the pause last read it, whose right stick turns the page's camera (P319).
     let mut trick_sticks: Vec<Report> = Vec::new();
+    // Photo mode (P385): its free camera while it is up, when it was last flown, and the picture its
+    // Cross asked for, written from this frame.
+    let (mut photo_cam, mut photo_at, mut photo_shot) = (None::<photo::Photo>, None::<Instant>, None::<std::path::PathBuf>);
+    game_render::world::set_view_roll(0.0);
     // The pause Garage's lit flier, turning in its picture (P326), and since when it has turned.
     let (mut pause_flier, mut pause_flier_since) = (garage_view::PauseFlier::default(), None::<Instant>);
     // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
@@ -10667,6 +10675,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 seat.paused = front.menu.paused(i);
                 seat.riding = !seat.paused;
             }
+            // Photo mode (P385): the ride stays frozen, but its bike is drawn whole rather than as
+            // the pause's see-through one; and its Cross (or `--photo-at`) asks for a picture.
+            if front.menu.photo() {
+                world.seats[0].paused = false;
+                if args.photo_at == Some(engine.frame) {
+                    front.menu.ask_photo();
+                }
+                if front.menu.take_photo() {
+                    photo_shot = Some(photo::next_path(&markers_dir.join("photos")));
+                }
+            }
         }
         stages.mark(stages::Stage::Menu);
 
@@ -12478,6 +12497,30 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         for ((pose, at), camera) in args.more_poses.iter().zip(rects.iter().skip(1)).zip(cameras.iter_mut().skip(1)) {
             *camera = pose.camera(at.w, at.h, NEAR_CLIP, camera.far);
         }
+        // Photo mode (P385): the first view through its free camera, started where the frozen ride's
+        // was and flown off 1P's pad as it is, its roll the renderer's. Presentation only: nothing
+        // the ride steps reads it.
+        let photo_on = front.as_deref().is_some_and(|f| f.menu.photo());
+        match (photo_on, rects.first(), cameras.first_mut()) {
+            (true, Some(at), Some(camera)) => {
+                let now = Instant::now();
+                let dt = photo_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+                photo_at = Some(now);
+                let pivot = [camera.at.x, camera.at.y, camera.at.z];
+                let p = photo_cam.get_or_insert_with(|| {
+                    println!("photo mode: the ride frozen at sim tick {}", world.seats[0].sim.ticks);
+                    photo::Photo::from_camera(camera, at.w, at.h, pivot)
+                });
+                p.step(trick_sticks.first().map_or_else(photo::Sticks::default, photo::Sticks::of), dt);
+                *camera = p.camera(at.w, at.h, NEAR_CLIP, camera.far);
+                game_render::world::set_view_roll(p.roll_radians());
+            }
+            _ if photo_cam.take().is_some() => {
+                photo_at = None;
+                game_render::world::set_view_roll(0.0);
+            }
+            _ => {}
+        }
         // A world's sky and light (MD9): under Per Map the tile each view's camera is over sets its
         // own (P142), mixed across a join and its sky the larger share's; under Global the whole
         // world's sky and fog for every view, but the sun and ambient still the map's below (V116).
@@ -12692,7 +12735,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 // The ride HUD (P121), with its own marker menu, trick pop-up and info text, unless
                 // `none` was asked for.
-                if overlay_mode == menu::Overlay::Hud {
+                if overlay_mode == menu::Overlay::Hud && !photo_on {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
@@ -12705,11 +12748,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // The Show FPS counter (2026-10-29), once over the whole frame, under the pause.
-            if show_fps {
+            if show_fps && !photo_on {
                 let whole = [0.0, 0.0, frame.width as f32, frame.height as f32];
                 ride_hud::fps_sprites(&mut gpu_sprites, hud_base, whole, f32::from(hud_scale) / 100.0, &fps_meter.text());
             }
-            if let Some(front) = front.as_deref_mut() {
+            // Not over photo mode's picture (P385): the frame it is written from is the view alone.
+            if let Some(front) = front.as_deref_mut().filter(|_| photo_shot.is_none()) {
                 // As sprites (V30), after the HUDs' and so over them; the patches go under both. Over a
                 // split each player's own pause in their own view (P84), the whole frame's otherwise.
                 let (art, menu) = (&front.art, &mut front.menu);
@@ -13053,7 +13097,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             sprites.extend(mxvatv_car_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
-            let shooting = shot.is_some() && engine.frame >= args.shot_frame;
+            let shooting = shot.is_some() && engine.frame >= args.shot_frame || photo_shot.is_some();
             // The ride's first picture drawn once offscreen before it is shown (P150), while the
             // window still shows the loading screen: the first view's ground index lists, the
             // pipelines and the first uploads were tick 1's frame (MD28: 26 ms on world_mxu). The
@@ -13598,7 +13642,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The page's black (S85), over the world and under the HUD, as the GPU lays it.
             shade_view(target, seat.shade.alpha());
             // The ride HUD (P121), unless `none` was asked for.
-            if overlay_mode == menu::Overlay::Hud {
+            if overlay_mode == menu::Overlay::Hud && !photo_on {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
                 let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref(), race_laps };
@@ -13622,11 +13666,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             stages.mark(stages::Stage::Hud);
         }
         // The Show FPS counter (2026-10-29) on the software path, over every view and under the pause.
-        if show_fps && !gpu_on {
+        if show_fps && !gpu_on && !photo_on {
             ride_hud::fps_draw(&mut frame, f32::from(hud_scale) / 100.0, &fps_meter.text());
         }
         fps_meter.frame(Instant::now());
-        if let Some(front) = front.as_ref().filter(|_| !gpu_on && view_frames.is_empty()) {
+        if let Some(front) = front.as_ref().filter(|_| !gpu_on && view_frames.is_empty() && photo_shot.is_none()) {
             perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
         }
         // The Tricks page's rider over the software pause (P259), each view's already put in the frame.
@@ -13656,6 +13700,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             png::write_rgb(&path, frame.width, frame.height, &frame.color)?;
             println!("wrote {}", path.display());
+        }
+        // Photo mode's picture (P385), the frame's full size; a failed write is said, not fatal.
+        if let Some(path) = photo_shot.take() {
+            let wrote = path.parent().map_or(Ok(()), std::fs::create_dir_all).map_err(|e| e.to_string()).and_then(|()| png::write_rgb(&path, frame.width, frame.height, &frame.color));
+            let said = match wrote {
+                Ok(()) => format!("Photo saved: {}", path.display()),
+                Err(e) => format!("Photo not saved: {e}"),
+            };
+            println!("photo: {said} ({}x{}, sim tick {})", frame.width, frame.height, world.seats[0].sim.ticks);
+            if let Some(front) = front.as_deref_mut() {
+                front.menu.note = Some(said);
+            }
         }
 
         // A line a second, so a run that is not being watched still says what it did.
@@ -17338,6 +17394,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         pad: None,
         shot: None,
         shot_frame: 0,
+        photo_at: None,
         shot_pose: None,
         more_poses: Vec::new(),
         overview: false,
@@ -17573,6 +17630,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.shot_frame = next("which frame to write")?
                     .parse()
                     .map_err(|_| "--shot-frame: not a frame number")?;
+            }
+            "--photo-at" => {
+                args.photo_at = Some(next("which frame photo mode takes a picture on")?.parse().map_err(|_| "--photo-at: not a frame number")?);
             }
             "--overview" => args.overview = true,
             "--shot-pose" => {
@@ -18028,7 +18088,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT] [--fp-adjust BOB,UP,FORWARD,FOV]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
-                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
+                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--photo-at N] [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-fine LOAD,DROP|off] [--world-lean] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\

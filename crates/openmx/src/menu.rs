@@ -2855,10 +2855,13 @@ pub enum Screen {
     /// P387's physics editor, a page of the Ride tab's: the ridden bike's `.phy` as knobs, saved as
     /// a handling mod.
     Physics,
+    /// P385's photo mode, off the pause: the ride frozen under a free camera, the HUD hidden, Cross
+    /// writing the view as a picture ([`crate::photo`]).
+    Photo,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 29] = [
+    pub const ALL: [Screen; 30] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2888,6 +2891,7 @@ impl Screen {
         Screen::Shop,
         Screen::Stats,
         Screen::Physics,
+        Screen::Photo,
     ];
 
     fn index(self) -> usize {
@@ -2926,6 +2930,7 @@ impl Screen {
             Screen::Shop => "shop",
             Screen::Stats => "stats",
             Screen::Physics => "physics",
+            Screen::Photo => "photo",
         }
     }
 
@@ -2964,6 +2969,7 @@ impl Screen {
             Screen::Shop => "Unlock Shop",
             Screen::Stats => "Statistics",
             Screen::Physics => "Physics Editor",
+            Screen::Photo => "Photo Mode",
         }
     }
 }
@@ -3085,7 +3091,12 @@ enum PauseRow {
     Seats,
     /// "Leave Session" (N11, P76).
     Leave,
+    /// "Photo Mode" (P385), over Tricks, which keeps its place counted up from Quit: on every ride
+    /// but an online session's ([`Menu::photo_offered`]).
+    Photo,
 }
+/// The pause's "Photo Mode" row (P385).
+const PAUSE_PHOTO_ROW: &str = "Photo Mode";
 /// The pause's "Leave Session" row (N11), on an online ride ([`Menu::session`]): under the online
 /// rows when there are any, above Main Menu. The pausing player's seats go and the ride goes on for
 /// the rest. On a local ride whose seats are open ([`Menu::seats_open`], P76) the pausing player
@@ -3480,6 +3491,11 @@ pub struct Menu {
     pub race: race::RaceMenu,
     /// P363: whether the statistics page gives distances in kilometres (miles otherwise).
     pub stats_metric: bool,
+    /// P385: photo mode's Cross, a picture asked for and not yet taken by the shell
+    /// ([`Menu::take_photo`]).
+    photo_asked: bool,
+    /// P385: photo mode's Triangle, its hints hidden so the view is all there is to see.
+    pub photo_bare: bool,
     /// The ride under the menu, as the shell tells it (P41): how many players ride, the machine each
     /// one is on now, and which of them have a machine to switch to.
     pub riders: usize,
@@ -3879,6 +3895,8 @@ impl Menu {
             free_riders: 1,
             race: race::RaceMenu::default(),
             stats_metric: false,
+            photo_asked: false,
+            photo_bare: false,
             music_choices: Vec::new(),
             music_games: Vec::new(),
             mod_preset: 0,
@@ -4835,10 +4853,15 @@ impl Menu {
         }
     }
 
-    /// The pause's rows in order (P211): [`PAUSE`]'s up to Game Modifiers, then the online row, its
+    /// The pause's rows in order (P211): [`PAUSE`]'s up to Game Modifiers, Photo Mode (P385) and
+    /// Tricks, then the online row, its
     /// Seats once opened and Leave Session, then Main Menu and Quit, always the last two.
     fn pause_layout(&self) -> Vec<PauseRow> {
-        let mut rows: Vec<PauseRow> = (0..PAUSE_MAIN).map(PauseRow::Fixed).collect();
+        let mut rows: Vec<PauseRow> = (0..PAUSE_TRICKS).map(PauseRow::Fixed).collect();
+        if self.photo_offered() {
+            rows.push(PauseRow::Photo);
+        }
+        rows.extend((PAUSE_TRICKS..PAUSE_MAIN).map(PauseRow::Fixed));
         if self.opening != Opening::No {
             rows.push(PauseRow::Online);
         }
@@ -4865,8 +4888,44 @@ impl Menu {
                 },
                 PauseRow::Seats => format!("Seats: {}", self.pause_seats()),
                 PauseRow::Leave => PAUSE_LEAVE_ROW.into(),
+                PauseRow::Photo => PAUSE_PHOTO_ROW.into(),
             })
             .collect()
+    }
+
+    /// Whether the pause has photo mode's row (P385): any ride but an online session's. Players
+    /// dropping in and leaving move no row; it opens on a ride of one rider only
+    /// ([`Menu::open_photo`]).
+    fn photo_offered(&self) -> bool {
+        !self.session
+    }
+
+    /// Photo mode, over the pause: on a ride of one rider, as its free camera takes the whole
+    /// picture and the whole pad.
+    fn open_photo(&mut self) {
+        if self.riders > 1 {
+            self.note = Some("Photo mode is for a ride of one rider.".into());
+            return;
+        }
+        self.photo_asked = false;
+        self.push(Screen::Photo);
+    }
+
+    /// Whether photo mode is up: the ride frozen under its free camera, the HUD hidden (P385).
+    pub fn photo(&self) -> bool {
+        self.screen() == Some(Screen::Photo)
+    }
+
+    /// Photo mode's Cross, once: whether a picture was asked for since the last call.
+    pub fn take_photo(&mut self) -> bool {
+        std::mem::take(&mut self.photo_asked)
+    }
+
+    /// Asks photo mode for a picture, as its Cross does: `--photo-at`'s way in for a test.
+    pub fn ask_photo(&mut self) {
+        if self.photo() {
+            self.photo_asked = true;
+        }
     }
 
     /// Player `i`'s pad seat in the ride under the menu: a local game's, or a Free Ride's own seat.
@@ -5019,6 +5078,10 @@ impl Menu {
                 self.open_settings(pages::TAB_RIDE);
                 self.open_physics();
             }
+            Screen::Photo => {
+                self.pause();
+                self.open_photo();
+            }
             Screen::Keyboard => {
                 self.main();
                 self.open_garage();
@@ -5071,7 +5134,7 @@ impl Menu {
 
     fn rows(&self, screen: Screen) -> usize {
         match screen {
-            Screen::Splash => 1,
+            Screen::Splash | Screen::Photo => 1,
             Screen::Main => main_rows().len(),
             Screen::Tracks => self.track_count(),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics => self.page_of(screen).len().max(1),
@@ -5491,6 +5554,7 @@ impl Menu {
                         Some(PauseRow::Fixed(PAUSE_CONTROLLERS)) => self.note = Some("1P's pause has the Controllers screen.".into()),
                         Some(PauseRow::Fixed(PAUSE_MODIFIERS)) => self.open_modifiers(),
                         Some(PauseRow::Fixed(PAUSE_TRICKS)) => self.open_tricks(),
+                        Some(PauseRow::Photo) => self.open_photo(),
                         // Leaving asks first, on Stay (P110).
                         Some(PauseRow::Fixed(PAUSE_MAIN)) => self.leaving = Some((Leaving::Main, 1)),
                         Some(PauseRow::Online) if self.opening == Opening::Can => {
@@ -5509,6 +5573,17 @@ impl Menu {
             }
             Screen::Tricks if p.back => self.pop(),
             Screen::Tricks => {}
+            // Photo mode (P385): the pad flies the camera (the shell reads it), so only these are
+            // the menu's. Triangle, Back too, hides the hints and goes first; Circle is the pause
+            // again, Start the ride.
+            Screen::Photo if p.triangle => self.photo_bare = !self.photo_bare,
+            Screen::Photo if p.start => {
+                self.stack.clear();
+                return Act::Resume;
+            }
+            Screen::Photo if p.back => self.pop(),
+            Screen::Photo if p.ok => self.photo_asked = true,
+            Screen::Photo => {}
             // Settings' tabs now; never on the stack.
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => self.pop(),
             Screen::Online => self.online(p, at),

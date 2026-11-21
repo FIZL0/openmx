@@ -1702,6 +1702,7 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         "Controllers" => "Which pad, keyboard or touch pad drives which seat. The riders swap when their pads do.",
         "Main Menu" => "Ends the ride.",
         "Tricks" => "Every trick this ride has, how to do it and what it scores, each shown done.",
+        "Photo Mode" => "Freezes the ride under a free camera. Fly it, hide the HUD and take a full-size picture.",
         "Leave Session" => "Gives up your seat: your bike goes and the others ride on. The last one out ends the ride.",
         QUIT if cfg!(target_arch = "wasm32") => "Ends the ride and goes back to the launcher page.",
         QUIT => "Ends the ride and closes the game.",
@@ -1834,7 +1835,7 @@ impl Pen<'_> {
                 let whole = self.whole();
                 self.fill(whole, PAUSE_DIM);
             }
-            Screen::Splash => {}
+            Screen::Splash | Screen::Photo => {}
             _ => self.backdrop(),
         }
         match screen {
@@ -1842,6 +1843,9 @@ impl Pen<'_> {
             Screen::Pause => self.pause(menu),
             Screen::PauseGarage => self.pause_garage(menu),
             Screen::Tricks => self.tricks(menu),
+            // Photo mode with its hints hidden (P385) is the view and nothing else, ticker and all.
+            Screen::Photo if menu.photo_bare => return,
+            Screen::Photo => self.photo(),
             Screen::Online => self.online(menu),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::Physics => self.page(menu, screen),
             Screen::Tracks => self.tracks(menu),
@@ -2054,6 +2058,28 @@ impl Pen<'_> {
     /// The pause's Tricks page (P259): the ride's tricks down the left, each its name, its gesture
     /// in pad glyphs and its points, scrolled so the lit one shows; right of them the lit trick's
     /// box, which the shell draws it performed in ([`Menu::trick_stage`]), and under it its words.
+    /// Photo mode's page (P385): no backdrop, the frozen ride under a small card of the free
+    /// camera's controls ([`crate::photo`]) and the buttons the menu keeps.
+    fn photo(&mut self) {
+        const LINES: [&str; 7] = [
+            "Left stick: move",
+            "Right stick: look",
+            "L1 + right stick: orbit",
+            "L2 / R2: down / up",
+            "Left / Right: roll",
+            "Up / Down: zoom",
+            "R1: faster   Square: reset",
+        ];
+        let (x, top, w, row_h) = (2.5, 2.5, 24.0, 1.6);
+        self.round([x, top, w, 2.6 + row_h * LINES.len() as f32], 0.9, GLASS, GLASS);
+        self.text(Weight::Bold, "PHOTO MODE", x + 1.2, top + 1.0 + CAP, 0.9, 0.0, HEADING, Align::Left);
+        for (i, line) in LINES.iter().enumerate() {
+            let y = top + 2.2 + row_h * i as f32;
+            self.text(Weight::Bold, line, x + 1.2, Pen::mid(y + row_h / 2.0, 1.0), 1.0, 0.0, BONE, Align::Left);
+        }
+        self.hints(&[(Btn::Cross, "Take Photo"), (Btn::Triangle, "Hide Hints"), (Btn::Circle, "Back"), (Btn::Start, "Resume")]);
+    }
+
     fn tricks(&mut self, menu: &Menu) {
         use super::trick_list::{Glyph, how_words, is_button};
         let rows = &menu.trick_rows;

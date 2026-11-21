@@ -313,9 +313,10 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     // their own on the stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those. Results
     // is the shell's after a race is left (P327), `race_from_the_main_menu_rides_its_setup_and_shows_results`'s.
     // Physics opens only once its switch is on (P387), `the_physics_editor_is_off_by_default_and_asks_the_shell`'s.
+    // Photo mode is a row deeper in the pause than this walk's seven taps (P385), `the_pause_opens_photo_mode`'s.
     let wanted: Vec<Screen> = Screen::ALL
         .into_iter()
-        .filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics | Screen::Results | Screen::Physics))
+        .filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics | Screen::Results | Screen::Physics | Screen::Photo))
         .collect();
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
@@ -388,8 +389,8 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    // under Game Modifiers since P134, Controllers since P210 and Tricks since P259
-    for _ in 0..7 {
+    // under Game Modifiers since P134, Controllers since P210, Tricks since P259 and Photo Mode since P385
+    for _ in 0..8 {
         tap(&mut m, &mut r, Control::Down);
     }
     // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
@@ -434,6 +435,63 @@ fn the_pause_lists_the_tricks() {
     let acts = tap(&mut m, &mut r, Control::Start);
     assert!(acts.contains(&Act::Resume), "{acts:?}");
     assert!(m.riding());
+}
+
+/// The pause's Photo Mode (P385): its row, over Tricks, opens photo mode over the frozen ride;
+/// Cross asks the shell for one picture, Triangle hides the hints and shows them again, Circle is the
+/// pause again on the row it left and Start the ride. Only a ride of one rider opens it, and an
+/// online session has no such row.
+#[test]
+fn the_pause_opens_photo_mode() {
+    let (mut m, mut r) = fresh();
+    m.pause();
+    let rows = m.pause_rows();
+    let photo = rows.iter().position(|row| row == "Photo Mode").expect("a Photo Mode row");
+    assert_eq!(rows[photo + 1], "Tricks");
+    for _ in 0..photo {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Photo));
+    assert!(m.photo() && m.paused(0), "the ride stays frozen");
+    assert!(!m.take_photo(), "no picture until Cross");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_photo());
+    assert!(!m.take_photo(), "one picture a press");
+    // The free camera's buttons are the shell's, not the menu's.
+    for c in [Control::Up, Control::Left, Control::L1, Control::R1, Control::Square] {
+        tap(&mut m, &mut r, c);
+        assert_eq!(m.screen(), Some(Screen::Photo), "{}", c.name());
+    }
+    tap(&mut m, &mut r, Control::Triangle);
+    assert!(m.photo_bare && m.photo());
+    tap(&mut m, &mut r, Control::Triangle);
+    assert!(!m.photo_bare);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.cursor(Screen::Pause), photo);
+    tap(&mut m, &mut r, Control::Cross);
+    let acts = tap(&mut m, &mut r, Control::Start);
+    assert!(acts.contains(&Act::Resume), "{acts:?}");
+    assert!(m.riding());
+    // Not online; with a second rider the row stays, so none moves, but says why it does not open.
+    let (mut m, _) = fresh();
+    m.session = true;
+    m.pause();
+    assert!(!m.pause_rows().iter().any(|row| row == "Photo Mode"), "{:?}", m.pause_rows());
+    let (mut m, mut r) = fresh();
+    m.riders = 2;
+    m.pause();
+    for _ in 0..photo {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert!(m.note.as_deref().is_some_and(|n| n.contains("one rider")), "{:?}", m.note);
+    // `--screen photo` is photo mode over the pause.
+    let (mut m, _) = fresh();
+    m.open(Screen::Photo);
+    assert!(m.photo());
 }
 
 /// Over a split the Tricks page is the pauser's (P259): 2P's opens in 2P's view and hears 2P's pad
@@ -1683,6 +1741,16 @@ fn every_screen_draws_from_the_disc() {
             let mut frame = game_render::Frame::new(320, 224, RIDE);
             art.draw(&m, &mut frame);
             let drawn = frame.color.chunks(3).filter(|p| *p != RIDE).count();
+            // Photo mode (P385) is the ride with a card of its controls and its hints over it, no
+            // dimming: drawn on, but the ride mostly left as it is.
+            if s == Screen::Photo {
+                assert!(drawn > 0 && drawn < frame.width * frame.height / 2, "{s:?} drew over {drawn} pixels");
+                m.photo_bare = true;
+                let mut bare = game_render::Frame::new(320, 224, RIDE);
+                art.draw(&m, &mut bare);
+                assert!(bare.color.chunks(3).all(|p| p == RIDE), "photo mode with its hints hidden drew on the ride");
+                continue;
+            }
             assert!(drawn > frame.width * frame.height * 9 / 10, "{s:?} tab {tab} drew over {drawn} pixels");
             m.step(Press { r1: true, ..Press::default() });
         }
@@ -5972,7 +6040,8 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     let rows = m.pause_rows();
     assert_eq!(rows[0..2], ["Resume", "Restart"]);
     assert_eq!(rows[2], "Garage");
-    assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Tricks", "Open to Online", "Main Menu", "Quit"]);
+    // Photo Mode over Tricks since P385.
+    assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Photo Mode", "Tricks", "Open to Online", "Main Menu", "Quit"]);
     // The cursor walks exactly those rows: Up from Resume is Quit.
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.cursor(Screen::Pause), rows.len() - 1);
@@ -5980,7 +6049,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     // Opened, Seats sits under the online row, and Main Menu and Quit stay last.
     m.opening = menu::Opening::Open;
     let rows = m.pause_rows();
-    assert_eq!(rows[7..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
+    assert_eq!(rows[8..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
     // Main Menu from its new place still asks first, and Quit under it too.
     tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
     tap(&mut m, &mut r, Control::Cross);

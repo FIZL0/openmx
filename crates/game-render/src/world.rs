@@ -577,9 +577,39 @@ impl Camera {
     /// World to clip, for a frame of the given shape.
     pub fn view_projection(&self, width: usize, height: usize) -> M4 {
         let aspect = width as f32 / height as f32;
-        M4::look_at(self.eye, self.at, v3(0.0, 1.0, 0.0))
+        M4::look_at(self.eye, self.at, view_up(self.eye, self.at))
             .mul(M4::perspective(self.fov, aspect, self.near, self.far))
     }
+}
+
+/// The roll every view is drawn with, in radians, as `f32` bits: 0 but under the shell's photo mode
+/// (P385), whose free camera tilts the horizon. One for the whole picture, as photo mode is only
+/// offered with one view.
+static VIEW_ROLL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the roll every view is drawn with ([`view_up`]); 0 puts the world's up back.
+pub fn set_view_roll(radians: f32) {
+    VIEW_ROLL.store(radians.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The roll every view is drawn with, in radians.
+pub fn view_roll() -> f32 {
+    f32::from_bits(VIEW_ROLL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The up a camera at `eye` looking at `at` is drawn with: the world's, turned about the line of
+/// sight by [`view_roll`]. With no roll it is the world's up exactly, so every view is as it was.
+pub fn view_up(eye: V3, at: V3) -> V3 {
+    let roll = view_roll();
+    let up = v3(0.0, 1.0, 0.0);
+    if roll == 0.0 {
+        return up;
+    }
+    let z = at.sub(eye).norm();
+    let x = up.cross(z).norm();
+    let y = z.cross(x);
+    let (s, c) = roll.sin_cos();
+    y.scale(c).add(x.scale(s))
 }
 
 /// The disc's field of view — horizontal, in degrees — as the vertical one in radians that [`Camera`]
