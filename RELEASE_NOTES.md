@@ -1,13 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- Photo mode from the pause menu: freeze the ride, fly a free camera (move, orbit, roll, zoom) and save a full-size picture with no HUD
-- Auto Photos (Settings → Display): pictures taken by themselves at a wreck, a landed trick and the race results screen
-- First-person camera, the disc's own, with the rider's head roll on screen; sliders for head bob, eye height, eye distance and FOV on the Camera page
-- Camera sliders for each camera preset: Angle, Look Lag and Follow Lag
-- Dual-stick leaning (Controls tab, per player): left stick steers, right stick leans, R3 looks back
-- Physics editor (Settings → Ride, off by default): 25 handling knobs for your bike, saved as a handling mod you can also ride online when every rider holds it
-- The parked machines now stay put in play: bikes strike and push the parked cars, the plane and the helicopter, in split screen too
-- AI riders steer round every local player's bike in split screen
-- Races: the outro plays at the finish, the crowd cheers and boos as places change, and each race lays out a fresh grid
-- AI riders' and your rider's grid animations play as the original's in races
-- The Untamed quad's exhaust smoke comes off its exhaust
-- Smoother frames on the desktop and Android
