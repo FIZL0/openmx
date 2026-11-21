@@ -111,8 +111,8 @@ fn the_parked_fliers_hulls_stand_at_their_bodies() {
 /// **free07's parked baja rolls off its spot and is still awake 1711 frames in.** The original
 /// stores it at `[Machine1]` (3899.637, 141.32 = the ground plus the bounds' lift, 2438.25), it
 /// rolls down the hill along +x (frame 303: 3916.3, 1.27 ft/s; frame 1711: 3941.3, 0.08 ft/s), and
-/// its body never sleeps; the port's settle ([`game_sim::car::Parked::settled`]) puts it to sleep at
-/// 3919.8.
+/// its body never sleeps. B47: the port's matches it from its spawn on (car_spawn.rs's
+/// `free07s_parked_baja_rolls_on_as_the_original`); its settle leaves it awake.
 #[test]
 fn free07s_parked_baja_rolls_on_past_the_ports_rest() {
     let Some(kit) = Kit::load().map_err(|w| skip(&w)).ok() else { return };

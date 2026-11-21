@@ -50,6 +50,13 @@
 - Frame 1711: x 3941.29, vx 0.08 ft/s. **Still awake**, 42 ft from its spot.
 - The port's settle (`car::Parked::settled`, 400 frames) puts it to sleep at 3919.8.
   So the port stops it about 21 ft short.
+  - B47: wrong reading. 3919.8 is the hull's node after the load settle; the body stayed awake and
+    rolled on in play. The real gaps: the port settled 400 frames (the original's load steps ~90:
+    the images match the original's put-back roll on frames 391 and 1809, 88 and 98 after their
+    saves), and it spawned the car upright, where the original's spawn up (car +0x290) is the
+    ground's normal under the spot (30 degrees here; the store's up at wrapper +0xb0 is it squared to
+    the nose). Now `car::parked_up` and `SETTLE_FRAMES` 90; the port's settle lands 0.002 ft from
+    the original's frame 90 (`tests/car_spawn.rs` `free07s_parked_baja_rolls_on_as_the_original`).
 - S149a's free07 image (`s149a-free07.ee.bin`, used by tests/car_spawn.rs) is no longer in context.
   The new images have the baja at the same machine address (0x00605270).
 
