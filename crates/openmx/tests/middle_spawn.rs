@@ -117,13 +117,16 @@ fn a_wrapped_world_rides_from_its_middle_tile() {
 }
 
 /// openmx-mods' wrapped worlds as installed: each starts on its middle tile (world_mxu on
-/// mxu_free07 since P253 put the freerides in its middle), and its ride's first tick stands by that start.
+/// mxu_free07 since P253 put the freerides in its middle, built off the disc when no old stitch
+/// is installed; world_mxu_free and world_ultra as restitched after MD50), and its ride's first
+/// tick stands by that start.
 #[test]
-#[ignore = "needs openmx-mods' stitched worlds in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods), and the disc; release build"]
+#[ignore = "needs openmx-mods' stitched worlds in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods; world_mxu builds off the disc), and the disc; release build"]
 fn the_installed_wrapped_worlds_start_on_their_middle_tile() {
     let mods = std::env::var_os("OPENMX_WORLDS").map(PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join("repos/openmx/mods"));
-    for (id, middle) in [("world_mxu_free", "mxu_free10"), ("world_mxu", "mxu_free07"), ("world_ultra", "mxvatv_nat06")] {
-        if !mods.join("tracks").join(id).is_dir() {
+    for (id, middle) in [("world_mxu_free", "mxu_free07"), ("world_mxu", "mxu_free07"), ("world_ultra", "mxvatv_nat14")] {
+        // world_mxu is a disc world: without an installed stitch the shell builds it off the disc.
+        if id != "world_mxu" && !mods.join("tracks").join(id).is_dir() {
             eprintln!("{id}: not installed");
             continue;
         }
@@ -132,7 +135,7 @@ fn the_installed_wrapped_worlds_start_on_their_middle_tile() {
         println!("{id}: {} — starts on {tile} at {},{}", line(&said, "world: "), at[0], at[1]);
         assert_eq!(tile, middle, "{id}");
         let (_, x, z, _) = ticks(&said)[0];
-        // A national lines the bike up on its gate beside the scene's start (22 feet on mxu_nat17).
+        // A national lines the bike up on its gate beside the scene's start (on world_ultra's mxvatv_nat14).
         assert!((x - at[0]).hypot(z - at[1]) < 50.0, "{id}: the first tick at {x},{z}, not by the start {at:?}");
     }
 }
