@@ -2954,12 +2954,17 @@ impl<P: sim_world::World> World<P> {
 
     /// S494b: the parked planes out of the seats for a pass of several, as [`World::parked_out`] the
     /// cars: seat 0's, which every seat holds between passes; `None` when that one does not share them.
+    /// The others' are dropped either way: while any seat has AI riders, seat 0's Sim steps its own
+    /// copy, which its AI riders' bikes meet, and a copy in each seat would drift apart.
     fn planes_out(&mut self) -> Option<Vec<game_sim::flight::Flight>> {
-        if self.seats.len() < 2 || self.seats[0].sim.parked_planes.is_empty() || self.seats.iter().any(|s| !s.sim.others.is_empty()) {
+        if self.seats.len() < 2 {
             return None;
         }
         for s in &mut self.seats[1..] {
             s.sim.parked_planes.clear();
+        }
+        if self.seats[0].sim.parked_planes.is_empty() || self.seats.iter().any(|s| !s.sim.others.is_empty()) {
+            return None;
         }
         Some(std::mem::take(&mut self.seats[0].sim.parked_planes))
     }

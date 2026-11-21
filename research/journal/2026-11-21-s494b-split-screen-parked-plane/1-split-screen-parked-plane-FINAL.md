@@ -1,4 +1,4 @@
-# 1 — split screen parked plane (PART)
+# 1 — split screen parked plane (FINAL)
 
 Task S494b. 2026-11-21.
 
@@ -36,12 +36,15 @@ research/s494/index.md, for a lone rider). Split screen has one level node, so o
 
 - Against the original in split screen: no split-screen capture of a bike striking free10's plane.
   The proof is only "seat 1 matches a lone seat", and the lone seat is S494's port.
-- Split screen with AI riders: each seat's Sim still steps its own plane copy (as F72's cars do in
-  that case), so two copies can drift apart there. Not fixed; same limit as the cars.
+- Split screen with AI riders: the plane is not shared. Only seat 0's Sim holds a copy (its own
+  step meets it with its players' bikes); the other seats' copies are dropped each pass so no two
+  copies drift apart, so the other seats' bikes do not meet the plane there. No test covers this case.
+- Two seats' bikes striking the plane in the same pass: not tested; the pushes land in pass order
+  (last seat first), as for the cars.
 - A downed rider's wreck bike does not meet the plane, in split screen or alone (S494 never added
   that for the lone Sim either).
 - The helicopter in split screen is unchanged (still the AI riders' hull only); filed as S494c.
 
 ## Next
 
--
+- S494c: the helicopter in split screen, the same way.
