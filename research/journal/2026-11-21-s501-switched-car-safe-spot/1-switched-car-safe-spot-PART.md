@@ -13,7 +13,8 @@ Task S501. 2026-11-21.
   driven, back in it with the store). `Garage::drive_met` calls it twice after the car up steps
   (the car post, the score manager), from the car's node origin and its third row.
   `InPlay::stores` / `InPlay::settled_from` and `main.rs` `restart_stores` carry each car's store
-  across the pause menu's Restart (`Front::stores` → `Args::stores`).
+  across the pause menu's Restart (`Front::stores` → `Args::stores`), each car taking the store of
+  its own place among the cars of its kind. A race's cars (`InPlay::racing`) do not record.
 - Glossary: "Safe spot".
 - Tests: `game-sim/tests/car_spawn.rs` `a_switched_car_records_its_safe_spot_as_the_original`;
   `openmx` `in_play_tests::a_driven_truck_records_where_a_restart_puts_it`.
@@ -60,6 +61,8 @@ Task S501. 2026-11-21.
 - **Card flag 0x800000 and the activity branches not ported**: they use the passed spot instead of
   probing. Free ride's card has the flag clear, and a car with an activity is a machine racer, never
   the human's here.
+- **Races do not record in the port**: a car driven in a race (`--race` / a race set up) would take
+  the activity branch in the original; the port records nothing there instead of guessing it.
 - **The 1-probe clearance** (activity type 2 with card +0x40 set, radius 5) is not ported, for the
   same reason.
 - **Switch-out from code and one image**: machine_swap read, C34's spare slot = 0; no image after a

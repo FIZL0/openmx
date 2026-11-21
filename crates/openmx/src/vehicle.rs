@@ -3156,6 +3156,9 @@ pub struct InPlay {
     /// whether this seat's driving has recorded into its store this ride.
     caches: Vec<Option<Box<game_sim::back_search::Cache>>>,
     recorded: Vec<bool>,
+    /// A race (S501): its cars do not record. The original's car in a race holds an activity and
+    /// takes the recorder's other branch, which is not ported.
+    pub racing: bool,
 }
 
 impl InPlay {
@@ -3191,6 +3194,8 @@ impl InPlay {
         spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
         tables: &game_sim::ride::Tables, restarts: usize, carried: &[(Kind, game_sim::car::Store)],
     ) -> InPlay {
+        // Each car takes the carried store of its own place among the cars of its kind.
+        let mut seen: Vec<Kind> = Vec::new();
         let parked = spots
             .iter()
             .filter(|(slot, ..)| !flying.get(*slot).copied().unwrap_or(false))
@@ -3202,7 +3207,9 @@ impl InPlay {
                     return None;
                 };
                 let car = std::sync::Arc::new(c.car);
-                let store = carried.iter().find(|(k, _)| *k == kind).map(|(_, s)| *s);
+                let nth = seen.iter().filter(|k| **k == kind).count();
+                seen.push(kind);
+                let store = carried.iter().filter(|(k, _)| *k == kind).nth(nth).map(|(_, s)| *s);
                 let p = game_sim::car::Parked::settled_from(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve, restarts, store);
                 Some((kind, p))
             })
@@ -3252,6 +3259,7 @@ impl InPlay {
             parked: std::sync::Arc::clone(&self.parked),
             fliers: std::sync::Arc::clone(&self.fliers),
             helis: std::sync::Arc::clone(&self.helis),
+            racing: self.racing,
             ..InPlay::default()
         }
     }
@@ -3264,7 +3272,7 @@ impl InPlay {
     /// so a car left rolling records no more. `true` when it stored; a kind not parked here stores
     /// nothing.
     pub fn record(&mut self, kind: Kind, place: Vf, nose: Vf, world: &mut dyn World, curve: &game_sim::camera::CurveTable) -> bool {
-        let Some(k) = self.parked.iter().position(|(c, _)| *c == kind) else { return false };
+        let Some(k) = self.parked.iter().position(|(c, _)| *c == kind).filter(|_| !self.racing) else { return false };
         if self.kept.len() != self.parked.len() {
             self.kept = self.parked.iter().map(|(_, p)| p.clone()).collect();
         }
@@ -5440,6 +5448,10 @@ mod in_play_tests {
         let again = restarted.parked[0].1.store;
         assert_eq!((again.nose.to_bits(), again.up.to_bits()), (squared.0.to_bits(), squared.1.to_bits()), "squared once by the put-back");
         assert_eq!(again.at.to_bits(), store.at.to_bits());
+        // A race's car records nothing.
+        let mut racing = restarted.fresh();
+        racing.racing = true;
+        assert!(!racing.fresh().record(Kind::Monster, place, nose, &mut floor, &tables.curve), "racing");
     }
 
     /// F80: free06's `[Machine1]` helicopter, at the file's height (`SetGroundHeight = FALSE`), settled

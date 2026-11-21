@@ -9551,7 +9551,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let read = &mut |n: &str| machine_res.as_ref()?.read_suffix(n).ok();
         // A Restart puts each car back from its store once more (S500): the store the ride before
         // ended with, where a driven car recorded its safe spot (S501).
-        let in_play = vehicle::InPlay::settled_from(&lot.in_play, &flying, read, &mut sim, &tables.ride, args.restarts, &args.stores);
+        let mut in_play = vehicle::InPlay::settled_from(&lot.in_play, &flying, read, &mut sim, &tables.ride, args.restarts, &args.stores);
+        in_play.racing = args.race.is_some();
         // And the fliers (F80, free06's helicopter, free10's plane), for the AI riders to sweep.
         let in_play = in_play.with_fliers(&lot.in_play, &lot.in_play_ground, &flying, read, &mut sim, &tables.ride);
         for k in 0..in_play.len() {

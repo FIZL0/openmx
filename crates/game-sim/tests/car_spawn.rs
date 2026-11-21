@@ -685,6 +685,7 @@ fn a_switched_car_records_its_safe_spot_as_the_original() {
             stored += usize::from(moved);
         }
         eprintln!("{stored} of {} calls stored", calls.len());
-        assert!(stored > 0, "the coasting baja records somewhere");
+        // The coasting baja is on open, level ground every frame: each call stores.
+        assert_eq!(stored, calls.len(), "every call stores");
     });
 }

@@ -3189,7 +3189,7 @@ pub struct Store {
 
 /// How far the safe-spot recorder's probe stands off the root node's place (S501): five feet under.
 const SAFE_SPOT_LIFT: f32 = -5.0;
-/// A safe spot whose ground normal is not steeper than this is not kept.
+/// A safe spot is kept only where the ground normal's y is over this (ground flatter than ~37°).
 const SAFE_SPOT_LEVEL: f32 = 0.8;
 /// How far along the ground's normal a safe spot stands off the ground.
 const SAFE_SPOT_RAISE: f32 = 0.5;
