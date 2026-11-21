@@ -1,4 +1,4 @@
-# 1 — drawn root on the tick (PART)
+# 1 — drawn root on the tick (FINAL)
 
 Task S474a. 2026-11-21.
 
