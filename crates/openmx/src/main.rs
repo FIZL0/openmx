@@ -2513,7 +2513,15 @@ impl<P: sim_world::World> Game for World<P> {
         // struck and pushed by every seat's bike, and by its downed rider's wreck bike (F75, in
         // [`Seat::pass`]); back in every seat after ([`World::parked_back`]).
         let mut parked = self.parked_out();
-        let resting: Vec<bool> = match parked.as_mut() {
+        // F75a: with one plane flown (one with a hull, as `flown` below) they step in its world
+        // instead, as a Sim's plane lane has them (S489), and its pass says which went to rest. Two
+        // planes flown together step them here as before: their joint frame holds no parked car.
+        let lone_plane = (self.seats.iter())
+            .filter(|s| !s.waiting && s.riding && s.garage.flight_flown().is_some_and(|f| f.hull(0).is_some()))
+            .count()
+            == 1;
+        let mut resting: Vec<bool> = match parked.as_mut() {
+            Some(cars) if lone_plane => vec![false; cars.len()],
             Some(cars) => {
                 let t = &self.seats[0].sim.tables.ride;
                 cars.iter_mut().map(|p| p.frame(&mut self.place, dt, &t.acos, &t.curve)).collect()
@@ -2704,9 +2712,25 @@ impl<P: sim_world::World> Game for World<P> {
             // A downed rider's wreck bike meets a lone flown plane (S276): its search with the hull in
             // its world before the plane's frame, the mirrors on the plane's list, and its step after,
             // which the rider's own pass later in the walk does not repeat.
+            // F75a: and the shared parked cars meet a lone flown plane as a Sim's plane lane has them
+            // (S486a, S489): their hulls and bodies first in its met, struck by its rays and by the
+            // downed wreck bikes it searches, and the cars stepped in its world for its frame. Kept:
+            // which cars a wreck bike struck, and which were awake before.
+            let mut lane: Option<(Vec<bool>, Vec<bool>)> = None;
             let downed = match met.as_mut().filter(|_| plane.is_some()) {
-                Some(m) => match flown_among(&mut self.seats, me, &on) {
-                    (mut riders, Some(f)) => game_sim::wreck_plane::search_downed(&mut riders, f, dt, &mut self.place, m),
+                Some(m) => match (flown_among(&mut self.seats, me, &on), parked.as_mut().filter(|c| lone_plane && !c.is_empty())) {
+                    ((mut riders, Some(f)), Some(cars)) => {
+                        let ins = game_sim::parked_wreck::cars_in_plane(cars, n, f.body.position, &self.place);
+                        let (downed, wrecked) = game_sim::wreck_plane::search_downed_parked(&mut riders, f, &ins, dt, &mut self.place, m);
+                        let was_awake = cars.iter().map(game_sim::car::Parked::awake).collect();
+                        for (p, _) in cars.iter_mut().zip(&wrecked).filter(|(_, s)| **s) {
+                            p.struck();
+                        }
+                        m.cars = std::mem::take(cars).into_iter().enumerate().map(|(k, p)| game_sim::car::InPlane::new(p, k)).collect();
+                        lane = Some((wrecked, was_awake));
+                        downed
+                    }
+                    ((mut riders, Some(f)), None) => game_sim::wreck_plane::search_downed(&mut riders, f, dt, &mut self.place, m),
                     _ => game_sim::wreck_plane::Downed::default(),
                 },
                 None => game_sim::wreck_plane::Downed::default(),
@@ -2716,7 +2740,21 @@ impl<P: sim_world::World> Game for World<P> {
             if me == 0 {
                 self.race_guests_out(dt);
             }
-            if !downed.is_empty()
+            if let (Some((wrecked, was_awake)), Some(m), Some(cars)) = (lane, met.as_mut(), parked.as_mut()) {
+                // The cars back out of its world, its wreck bikes' step after (which leaves the cars'
+                // bodies in its wrecks), then what both did written back, and those that stepped to
+                // rest put to sleep after the bikes ([`World::parked_back`]), as `Sim::step` has them.
+                let stepped: Vec<bool> = m.cars.iter().map(|c| c.stepped).collect();
+                *cars = std::mem::take(&mut m.cars).into_iter().map(|c| c.parked).collect();
+                if let (mut riders, Some(f)) = flown_among(&mut self.seats, me, &on) {
+                    game_sim::wreck_plane::step_downed(&mut riders, f, downed, m, dt, &self.place, true);
+                    self.seats[me].garage.plane_reposed();
+                }
+                game_sim::parked_wreck::cars_from_plane(cars, m, &wrecked);
+                resting = (cars.iter().zip(stepped.iter().zip(&was_awake)))
+                    .map(|(p, (s, a))| *s && *a && p.machine.at_rest(&p.car))
+                    .collect();
+            } else if !downed.is_empty()
                 && let Some(m) = met.as_mut()
                 && let (mut riders, Some(f)) = flown_among(&mut self.seats, me, &on)
             {
@@ -3616,6 +3654,64 @@ mod split_contact {
         let z: Vec<f32> = alone[from..from + 12].iter().filter_map(|t| t.0).collect();
         assert!(z.windows(2).any(|w| w[1] < w[0]), "the wreck bike never turned back off the truck: {z:?}");
         assert!(alone[from + 11].1 > alone[from].1, "the wreck bike never pushed the truck");
+    }
+
+    /// F75a: a split-screen seat's lone flown plane meets the shared parked truck as a Sim's plane lane
+    /// does (S486a, S489, c16_fly.rs's `the_plane_flown_into_a_parked_truck_wakes_and_pushes_it`): the
+    /// disc's truck is settled 25 ft up the plane's way; seat 0 flies the disc's biplane at it low and
+    /// level at 40 ft/s while seat 1's bike stands 100 ft off. The plane's rays strike the truck's hull:
+    /// the truck is woken, steps in the plane's world and is shoved along the plane's way, and the plane
+    /// is held behind it; both seats' Sims hold the one truck. Before F75a the plane flew through.
+    #[test]
+    fn a_split_seats_flown_plane_wakes_and_pushes_the_shared_truck() {
+        use game_render::disc::Disc;
+        use game_sim::flight_search::{self, Rays};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let tables = game_sim::ride::Tables::build();
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let plane = game_sim::phy::Plane::read_bytes(&machines.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+        let rays = game_sim::track::Rays::parse(&machines.read_suffix(flight_search::BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+        let hull = game_sim::track::Mesh::parse(&machines.read_suffix(game_sim::flight::HULL).expect("biplanef.col")).expect("its hull");
+        let mut flight = game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays)).with_hull(hull);
+        flight.place(Vf::new(0.0, 4.0, -10.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+        flight.body.velocity = Vf::new(0.0, 0.0, 40.0, 1.0);
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let mut bike = Sim::new(0xf75a);
+        let mounts = game_sim::stock::mounts(&bike.phy);
+        bike.rider = Rider::new(&bike.phy, mounts, Vf::new(100.0, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+        bike.rider.sense.wrecks_enabled = false;
+        let mut world = split(vec![Sim::new(0xf75a), bike]);
+        let in_play = crate::vehicle::InPlay::settled(&spots, &[false, false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+        assert_eq!(in_play.len(), 1, "the truck is parked");
+        for s in &mut world.seats {
+            s.garage.in_play = in_play.fresh();
+        }
+        world.simulate(DT, Input::default(), &mut Default::default());
+        let rest = world.seats[0].sim.parked_cars.first().expect("seat 0's Sim holds the truck").machine.body.position;
+        // The garage takes the flight as online's follows a seat's (N17).
+        let s = &mut world.seats[0];
+        s.sim.plane = Some(flight);
+        s.garage.follow(&s.sim);
+        s.sim.plane = None;
+        let mut woken = None;
+        for t in 0..30 {
+            world.simulate(DT, Input::default(), &mut Default::default());
+            let at = |i: usize| world.seats[i].sim.parked_cars.first().map(|p| p.machine.body.position);
+            assert_eq!(at(0), at(1), "the seats hold one truck");
+            if woken.is_none() && world.seats[0].sim.parked_cars[0].awake() {
+                woken = Some(t);
+            }
+        }
+        let truck = world.seats[0].sim.parked_cars[0].machine.body.position;
+        let flown = world.seats[0].garage.flight_flown().expect("seat 0 flies").body.position;
+        println!("the truck woken at tick {woken:?}, pushed {} ft; the plane at z {}", truck.z() - rest.z(), flown.z());
+        assert!(woken.is_some(), "the plane's strike never woke the truck");
+        assert!(truck.z() - rest.z() > 0.5, "the truck moved {} ft along the plane's way", truck.z() - rest.z());
+        assert!(flown.z() < truck.z(), "the plane flew through the truck: z {}, the truck's body at z {}", flown.z(), truck.z());
     }
 
     /// S494b: split screen's seats share one parked plane (as F72 the truck), and a seat's bike strikes

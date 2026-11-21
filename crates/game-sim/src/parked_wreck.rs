@@ -154,35 +154,48 @@ impl crate::Sim {
     /// its body, the copies nearest the plane at `flying`, named after the players as their hulls are
     /// in the bikes' lists.
     pub(crate) fn parked_in_plane(&self, flying: ps2_float::Vf, world: &dyn World) -> Vec<crate::wreck_plane::ParkedIn> {
-        let n = self.players();
-        self.parked_cars
-            .iter()
-            .enumerate()
-            .map(|(k, p)| {
-                let h = p.hull(n + k);
-                let mut at = h.at;
-                at.0[3] = crate::nearest_copy(world, flying, at.0[3]);
-                let f = p.flown(n + k, flying, world);
-                crate::wreck_plane::ParkedIn {
-                    hull: crate::wreck_plane::Hull { mesh: std::sync::Arc::clone(&p.hull), at, velocity: f.body.velocity, capacity: h.capacity },
-                    body: crate::prop_contact::Pushed { collection: 0, object: n + k, collider: f.collider, body: f.body, mass: f.mass },
-                }
-            })
-            .collect()
+        cars_in_plane(&self.parked_cars, self.players(), flying, world)
     }
 
-    /// **What the flown plane's lane did to the parked cars**, after its wreck bikes' step (S486a): each
-    /// body as the plane's resolve and the wreck bikes' left it ([`crate::flight::Met::wrecks`]),
-    /// written back ([`crate::car::Parked::pushed`]), and every car the plane's rays struck
-    /// ([`crate::flight::Met::hit`]) or a wreck bike's (`struck`) woken.
+    /// **What the flown plane's lane did to the parked cars**, after its wreck bikes' step (S486a,
+    /// [`cars_from_plane`]).
     pub(crate) fn parked_from_plane(&mut self, met: &crate::flight::Met, struck: &[bool]) {
-        for (k, p) in self.parked_cars.iter_mut().enumerate() {
-            if let Some(w) = met.wrecks.get(k) {
-                p.pushed(&crate::wreck_plane::flown_of(w));
+        cars_from_plane(&mut self.parked_cars, met, struck);
+    }
+}
+
+/// **`parked_cars` as a flown plane's lane meets them** ([`crate::Sim::parked_in_plane`]), car `k`
+/// named `n + k`: split screen's seats share one copy of the cars (F72), which a seat's lone flown
+/// plane meets so (F75a).
+pub fn cars_in_plane(parked_cars: &[crate::car::Parked], n: usize, flying: ps2_float::Vf, world: &dyn World) -> Vec<crate::wreck_plane::ParkedIn> {
+    parked_cars
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let h = p.hull(n + k);
+            let mut at = h.at;
+            at.0[3] = crate::nearest_copy(world, flying, at.0[3]);
+            let f = p.flown(n + k, flying, world);
+            crate::wreck_plane::ParkedIn {
+                hull: crate::wreck_plane::Hull { mesh: std::sync::Arc::clone(&p.hull), at, velocity: f.body.velocity, capacity: h.capacity },
+                body: crate::prop_contact::Pushed { collection: 0, object: n + k, collider: f.collider, body: f.body, mass: f.mass },
             }
-            if met.hit.get(k).is_some_and(|h| !h.is_empty()) || struck.get(k).copied().unwrap_or(false) {
-                p.struck();
-            }
+        })
+        .collect()
+}
+
+/// **What the flown plane's lane did to `parked_cars`**, after its wreck bikes' step (S486a): each
+/// body as the plane's resolve and the wreck bikes' left it ([`crate::flight::Met::wrecks`]), written
+/// back ([`crate::car::Parked::pushed`]), and every car the plane's rays struck
+/// ([`crate::flight::Met::hit`]) or a wreck bike's (`struck`) woken. Split screen's shared copy (F75a)
+/// as the Sim's own ([`crate::Sim::parked_from_plane`]).
+pub fn cars_from_plane(parked_cars: &mut [crate::car::Parked], met: &crate::flight::Met, struck: &[bool]) {
+    for (k, p) in parked_cars.iter_mut().enumerate() {
+        if let Some(w) = met.wrecks.get(k) {
+            p.pushed(&crate::wreck_plane::flown_of(w));
+        }
+        if met.hit.get(k).is_some_and(|h| !h.is_empty()) || struck.get(k).copied().unwrap_or(false) {
+            p.struck();
         }
     }
 }
