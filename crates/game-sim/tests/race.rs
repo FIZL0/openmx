@@ -10058,6 +10058,7 @@ fn tracker(ee: &mut Ee, p: &mut Pick) -> race::Tracker {
         preload_held: p.below(2) == 0,
         clutch_held: p.below(2) == 0,
         entries_seen: None,
+        odometer: F::ZERO,
     };
     let words = [t.laps_led, t.times_in_lead, t.passes, t.times_passed, t.wrecks, t.preloads, t.clutches];
     for (k, w) in words.into_iter().enumerate() {
@@ -10085,6 +10086,7 @@ fn tracker_at(ee: &Ee) -> race::Tracker {
         preload_held: ee.u32_at(T_LATCHES) != 0,
         clutch_held: ee.u32_at(T_LATCHES + 4) != 0,
         entries_seen: None,
+        odometer: F::ZERO,
     }
 }
 
@@ -10838,4 +10840,163 @@ fn a_races_ai_riders_draw_on_the_races_generator_after_the_race() {
     }
     println!("{flash_draws} flash draws, {brain_draws} brain draws, {both} ticks with both");
     assert!(flash_draws > 0 && brain_draws > 0 && both > 0, "{flash_draws} flash draws, {brain_draws} brain draws, {both} ticks with both");
+}
+
+// --- S386: the score manager's clock and the tracker's odometer --------------------------------------
+
+/// S386: S13d's live sx01 single race (`context/capture/s13d/sx01-finish.jsonl`) against
+/// [`Race::clock`], the score manager's `+0xf8`: zero through the countdown, `dt` on it each tick the
+/// race runs from the tick after the drop's (bit for bit, the row's `dt` being the next tick's), and
+/// standing still once the tip's popup has faded in. A late row (the recorder under load) or a gap
+/// takes the capture's clock up again.
+#[test]
+fn the_score_managers_clock_runs_from_the_drop_to_the_tips_fade_as_s13d() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    let Ok(text) = std::fs::read_to_string(kit.ctx("capture/s13d/sx01-finish.jsonl")) else {
+        return skip("capture/s13d/sx01-finish.jsonl is not there: research/s13d/run.sh records it");
+    };
+    let hex32 = |h: &str| u32::from_le_bytes(hex_bytes(h)[..4].try_into().unwrap());
+    let w = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    // (frame, dt, the manager's clock and flags, the tip's armed word and clock).
+    let rows: Vec<(u32, F, u32, u32, u32, u32)> = text
+        .lines()
+        .filter(|l| s13d_field(l, "tag").is_none() && !l.contains("\"poke\""))
+        .map(|l| {
+            let mgr = hex_bytes(s13d_field(l, "mgr").unwrap());
+            let act = hex_bytes(s13d_field(l, "act").unwrap());
+            let tip = |o: usize| if act.len() >= o + 4 { w(&act, o) } else { 0 };
+            let frame = s13d_field(l, "frame").unwrap().parse().unwrap();
+            (frame, F(f32::from_bits(hex32(s13d_field(l, "dt").unwrap()))), w(&mgr, 0xf8), w(&mgr, 0x5c), tip(0x474), tip(0x410))
+        })
+        .collect();
+    let drop = rows.iter().position(|r| r.3 & 0x80 == 0 && r.3 & 1 != 0).expect("the countdown ends");
+    assert!(rows[..=drop].iter().all(|r| r.2 == 0), "the clock stands at zero through the countdown and the drop's tick");
+    assert!(rows.iter().all(|r| r.3 & 8 == 0), "the race is never stopped (flag 8)");
+    let mut race = Race::new(Gate::new(), &[], F::ZERO, Rng::new());
+    race.countdown.running = false;
+    race.tip_words = true;
+    let (mut ran, mut late, mut stood) = (0, 0, 0);
+    for p in rows[drop..].windows(2) {
+        let (before, now) = (p[0], p[1]);
+        if now.0 != before.0 + 1 {
+            race.clock = F(f32::from_bits(now.2));
+            continue;
+        }
+        if before.4 == 1 && !race.tip_armed {
+            race.tip_armed = true;
+            race.tip_in = F(f32::from_bits(before.5));
+        }
+        let up = race.outro_up();
+        race.tick(before.1, &[]);
+        if up {
+            assert_eq!(now.2, before.2, "frame {}: the clock stands once the tip's popup is up", now.0);
+            assert_eq!(race.clock.0.to_bits(), now.2, "frame {}: the stopped race's clock", now.0);
+            stood += 1;
+            continue;
+        }
+        ran += 1;
+        if race.clock.0.to_bits() != now.2 {
+            // A late row holds the tick after's clock, and the row after it the same again.
+            let ahead = F(fpu::add(race.clock.0, now.1.0)).0.to_bits();
+            assert!(now.2 == ahead || now.2 == before.2, "frame {}: the clock {:#x}, the capture's {:#x}", now.0, race.clock.0.to_bits(), now.2);
+            race.clock = F(f32::from_bits(now.2));
+            late += 1;
+        }
+    }
+    println!("drop at frame {}, {ran} ticks run, {late} late, {stood} standing", rows[drop].0);
+    assert!(ran > 2000 && stood > 60, "{ran} ticks run, {stood} standing");
+    assert!(late < 20, "{late} late rows");
+}
+
+/// S386: the tracker's odometer: a forward speed over `dt` on it, a backward one counted as zero,
+/// and the grid's placing it starts over (as the original's grid reset zeroes it).
+#[test]
+fn the_odometer_counts_forward_feet_and_starts_over_at_the_grid() {
+    let mut t = race::Tracker::default();
+    let dt = F(f32::from_bits(0x3d08_850a));
+    t.ride(dt, F(30.0));
+    assert_eq!(t.odometer.0.to_bits(), fpu::mul(30.0, dt.0).to_bits());
+    let was = t.odometer;
+    t.ride(dt, F(-12.0));
+    assert_eq!(t.odometer, was, "backing up counts nothing");
+    t.ride(dt, F(10.0));
+    assert_eq!(t.odometer.0.to_bits(), fpu::add(was.0, fpu::mul(10.0, dt.0)).to_bits());
+    t.placed(false);
+    assert_eq!(t.odometer, F::ZERO, "the grid starts it over");
+}
+
+/// S386: a live sx01 race of four bikes all ridden by the AI (`context/capture/s386/sx01-odometer.jsonl`,
+/// research/s386/odo.py after research/c31/boot.py) against [`race::forward_speed`] and
+/// [`race::Tracker::ride`]: every bike's odometer (`+0x133c`) each tick, bit for bit, from the words
+/// its writer reads as the row before left them — the front wheel's contact, the bike's speed, the
+/// transform's forward and up rows and the chassis' velocity — and the tick's `dt` (here the row's
+/// own: this recorder reads the frame's `dt` after the tick has set it), both the touching and the
+/// off-the-ground ways. The capture was cut short by its run's timeout (715 rows, 14 s of racing):
+/// a cut last line is left out.
+#[test]
+fn the_odometer_holds_s386s_live_sx01_race() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    let Ok(text) = std::fs::read_to_string(kit.ctx("capture/s386/sx01-odometer.jsonl")) else {
+        return skip("capture/s386/sx01-odometer.jsonl is not there: research/s386/odo.py records it");
+    };
+    struct Bike {
+        speed: F,
+        odometer: F,
+        touching: bool,
+        vel: Vf,
+        up: Vf,
+        forward: Vf,
+    }
+    let fw = |b: &[u8], o: usize| F(f32::from_bits(u32::from_le_bytes(b[o..o + 4].try_into().unwrap())));
+    let vf = |b: &[u8], o: usize| Vf::from_bits([0, 4, 8, 12].map(|k| u32::from_le_bytes(b[o + k..o + k + 4].try_into().unwrap())));
+    let rows: Vec<(u32, F, Vec<Bike>)> = text
+        .lines()
+        .filter(|l| l.ends_with('}'))
+        .map(|l| {
+            let bikes = (0..4)
+                .map(|k| {
+                    let h = |n: &str| hex_bytes(s13d_field(l, &format!("{n}{k}")).unwrap());
+                    let (b430, b1330, front, vel, node) = (h("bike430"), h("bike1330"), h("front"), h("vel"), h("rows"));
+                    Bike { speed: fw(&b430, 8), odometer: fw(&b1330, 0xc), touching: front != [0; 4], vel: vf(&vel, 0), up: vf(&node, 0x10), forward: vf(&node, 0x20) }
+                })
+                .collect();
+            let dt = fw(&hex_bytes(s13d_field(l, "dt").unwrap()), 0);
+            (s13d_field(l, "frame").unwrap().parse().unwrap(), dt, bikes)
+        })
+        .collect();
+    assert!(rows.len() > 100, "{} rows", rows.len());
+    let (mut held, mut touching, mut off, mut late, mut stood) = (0, 0, 0, 0, 0);
+    let (mut missed, mut moved) = ([0; 4], [0; 4]);
+    for p in rows.windows(2) {
+        let ((f0, _, was), (f1, dt, now)) = (&p[0], &p[1]);
+        if *f1 != f0 + 1 {
+            continue;
+        }
+        for (k, (b, n)) in was.iter().zip(now).enumerate() {
+            if n.odometer == b.odometer {
+                stood += 1;
+                continue;
+            }
+            moved[k] += 1;
+            let mut t = race::Tracker { odometer: b.odometer, ..race::Tracker::default() };
+            t.ride(*dt, race::forward_speed(b.touching, b.speed, b.forward, b.up, b.vel));
+            if t.odometer.0.to_bits() != n.odometer.0.to_bits() {
+                late += 1;
+                missed[k] += 1;
+                if k >= 2 {
+                    println!("frame {f1} bike {k}: the odometer {:?}, the capture's {:?} (touching {})", t.odometer, n.odometer, b.touching);
+                }
+                continue;
+            }
+            held += 1;
+            if b.touching { touching += 1 } else { off += 1 }
+        }
+    }
+    println!("{held} odometer moves held ({touching} touching, {off} off the ground), {late} not, {stood} standing");
+    println!("moves per bike {moved:?}, missed {missed:?}");
+    // Bikes 0 and 1's words are read while the game's tick is going over them: on their misses the
+    // odometer is often a tick on from the rest (the speed of the row after, or two ticks' worth).
+    // Bikes 2 and 3 are read after it and hold all but a few.
+    assert!(missed[3] == 0 && missed[2] * 20 < moved[2], "moves per bike {moved:?}, missed {missed:?}");
+    assert!(touching > 500 && off > 300, "{touching} touching, {off} off the ground");
 }

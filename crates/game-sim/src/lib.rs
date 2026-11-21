@@ -574,6 +574,7 @@ impl Sim {
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let mut strike = self.prop_strike_in(0, dt, &*world);
+        self.race_ride(0, dt);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
@@ -758,6 +759,16 @@ impl Sim {
         let riders: Vec<&Rider> = (0..self.players()).map(|j| self.rider_of(j)).collect();
         lane.feed_cards(&riders);
         self.ai = Some(lane);
+    }
+
+    /// Player `i`'s bike is starting its frame of `dt`: its race card's statistics tracker's odometer
+    /// goes on by the bike's forward speed as the frame finds it ([`race::Laps::ride`], S386), as the
+    /// original's bike update does before its physics.
+    fn race_ride(&mut self, i: usize, dt: F) {
+        let speed = race::odometer_speed(&self.rider_of(i).ride);
+        if let Some(laps) = self.race.as_mut().and_then(|r| r.laps.as_mut()) {
+            laps.ride(i, dt, speed);
+        }
     }
 
     /// Player `i`'s bike has had its frame, on `clutch` for a lever: its race card's statistics
@@ -947,6 +958,7 @@ impl Sim {
             // An AI rider's levers are the bike's controls (S323); its brain thinks after the frame.
             let c = &self.levers_of(i).unwrap_or(*c);
             rode[i] = *c;
+            self.race_ride(i, dt);
             let kept = self.lend_rng(i);
             let tables = &self.tables;
             let pose = &mut |r: &mut rider::Rider| pose(i, r, c);
@@ -1074,6 +1086,7 @@ impl Sim {
             self.lend_parked(i, &*world);
             let c = self.levers_of(i).unwrap_or(pads[i]);
             rode[i] = c;
+            self.race_ride(i, dt);
             let kept = self.lend_rng(i);
             let p = &mut self.others[i - 1];
             p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());

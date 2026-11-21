@@ -52,7 +52,7 @@
 
 use crate::contact::unit;
 use crate::rng::Rng;
-use ps2_float::{Dest, F, Vf, fpu};
+use ps2_float::{Dest, F, Vf, fpu, vu};
 
 /// The gate's flag bits (its `+0x30` word).
 pub mod flags {
@@ -686,6 +686,11 @@ pub struct Race {
     pub activity: Option<Supercross>,
     /// The word the drop draws for the scene (its `+0xf0`), eight to thirteen seconds.
     pub scene_clock: F,
+    /// The score manager's clock (its `+0xf8`, S386): zero from the race's reset, and `dt` on it
+    /// every tick the manager runs after the drop's own tick, through the race's end, until the
+    /// tip's popup has faded in ([`Race::outro_up`]). The results' stats commit reads it as the time
+    /// played and raced.
+    pub clock: F,
     /// The race's draws: the watch's two per rider caught and the drop's one. The Sim's one
     /// generator in a race: its AI riders draw on it after this tick (S333, `Sim::think`).
     pub rng: Rng,
@@ -754,6 +759,7 @@ impl Race {
             countdown: Countdown { length, elapsed: F::ZERO, running: true, interval: WINDOW, acc: F::ZERO },
             activity: None,
             scene_clock: F::ZERO,
+            clock: F::ZERO,
             rng,
             laps: None,
             flashes: None,
@@ -857,6 +863,10 @@ impl Race {
             } else if frame.dropped {
                 laps.start();
             }
+        }
+        // The manager's clock, last of its running ticks, before its children (S386).
+        if started {
+            self.clock = F(fpu::add(self.clock.0, dt.0));
         }
         if let Some(flashes) = &mut self.flashes {
             flashes.tick(dt, &mut self.rng);
@@ -5103,8 +5113,8 @@ impl Laps {
 /// **A bike's statistics tracker** (S319): the counts the results menu shows beside each card, kept
 /// in the bike itself (the tracker inside a motocross bike, which its card's owner listeners and its
 /// own update write). Only the words the results read are kept, and the two latches behind the
-/// preload and clutch counts; the tracker's air clock, top speed, wheelie clocks, odometer and
-/// per-lap list are not ported.
+/// preload and clutch counts; the tracker's air clock, top speed, wheelie clocks and per-lap list are
+/// not ported.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tracker {
     /// Laps counted while the card held first place (`+0x24`).
@@ -5122,6 +5132,9 @@ pub struct Tracker {
     /// Whether the preload (`+0x50`) and the clutch (`+0x54`) are being held, as last counted.
     pub preload_held: bool,
     pub clutch_held: bool,
+    /// The odometer (`+0x78`, S386): feet ridden forward since the grid placed the bike
+    /// ([`Tracker::ride`]). The results' stats commit counts it as the feet ridden.
+    pub odometer: F,
     /// The ride's wreck entries ([`crate::state::Ride::entries`]) as last seen, which
     /// [`Tracker::bike`] counts on from. The port's own: the original counts in the wreck entry
     /// itself. `None` until the first look, which only takes the baseline.
@@ -5171,7 +5184,14 @@ impl Tracker {
         edge(&mut self.clutch_held, &mut self.clutches, clutch);
     }
 
-    /// The race grid placed the bike: the counts and latches start over, except in a freestyle event,
+    /// The bike's update is starting, before its physics: the odometer goes on by the bike's
+    /// forward speed ([`odometer_speed`]) over `dt`, a speed under zero counted as zero.
+    pub fn ride(&mut self, dt: F, speed: F) {
+        let speed = if lt(speed, F::ZERO) { F::ZERO } else { speed };
+        self.odometer = F(fpu::add(self.odometer.0, fpu::mul(speed.0, dt.0)));
+    }
+
+    /// The race grid placed the bike: the counts, latches and odometer start over, except in a freestyle event,
     /// which keeps them. The port's own baseline of wreck entries is kept either way.
     pub fn placed(&mut self, freestyle: bool) {
         if !freestyle {
@@ -5200,7 +5220,37 @@ pub struct BikeCounts {
     pub wreck_entries: i32,
 }
 
+/// **The bike's forward speed as its odometer reads it** (S386), at the top of the bike's update:
+/// with the front wheel touching, the bike's speed (`+0x438`, [`crate::air::Air::contact_vel`]'s
+/// `z`); off it, the chassis' velocity along the transform's forward row with its height taken out
+/// and made unit length — the up row instead while the forward row points straight up or down.
+pub fn odometer_speed(ride: &crate::ride::Ride) -> F {
+    let m = ride.transform();
+    forward_speed(ride.front.w.contact, F(ride.air.contact_vel.z()), m.0[2], m.0[1], ride.chassis.vel)
+}
+
+/// [`odometer_speed`] off the words it reads: whether the front wheel is touching, the bike's speed,
+/// the transform's forward and up rows and the chassis' velocity.
+pub fn forward_speed(touching: bool, speed: F, forward: Vf, up: Vf, vel: Vf) -> F {
+    if touching {
+        return speed;
+    }
+    let y = F(forward.y());
+    let row = if le(y, F(-1.0)) || !lt(y, F::ONE) { up } else { forward };
+    let flat = Vf::new(row.x(), 0.0, row.z(), row.w());
+    let dir = flat.merge(Dest::XYZ, flat.mul_q(vu::rsqrt(1.0, vu::dot3(flat.0, flat.0))));
+    F(fpu::madd(fpu::mula(vel.x(), dir.x()), vel.z(), dir.z()))
+}
+
 impl Laps {
+    /// Player `player`'s bike is starting its frame: its tracker's odometer goes on by `speed`
+    /// ([`odometer_speed`], measured before the frame) over `dt` ([`Tracker::ride`]).
+    pub fn ride(&mut self, player: usize, dt: F, speed: F) {
+        if let Some(e) = self.cards.iter_mut().find(|e| e.player == player) {
+            e.stats.ride(dt, speed);
+        }
+    }
+
     /// Player `player`'s bike has had its frame ([`Tracker::bike`]).
     pub fn bike(&mut self, player: usize, b: BikeCounts) {
         if let Some(e) = self.cards.iter_mut().find(|e| e.player == player) {

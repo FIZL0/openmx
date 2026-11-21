@@ -1296,7 +1296,7 @@ wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cof
 wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
-wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, tip_words, outro, countdown, activity, scene_clock, rng, laps, flashes, sink, raiser } skip { guests, guests_did });
+wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, tip_words, outro, countdown, activity, scene_clock, clock, rng, laps, flashes, sink, raiser } skip { guests, guests_did });
 wire!(crate::prop_raise::Raiser { up, down } skip { due });
 wire!(crate::prop_raise::Group { trigger, armed, count, on, t, length, move_time, rises, bodies });
 wire!(crate::drop_gate::Sink { trigger, armed, count, t, length, on, y, move_time, move_down, pieces });
@@ -1313,7 +1313,7 @@ wire!(crate::race::LineLists { checkpoints, others, reach });
 wire!(crate::race::ListGate { gate, spot, side, speed });
 wire!(crate::race::Entry { player, card, stats });
 // A bike's statistics tracker (S319): what the results menu shows at the race's end.
-wire!(crate::race::Tracker { laps_led, times_in_lead, passes, times_passed, wrecks, preloads, clutches, preload_held, clutch_held, entries_seen });
+wire!(crate::race::Tracker { laps_led, times_in_lead, passes, times_passed, wrecks, preloads, clutches, preload_held, clutch_held, entries_seen, odometer });
 wire!(crate::race::RaceCard { lap, on_path, odometer, aim, look, ahead, to_track, jumps, warnings });
 wire!(crate::race::Jumps { count, length, best_length, height, best_height, air_time, best_air_time, rise, takeoff, landing, grounded });
 wire!(crate::race::Warnings { off, off_blink, off_nag, wrong, wrong_blink });

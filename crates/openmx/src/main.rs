@@ -2528,7 +2528,7 @@ impl<P: sim_world::World> Game for World<P> {
             // P350: a race over several seats is the first's Sim's: the others' riders are told to it
             // before its pass, where theirs left them.
             if me == 0 {
-                self.race_guests_in();
+                self.race_guests_in(dt);
             }
             let at = self.seats[me].sim.rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
@@ -2772,7 +2772,7 @@ impl<P: sim_world::World> World<P> {
     /// players' bikes tell their cards after their frames ([`game_sim::race::CardFeed::of`]), and each
     /// that rode its bike this pass counted on its card's tracker as a player's bike counts in its
     /// Sim's step (S319). Nothing without a race, or with the first seat alone.
-    fn race_guests_in(&mut self) {
+    fn race_guests_in(&mut self, dt: F) {
         let (first, rest) = self.seats.split_first_mut().expect("a seat");
         let players = first.sim.players();
         // P350a: the AI riders' brains read the other seats off cards after the Sim's own players',
@@ -2793,6 +2793,8 @@ impl<P: sim_world::World> World<P> {
             for (k, s) in rest.iter().enumerate().filter(|(_, s)| !s.waiting && s.riding && s.garage.up == Kind::Bike) {
                 let r = &s.sim.rider;
                 let b = game_sim::race::BikeCounts { preload_timer: r.ride.air.preload_timer, clutch: s.hands.clutch, wreck_entries: r.state.entries };
+                // S386: the odometer reads the bike as its frame left it, this pass's dt on.
+                l.ride(race_player(k + 1, players), dt, game_sim::race::odometer_speed(&r.ride));
                 l.bike(race_player(k + 1, players), b);
             }
         }
@@ -9609,8 +9611,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut race_watch = race_start::Watch::default();
     // P335: whether seat 0's race gate stood open at the last look, for the race its drop counts.
     let mut race_gate_open: Option<bool> = None;
-    // P358: the race's score manager clock, the seconds since the drop, for the stats commit.
-    let mut race_clock = F::ZERO;
     let mut escape = held(window, key::ESCAPE);
     let mut perf = perf::Perf::new(args.fps);
     let mut hushed = false;
@@ -11448,17 +11448,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let event = game_sim::race::ResultEvent { activity: 2, ..Default::default() };
             front.menu.race_gate_dropped(&event, &[Some(0)]);
         }
-        if simulated && race_gate_open == Some(false) && gate_open == Some(true) {
-            race_clock = F::ZERO;
-        }
+        // S386: the race's score manager clock (the seconds since the drop) for the stats commit.
+        let race_clock = world.seats[0].sim.race.as_ref().map_or(F::ZERO, |r| r.clock);
         if simulated && gate_open == Some(true) {
-            race_clock = race_clock + dt;
             // The manager runs on through the outro: the commit reads its clock as the ride is left.
             if let Some(hand) = front.as_deref_mut().and_then(|f| f.menu.race.hand.as_mut()) {
                 hand.tally.clock = race_clock;
                 // P364: so does each seat's banked total, which the score commit reads.
                 for (s, seat) in hand.tally.seats.iter_mut().zip(&world.seats) {
                     s.banked = seat.sim.rider.score.total;
+                }
+                // S386: and each seat's odometer, which the bikes' updates run on.
+                if let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
+                    let players = world.seats[0].sim.players();
+                    for (k, s) in hand.tally.seats.iter_mut().enumerate() {
+                        if let Some(e) = laps.cards.iter().find(|e| e.player == race_player(k, players)) {
+                            s.feet = e.stats.odometer;
+                        }
+                    }
                 }
             }
         }

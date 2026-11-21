@@ -672,6 +672,10 @@ impl State for crate::race::Race {
             });
         }
         w.f("scene_clock", self.scene_clock);
+        // The score manager's clock (S386), once it has run: a race before its drop walks as before.
+        if self.clock != F::ZERO {
+            w.f("clock", self.clock);
+        }
         w.field("rng", &self.rng);
         // The race's laps (P313), on a race that counts them: a start alone walks as before.
         if let Some(l) = &self.laps {
@@ -748,6 +752,10 @@ impl State for crate::race::Race {
                     }
                     w.u32("preload_held", u32::from(t.preload_held));
                     w.u32("clutch_held", u32::from(t.clutch_held));
+                    // The odometer (S386), once it has counted.
+                    if t.odometer != F::ZERO {
+                        w.f("odometer", t.odometer);
+                    }
                 }
             });
         }

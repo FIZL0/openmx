@@ -14687,3 +14687,17 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 #   (ReverseGain 30 x (-14.67 - speed) / mass 12.42; the original's extra slowing over a coasting bike is
 #   0.86..1.23 of it). The port's ride runs the rule on the AI's controls and drops that reverse: replay
 #   bit for bit through 11134, parts at 11135.
+# S386 — the score manager's clock and the bike statistics tracker's odometer (race.rs Race::clock,
+#   Tracker::odometer, odometer_speed; journal 2026-11-21-s386-race-clock-and-odometer).
+#   Clock: manager +0xf8, zeroed by the manager reset 0x0025fad0; += dt (add.s) in the manager tick
+#   0x0025fcd0 when flag 1 is set and flag 8 clear, after the mode handler, 0x00266d50 and 0x00267a90 and
+#   before the children walk 0x00133500. The countdown branch (flag 0x80) does not add: the countdown's
+#   end tick sets flag 1, the clock starts the tick after. S13d (sx01-finish): 0 until frame 301, then
+#   bit for bit with prev + dt on 2441 ticks (11 late/repeated rows), standing once the outro stops the
+#   activity. Flag 8 never set there.
+#   Odometer: bike +0x133c (tracker +0x78). Writers: ctor 0x0027a574 (0), grid reset 0x0027fb10 (0), and
+#   the player bike update 0x0027c890 at 0x0027c9c8, the stretch 0x0027c8e0..0x0027c9c8 at the top of the
+#   update (before the base update and physics), only while bike +0xf9c (the card) is set: front wheel
+#   (+0x7b0)->+0xdc set: s = bike +0x438; else the node (+0x7a4)->+0x254's forward row (+0xa0; the up
+#   row +0x90 when its y <= -1 or >= 1), y zeroed, vmul/vadday/vmaddz/vrsqrt/vmulq to unit, s =
+#   mula.s(chassis +0x260 . x) madd.s(+0x268 . z); s < 0 (c.olt.s) -> 0; odo = odo + s*dt.
