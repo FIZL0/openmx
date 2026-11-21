@@ -22,9 +22,10 @@
 // What it finds: a1 is bit for bit (every chassis word compared) through 11145, a0 and a3 within
 // 0.001 ft, the plane where the original's is. From 11135 a1's brain backs up (`Recovery::back_up`:
 // the reverse lever alone), and the bike is pushed back from 77 ft/s, as the original's levers go
-// straight into the rider's (S493). On 11145 a1 lists the plane's mirror, as the original's; on
-// 11146 the original's a1 also lists two of its own body rays on the plane's hull and ours none, and
-// a1 and the plane both part there.
+// straight into the rider's (S493). On 11145 a1 lists the plane's mirror, as the original's; from
+// 11146 its own body rays strike the plane's hull (biplanef.col, which the plane must be given:
+// without it the plane is in no bike's list, B48) as the original's, and a1 and the plane are bit
+// for bit through the strike to a1's wreck on 11183.
 
 use super::race4::{Bikes, c33_bike, c44_human_bike};
 use super::sim::{S12eLists, s12e_bike, s12e_racer, s12e_u64};
@@ -218,13 +219,15 @@ fn plane(disc: &mut Disc, ee: &Ee, tables: &Tables) -> Option<Flight> {
     let machine = disc.res("machine.res").map_err(|w| skip(&w)).ok()?;
     let plane = Plane::read_bytes(&machine.read_suffix(phy::BIPLANE_PHY).expect("machine.res's plane"));
     let rays = track::Rays::parse(&machine.read_suffix(flight_search::BIPLANE_RAYS).expect("machine.res's rays")).expect("biplanem.col");
+    // The hull the bikes' body rays strike (biplanef.col): without it the plane is in no bike's list.
+    let hull = track::Mesh::parse(&machine.read_suffix(game_sim::flight::HULL).expect("machine.res's hull")).expect("biplanef.col");
     let names: Vec<String> = disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
     let mesh = names
         .iter()
         .find_map(|n| disc.res(n).ok()?.read(flight_search::BIKE_COLLISION).ok())
         .map(|b| track::Mesh::parse(&b).expect("bikef.col parses"))
         .expect("an archive carries bikef.col");
-    let mut f = Flight::new(&plane).with_rays(flight_search::Rays::of(&rays)).with_bike(mesh);
+    let mut f = Flight::new(&plane).with_rays(flight_search::Rays::of(&rays)).with_bike(mesh).with_hull(hull);
     let word = |at: u32| F(ee.f32_at(at));
     let b = ee.u32_at(PLANE + PLANE_BODY);
     let e = ee.u32_at(PLANE + PLANE_ENGINE);
@@ -422,7 +425,8 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
         let plane_gap = (0..3).map(|c| (plane[c] - row.vf("plane_pos")[c]).powi(2)).sum::<f32>().sqrt();
         let others: Vec<String> = ais.iter().filter(|&&k| k != STRUCK).map(|&k| format!("{} {:.4}", RIDERS[k].2, gaps(&sim, player_of(k), row, RIDERS[k].2)[0])).collect();
         let r = sim.rider_of(player_of(STRUCK));
-        if tick >= FIRST_LISTED {
+        // On the wreck's tick the original's a1 is on the wreck bike, its list emptied.
+        if (FIRST_LISTED..WRECKED).contains(&tick) {
             let xyz3 = |name: String| Vf::new(row.f(&format!("{name}.x")), row.f(&format!("{name}.y")), row.f(&format!("{name}.z")), 0.0);
             let theirs: Vec<(Vf, Vf)> = (0..row.n("a1_rec_count"))
                 .filter(|k| row.n(&format!("a1_c{k}.kind")) == 0)
@@ -466,10 +470,8 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
     assert_eq!(parted, C44_PARTS, "where a1 parts from the original (a regression mark: move it when it moves)");
     assert!(worst.iter().all(|&w| w == 0.0), "a1 is bit for bit until it parts: {worst:?}");
     // The list and the plane's push (regression marks: move them when they move). a1's own entries
-    // on the hull are the row's, in number and (within 0.001) in place, until the strike: on 11146
-    // the original's a1 lists two of its body rays on the plane's hull and ours none, though our a1
-    // is still bit for bit going into it, so its resolve has only the plane's mirror and both bodies
-    // part there.
+    // on the hull are the row's, in number and (within 0.001) in place, on every tick before the
+    // wreck's (B48: two of its body rays on the plane's hull on 11146, the strike's first resolve).
     let list_parts = met.iter().find(|m| m.1 != m.2 || m.3 >= 1e-3 || m.4 >= 1e-3).map(|m| m.0);
     println!("a1's own entries part at {list_parts:?}: {:?}", met.iter().find(|m| Some(m.0) == list_parts));
     assert_eq!(list_parts, C44_LIST_PARTS, "where a1's own entries on the plane's hull part from the original's");
@@ -483,13 +485,12 @@ const C44_HELD: u64 = 1;
 /// How far a1 rides as the original's (centre within 0.001 ft, velocity within 0.01 ft/s), and the
 /// tick it parts on. Its brain backs up from 11135 (the reverse lever alone), and the ride pushes it
 /// back as the original's does (S493: the brain's levers skip the pad's reverse rule, and the push
-/// turns with the chassis every substep), so a1 is bit for bit through 11145, its first tick listing
-/// the plane, and parts on 11146, the strike's first resolve, where a1 and the plane both leave the
-/// original's.
-const C44_AGREES_THROUGH: u64 = 11145;
-const C44_PARTS: Option<u64> = Some(11146);
-/// The first tick a1's own entries on the plane's hull (kind 0) are not the row's: ours finds none
-/// where the original's body rays strike the hull twice.
-const C44_LIST_PARTS: Option<u64> = Some(11146);
-/// The first tick the plane is off the row's (by more than 0.001 ft): the strike's.
-const C44_PLANE_PARTS: Option<u64> = Some(11146);
+/// turns with the chassis every substep), and its body rays strike the plane's hull as the
+/// original's (B48), so a1 is bit for bit through the strike to its wreck (reason 7, as the
+/// original's), and does not part.
+const C44_AGREES_THROUGH: u64 = WRECKED;
+const C44_PARTS: Option<u64> = None;
+/// The first tick a1's own entries on the plane's hull (kind 0) are not the row's: none.
+const C44_LIST_PARTS: Option<u64> = None;
+/// The first tick the plane is off the row's (by more than 0.001 ft): none.
+const C44_PLANE_PARTS: Option<u64> = None;
