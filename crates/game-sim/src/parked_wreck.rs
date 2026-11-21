@@ -125,29 +125,50 @@ impl crate::Sim {
         let n = self.players();
         let crate::Sim { rider, others, parked_cars, .. } = self;
         let r = if i == 0 { rider } else { &mut others[i - 1].rider };
-        let Some(c) = r.crash.as_ref().filter(|_| !r.ghost.on) else { return };
-        let from = c.bike.origin();
-        r.ride.parked = parked_cars
-            .iter()
-            .enumerate()
-            .map(|(k, p)| {
-                let mut at = p.hull(n + k).at;
-                at.0[3] = crate::nearest_copy(world, from, at.0[3]);
-                crate::ragdoll_scene::ParkedCar::lent(std::sync::Arc::clone(&p.hull), &at, p.flown(n + k, from, world), k)
-            })
-            .collect();
+        lend_cars(r, parked_cars, n, world);
     }
 
     /// The parked cars player `i`'s bones were lent ([`crate::Sim::lend_parked`]) taken back, and
-    /// each one a bone struck woken by its struck listener (F73).
+    /// each one a bone struck woken by its struck listener (F73). Holding none, nothing: split
+    /// screen's shared copy was lent from outside the Sim and goes back there ([`cars_back`], F75c).
     pub(crate) fn parked_back(&mut self, i: usize) {
-        let r = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
-        for c in std::mem::take(&mut r.ride.parked) {
-            if let (true, Some(p)) = (c.struck, self.parked_cars.get_mut(c.car)) {
-                p.struck();
-            }
+        if self.parked_cars.is_empty() {
+            return;
+        }
+        let crate::Sim { rider, others, parked_cars, .. } = self;
+        let r = if i == 0 { rider } else { &mut others[i - 1].rider };
+        cars_back(r, parked_cars);
+    }
+}
+
+/// **`parked_cars` lent to `r`'s downed bones for the frame** ([`crate::Sim::lend_parked`]), car
+/// `k`'s hull named `n + k`: split screen's seats share one copy of the cars (F72), which each seat's
+/// thrown rider meets so (F75c). Nothing for a rider who is up or a ghost.
+pub fn lend_cars(r: &mut Rider, parked_cars: &[crate::car::Parked], n: usize, world: &dyn World) {
+    let Some(c) = r.crash.as_ref().filter(|_| !r.ghost.on) else { return };
+    let from = c.bike.origin();
+    r.ride.parked = parked_cars
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let mut at = p.hull(n + k).at;
+            at.0[3] = crate::nearest_copy(world, from, at.0[3]);
+            crate::ragdoll_scene::ParkedCar::lent(std::sync::Arc::clone(&p.hull), &at, p.flown(n + k, from, world), k)
+        })
+        .collect();
+}
+
+/// **The cars [`lend_cars`] lent `r`'s bones taken back**, each one of `parked_cars` a bone struck
+/// woken by its struck listener ([`crate::Sim::parked_back`], F73; split screen's shared copy, F75c).
+pub fn cars_back(r: &mut Rider, parked_cars: &mut [crate::car::Parked]) {
+    for c in std::mem::take(&mut r.ride.parked) {
+        if let (true, Some(p)) = (c.struck, parked_cars.get_mut(c.car)) {
+            p.struck();
         }
     }
+}
+
+impl crate::Sim {
 
     /// **The parked cars as a flown plane's lane meets them** (S486a,
     /// [`crate::wreck_plane::search_downed_parked`]): each one's hull where its body's node stands and

@@ -623,13 +623,21 @@ impl Seat {
         let mut did = None;
         // As a Sim's own step has it (S486, `Sim::wreck_meets_parked`), on the bike only: with
         // another machine up the rider's frame does not run.
-        if let Some(cars) = parked.filter(|_| self.riding && self.garage.up == Kind::Bike) {
+        let mut parked = parked.filter(|_| self.riding && self.garage.up == Kind::Bike);
+        if let Some(cars) = parked.as_deref_mut() {
             game_sim::parked_wreck::wreck_meets_cars(&mut self.sim.rider, cars, spots.len(), dt, place);
+            // F75c: and its thrown rider's bones meet them in the frame (F73, `Sim::lend_parked`),
+            // the cars a bone struck woken after it (`Sim::parked_back`, which holding none leaves
+            // the lent list here).
+            game_sim::parked_wreck::lend_cars(&mut self.sim.rider, cars, spots.len(), &*place);
         }
         if self.riding {
             let closed = |sim: &Sim| sim.race.as_ref().is_some_and(|r| r.gate.flags & game_sim::race::flags::CLOSED != 0);
             let was_closed = closed(&self.sim);
             (self.said, did) = self.garage.pass_among(&mut self.sim, dt, &controls, me, spots, place, self.markers, among);
+            if let Some(cars) = parked.as_deref_mut() {
+                game_sim::parked_wreck::cars_back(&mut self.sim.rider, cars);
+            }
             // P327: the race's start gate dropped on this pass.
             if was_closed && !closed(&self.sim) {
                 let at = self.sim.rider.ride.transform().0[3];
@@ -3704,8 +3712,8 @@ mod split_contact {
         let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
         let machines = disc.res(&name).expect("machine.res");
         let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
-        // The wreck bike and the rider's throw, found by suffix as the shell finds them; no ragdoll,
-        // whose bones meet the shared cars only in a lone seat (F75c).
+        // The wreck bike and the rider's throw, found by suffix as the shell finds them; no ragdoll
+        // (its bones: `a_split_seats_thrown_rider_wakes_the_shared_truck_as_a_lone_seats`).
         let archives: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
         let mut suffixed = |s: &str| archives.iter().find_map(|n| disc.res(n).ok()?.read_suffix(s).ok()).unwrap_or_else(|| panic!("no {s}"));
         let (wreck_bike, thrown) = (suffixed("wreckbike.phy"), suffixed("mrider.phy"));
@@ -3758,6 +3766,95 @@ mod split_contact {
         let z: Vec<f32> = alone[from..from + 12].iter().filter_map(|t| t.0).collect();
         assert!(z.windows(2).any(|w| w[1] < w[0]), "the wreck bike never turned back off the truck: {z:?}");
         assert!(alone[from + 11].1 > alone[from].1, "the wreck bike never pushed the truck");
+    }
+
+    /// F75c: a split-screen seat's thrown rider's bones meet the shared parked truck as a lone seat's
+    /// do in its Sim's own step (F73): lent the truck for the frame, the truck woken when a bone
+    /// strikes it. F75's ride with the rider's ragdoll on: the bike rolls into the truck's tail at
+    /// 60 ft/s and its rider wrecks on the strike. Alone, and as seat 1 with seat 0 standing 100 ft
+    /// off, the truck wakes on the same ticks and goes where the lone seat's goes; without the ragdoll
+    /// it wakes on others, so the bones are what wake it. Before F75c seat 1's bones passed through.
+    #[test]
+    fn a_split_seats_thrown_rider_wakes_the_shared_truck_as_a_lone_seats() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let archives: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
+        let phy = archives.iter().filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let mut suffixed = |s: &str| archives.iter().find_map(|n| disc.res(n).ok()?.read_suffix(s).ok()).unwrap_or_else(|| panic!("no {s}"));
+        let (wreck_bike, thrown, wreck_col) = (suffixed("wreckbike.phy"), suffixed("mrider.phy"), suffixed("wreckbikef.col"));
+        // The rider's bones as the shell builds them, off the thq1 body.
+        let rider_name = archives.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len()).expect("the rider archive").clone();
+        let body_res = disc.res(&rider_name).expect("the rider archive opens");
+        let mut body = game_render::rider::Body::load(vec![disc.res(&rider_name).expect("the rider archive opens")], "thq1", game_render::rider::Sex::Male, "", &[], game_sim::motion::Params::default())
+            .expect("the rider's body loads");
+        let model = game_render::psg::Model::parse(&body_res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model")).expect("the model parses");
+        let doll = body.ragdoll_rig(&model, &thrown).expect("every part names a node");
+        let mut kit = game_sim::ragdoll_ride::Kit::new(&thrown, doll.rig);
+        kit.bike = game_sim::ragdoll_ride::bike_sphere(&wreck_col);
+        kit.bike_mesh = game_sim::ragdoll_scene::Bike::parse(&wreck_col).map(std::sync::Arc::new);
+        let kit = std::sync::Arc::new(kit);
+        let rider = |x: f32, bones: bool| {
+            let mut sim = Sim::new(0xf75c);
+            std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(x, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+            let (part, wrecks) = (game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&thrown));
+            sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            if bones {
+                sim.rider.carries_ragdoll(std::sync::Arc::clone(&kit));
+            }
+            sim.rider.sense.wrecks_enabled = false;
+            sim
+        };
+        // Per tick: whether the rider is down, the truck's z and whether it is awake.
+        let ride = |two: bool, bones: bool| {
+            let me = usize::from(two);
+            let sims = if two { vec![rider(100.0, bones), rider(0.0, bones)] } else { vec![rider(0.0, bones)] };
+            let mut world = split(sims);
+            let in_play = crate::vehicle::InPlay::settled(&spots, &vec![false; me + 1], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+            assert_eq!(in_play.len(), 1, "the truck is parked");
+            for s in &mut world.seats {
+                s.garage.in_play = in_play.fresh();
+            }
+            world.simulate(DT, Input::default(), &mut Default::default());
+            world.seats[me].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 60.0, 0.0);
+            let mut track = Vec::new();
+            for t in 0..60 {
+                world.seats[me].sim.rider.sense.wrecks_enabled = t >= 4;
+                world.simulate(DT, Input::default(), &mut Default::default());
+                let s = &world.seats[me].sim;
+                assert!(s.rider.ride.parked.is_empty(), "tick {t}: the lent cars were not taken back");
+                let p = &s.parked_cars[0];
+                track.push((s.rider.crash.is_some(), p.machine.body.position.z(), p.awake()));
+            }
+            track
+        };
+        let (alone, seat1, alone_boneless) = (ride(false, true), ride(true, true), ride(false, false));
+        let from = alone.iter().position(|t| t.0).expect("the lone seat's rider wrecks on the truck");
+        assert_eq!(seat1.iter().position(|t| t.0), Some(from), "seat 1's rider wrecks on the same tick");
+        let woken = |track: &[(bool, f32, bool)]| track.iter().enumerate().filter(|(_, t)| t.2).map(|(k, _)| k).collect::<Vec<_>>();
+        println!("truck awake on ticks {:?} alone, {:?} as seat 1, {:?} without bones", woken(&alone), woken(&seat1), woken(&alone_boneless));
+        assert_ne!(woken(&alone), woken(&alone_boneless), "the lone seat's bones never woke the truck");
+        assert_eq!(woken(&seat1), woken(&alone), "seat 1's bones wake the shared truck on other ticks than the lone seat's");
+        for (t, ((_, a, _), (_, s, _))) in alone.iter().zip(&seat1).enumerate() {
+            assert!((a - s).abs() < 1e-4, "tick {t}: the shared truck at z {s}, the lone seat's {a}");
+        }
     }
 
     /// F75a: a split-screen seat's lone flown plane meets the shared parked truck as a Sim's plane lane
