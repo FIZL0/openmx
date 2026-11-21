@@ -163,6 +163,40 @@ def test_gate() -> None:
               'a variant test that fails fails the gate, with a rerun line that rebuilds just it')
         check('rerun pass `-p a --test var`' not in log, 'and the plain build of the same binary still passes')
 
+        # A linker that fails while ../linkflake exists (removing it), as one did under load in P383's merge
+        # gate (K82), and every time while ../linkbroken does. Its own build dir: RUSTFLAGS rebuild it all.
+        (w / 'gate.toml').write_text('')
+        ld = w / 'cc.sh'  # named ld*, rustc hands it ld's own flags, not cc's
+        ld.write_text(f'#!/bin/sh\nif [ -e "{w}/linkflake" ]; then rm -f "{w}/linkflake"; '
+                      f'echo "ld: kit test: out of luck" >&2; exit 1; fi\n'
+                      f'if [ -e "{w}/linkbroken" ]; then echo "ld: kit test: broken for good" >&2; exit 1; fi\n'
+                      'exec cc "$@"\n')
+        ld.chmod(0o755)
+        lenv = {**env, 'CARGO_TARGET_DIR': str(w / 'target/ld'), 'RUSTFLAGS': f'-C linker={ld}'}
+        (w / 'linkflake').write_text('')
+        rc, notes = cargo_gate.run('cargo test -q --message-format=short', w, lenv, 4, w / 'log', 'main',
+                                   True, w / 'times.json')
+        log = (w / 'log').read_text()
+        check(rc == 0, f'a link step that fails once relinks and passes (rc {rc})')
+        check('ld: kit test: out of luck' in log, "the linker's own stderr is in the log")
+        check(any('linked on a second try' in n for n in notes), f'and the verdict says it relinked ({notes})')
+        (w / 'a/src/lib.rs').write_text('pub fn two() -> u32 { 2 + 0 }\n')
+        (w / 'linkbroken').write_text('')
+        rc, notes = cargo_gate.run('cargo test -q --message-format=short', w, lenv, 4, w / 'log', 'main',
+                                   True, w / 'times.json')
+        log = (w / 'log').read_text()
+        (w / 'linkbroken').unlink()
+        g('checkout', '-q', '--', 'a/src/lib.rs', cwd=w)
+        check(rc != 0 and cargo_gate.LINK_FAILED in log, f'one that fails twice fails the gate as a link failure (rc {rc})')
+        check(log.count('ld: kit test: broken for good') >= 2, 'with both goes of the linker in the log')
+        (w / 'a/src/lib.rs').write_text('pub fn two() -> u32 { nope }\n')
+        rc, _ = cargo_gate.run('cargo test -q --message-format=short', w, lenv, 4, w / 'log', 'main',
+                               True, w / 'times.json')
+        log = (w / 'log').read_text()
+        check(rc != 0 and 'relinking' not in log and cargo_gate.LINK_FAILED not in log,
+              'a compile error never relinks')
+        g('checkout', '-q', '--', 'a/src/lib.rs', cwd=w)
+
         (w / 'a/src/lib.rs').write_text('pub fn two() -> u32 { nope }\n')
         rc, _ = gate()
         log = (w / 'log').read_text()

@@ -132,6 +132,18 @@ def test_check_summary():
         has(out, r'E0308', 'with the compiler error')
         check('test result' not in out, 'and no test output to confuse it with a failing test')
 
+        from ps2kit.cargo_gate import LINK_FAILED
+        log.write_text('error: linking with `cc` failed: exit status: 1\n'
+                       '  = note:  "cc" "-m64" "a.o" …\n  = note: ld: cannot open output file: Bus error\n'
+                       '  = note: collect2: error: ld returned 1 exit status\n'
+                       'error: could not compile `openmx` (test "car_modifiers") due to 1 previous error\n'
+                       + LINK_FAILED + '\n', encoding='utf-8')
+        out = '\n'.join(checks.summarise(1, log))
+        has(out, r'^LINK FAILED', 'a link step that failed twice gets its own headline')
+        has(out, r'cannot open output file', "with the linker's own words")
+        check('"-m64"' not in out, 'but not its command line')
+        check('BUILD FAILED' not in out, 'and it does not read as a compile error')
+
         log.write_text('running 3 tests\ntest fpu::add_masks_guard_bit ... FAILED\n\nfailures:\n'
                        '    fpu::add_masks_guard_bit\n\ntest result: FAILED. 2 passed; 1 failed\n',
                        encoding='utf-8')

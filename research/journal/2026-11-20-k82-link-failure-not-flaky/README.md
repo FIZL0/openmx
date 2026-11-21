@@ -2,5 +2,7 @@
 
 2026-11-20. Task: `./kit plan K82`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+K82 was filed as "make car_modifiers robust", but car_modifiers never ran: nine test binaries failed to
+link in P383's merge gate, and the gate's short messages had dropped the linker's own words. Part 1 laid
+out options; the person picked A. Part 2 built it: the gate now logs the linker's stderr, relinks once
+when only the link step failed, and a second failure gets its own `LINK FAILED` headline.

@@ -317,15 +317,51 @@ def _pkg_name(package_id: str) -> str:
     return package_id.rsplit('#', 1)[0].rstrip('/').rsplit('/', 1)[-1]
 
 
-def build(cmd: str, cwd: Path, env: dict, log) -> tuple[int, list[Binary]]:
-    """`cmd --no-run`, its diagnostics written to the log as text; the test binaries it made."""
+# Under the short format a link error's rendered text is one line, and the linker's own stderr is only in
+# its child notes. Nine binaries failed to link in P383's merge gate (11-20) with nothing of why in any log,
+# a rerun linked them, and the runner filed them as flaky tests (K80-K85).
+LINK_FAILED = '(kit: only the link step failed, and again on a relink: the linker said why in the notes above)'
+
+
+def build(cmd: str, cwd: Path, env: dict, log, notes: list[str] | None = None) -> tuple[int, list[Binary]]:
+    """`cmd --no-run`, its diagnostics written to the log as text; the test binaries it made. A build where
+    only the link step failed relinks once: cargo keeps every object it compiled, so the second go only
+    links. Which binaries it took a second go for goes in `notes`; a second failure leaves LINK_FAILED in
+    the log, for `./kit check`'s headline."""
+    rc, bins, links, others = _build_once(cmd, cwd, env, log)
+    if not rc or not links or others:
+        return rc, bins
+    log.write(f'(kit: only the link step failed ({", ".join(links)}); relinking once)\n')
+    log.flush()
+    rc, bins, again, others = _build_once(cmd, cwd, env, log)
+    if not rc:
+        if notes is not None:
+            notes.append(f'linked on a second try, the link step failed once: {", ".join(links)}')
+    elif again and not others:
+        log.write(LINK_FAILED + '\n')
+    return rc, bins
+
+
+def _link_notes(m: dict) -> str:
+    """A link error's child notes: the linker's command line, cut short, then its stderr."""
+    out = []
+    for c in m.get('children') or []:
+        t = (c.get('message') or '').rstrip()
+        if t.startswith(' "') and len(t) > 300:
+            t = t[:300] + ' …'
+        out += [f'  = note: {l}' for l in t.splitlines() if l.strip()]
+    return ''.join(l + '\n' for l in out)
+
+
+def _build_once(cmd: str, cwd: Path, env: dict, log) -> tuple[int, list[Binary], list[str], int]:
+    """build's one go: also the targets whose link step failed, and how many other errors there were."""
     plain = re.sub(r'\s--message-format(=|\s+)\S+', '', ' ' + cmd).strip()
     full = f'{plain} --no-run --message-format=json-diagnostic-short'
     log.write(f'$ {full}\n')
     log.flush()
     p = subprocess.Popen(full, shell=True, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          env=env, text=True, errors='replace')
-    bins = []
+    bins, links, others = [], [], 0
     for line in p.stdout:
         if not line.startswith('{'):
             log.write(line)
@@ -336,17 +372,25 @@ def build(cmd: str, cwd: Path, env: dict, log) -> tuple[int, list[Binary]]:
             log.write(line)
             continue
         if m.get('reason') == 'compiler-message':
-            r = (m.get('message') or {}).get('rendered')
+            msg = m.get('message') or {}
+            r = msg.get('rendered')
             if r:
                 log.write(r if r.endswith('\n') else r + '\n')
+            if msg.get('level') in ('error', 'error: internal compiler error'):
+                if (msg.get('message') or '').startswith('linking with '):
+                    links.append((m.get('target') or {}).get('name', '?'))
+                    log.write(_link_notes(msg))
+                else:
+                    others += 1
         elif m.get('reason') == 'compiler-artifact' and m.get('executable') and (m.get('profile') or {}).get('test'):
             t = m['target']
             bins.append(Binary(m['executable'], _pkg_name(m['package_id']), t['kind'][0], t['name'],
                                m.get('manifest_path', str(cwd / 'Cargo.toml'))))
-    return p.wait(), bins
+    return p.wait(), bins, links, others
 
 
-def variants(cmd: str, cwd: Path, env: dict, log, gc: dict, pick: Selection | None = None) -> tuple[int, list[Binary]]:
+def variants(cmd: str, cwd: Path, env: dict, log, gc: dict, pick: Selection | None = None,
+             notes: list[str] | None = None) -> tuple[int, list[Binary]]:
     """gate.toml's `[[variant]]`s: each one's binaries built with its features into its target directory,
     named by the args that rerun them, filter and all; with a `pick`, only the ones it keeps."""
     out = []
@@ -358,7 +402,7 @@ def variants(cmd: str, cwd: Path, env: dict, log, gc: dict, pick: Selection | No
             continue
         flags = (f' --features {v["features"]}' if v.get('features') else '') + \
                 (f' --target-dir {shlex.quote(str(v["target_dir"]))}' if v.get('target_dir') else '')
-        rc, bins = build(f'{cmd}{flags} {" ".join(tests)}', cwd, env, log)
+        rc, bins = build(f'{cmd}{flags} {" ".join(tests)}', cwd, env, log, notes)
         if rc:
             return rc, out
         for b in bins:
@@ -547,19 +591,19 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         if why:
             notes.append(f'ran every test binary: {why[0]}')
         if pick is None:
-            rc, bins = build(cmd, cwd, env, log)
+            rc, bins = build(cmd, cwd, env, log, notes)
         else:
             rc, bins = 0, []
             builds = ([' '.join(f'-p {n}' for n in sorted(pick.whole))] if pick.whole else []) + \
                 [f'-p {n} ' + ' '.join(f'--test {t}' for t in sorted(ts)) for n, ts in sorted(pick.part.items())]
             for b in builds:
-                rc, got = build(f'{cmd} {b}', cwd, env, log)
+                rc, got = build(f'{cmd} {b}', cwd, env, log, notes)
                 bins += got
                 if rc:
                     return rc, notes
         if rc:
             return rc, notes
-        rc, more = variants(cmd, cwd, env, log, gc, pick)
+        rc, more = variants(cmd, cwd, env, log, gc, pick, notes)
         if rc:
             return rc, notes
         if pick is not None:

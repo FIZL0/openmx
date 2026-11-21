@@ -342,6 +342,13 @@ def summarise(rc: int, log: Path, what: str = 'TESTS') -> list[str]:
         n = _passed_count(text)
         return [f'{what} PASSED: {n} tests' if n else f'{what} PASSED', *[f'  ({x})' for x in NOTES]]
     errs = [l for l in text.splitlines() if cfg(False).build_error_re.search(l) and not CARGO_TEST_FAILED.match(l)]
+    from ps2kit.cargo_gate import LINK_FAILED
+    if errs and LINK_FAILED in text:
+        # The compiler was happy and the linker was not, twice: a broken toolchain or machine as often as the
+        # code, and not a test to make robust (K80-K85 were filed as flaky after a link failure).
+        said = [l for l in text.splitlines() if l.startswith('  = note: ') and not l.startswith('  = note:  "')]
+        return [f'LINK FAILED (the code compiled, the linker failed, and again on a relink; no tests ran):',
+                *_cap([l for l in text.splitlines() if l in errs or l in said]), f'(full log: {_rel(log)})']
     if errs:
         # A build failure means "you broke the code you just wrote" — a completely different next move from a
         # failing test, so it gets its own unmissable headline and the test output is not shown at all.
