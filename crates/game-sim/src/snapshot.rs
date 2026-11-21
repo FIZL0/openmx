@@ -262,7 +262,7 @@ pub(crate) fn parked_bytes(cars: &[crate::car::Parked]) -> Vec<u8> {
 fn parked_put(cars: &[crate::car::Parked], out: &mut Vec<u8>) {
     cars.len().put(out);
     for p in cars {
-        let crate::car::Parked { car: _, hull: _, machine, collision, rest } = p;
+        let crate::car::Parked { car: _, hull: _, machine, collision, rest, store: _, model: _ } = p;
         machine.put(out);
         collision.put(out);
         rest.put(out);
@@ -283,7 +283,8 @@ fn parked_take(r: &mut Reader<'_>, here: &[crate::car::Parked]) -> Result<Vec<cr
             collision.rays = Arc::clone(&h.collision.rays);
             collision.record.rays.clone_from(&h.collision.record.rays);
             let rest = Wire::take(r)?;
-            Ok(crate::car::Parked { car: Arc::clone(&h.car), hull: Arc::clone(&h.hull), machine, collision, rest })
+            // The put-back store moves only on a Restart, which loads the ride again (S500).
+            Ok(crate::car::Parked { car: Arc::clone(&h.car), hull: Arc::clone(&h.hull), machine, collision, rest, store: h.store, model: Arc::clone(&h.model) })
         })
         .collect()
 }

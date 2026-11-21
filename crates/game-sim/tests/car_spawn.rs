@@ -55,6 +55,7 @@ mod wrapper_at {
     pub const OF_CAR: u32 = 0x50;
     pub const VTABLE: u32 = 0x38;
     pub const NODE: u32 = 0x134;
+    pub const SPOT: u32 = 0x90;
     pub const NOSE: u32 = 0xa0;
     pub const UP: u32 = 0xb0;
     pub const STORE: u32 = 0xe0;
@@ -463,4 +464,66 @@ fn on_track<R>(disc: &mut Disc, names: &[&str], f: impl FnOnce(&mut Wooded<Place
     let ground = Ground::new(&terrain, &scene.terrain);
     let (trees, _) = Trees::on_ground(&member(".esb"), &ground, &CurveTable::build()).unwrap();
     f(&mut Wooded { world: Place { ground, props }, trees })
+}
+
+/// **A Restart puts free07's parked baja back as the original's does** (S500). R67: each world reset
+/// (the load's, and each Restart's from the pause menu) runs every actor's reset, and the car's puts
+/// it back from its physics object's store, squaring the store's nose and up in place again. R52's
+/// image holds the load's once-squared store; the original's world reset is run on it twice, and
+/// the port's put-back twice beside it: the body's place and turn, and the store, bit for bit
+/// after each, and the body's speeds and turn rates zero.
+#[test]
+fn a_restart_puts_the_parked_baja_back_as_the_original() {
+    let Some(kit) = Kit::load().map_err(|why| skip(&why)).ok() else { return };
+    let Some(mut disc) = Disc::open_configured().map_err(|why| skip(&why)).ok() else { return };
+    let path = kit.ctx("states").join(BAJA_IMAGES[0].0);
+    let Some(mut ee) = Ee::from_ram(&path).map_err(|why| skip(&why)).ok() else { return };
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let res = disc.res("machine.res").unwrap();
+    let kind = Kind::Baja;
+    let car = Car::read_bytes(&res.read(kind.phy()).unwrap(), kind);
+    let model = CarModel::read(&res.read(PARKED[1].model).unwrap()).unwrap();
+    let rays = track::Rays::parse(&res.read(kind.rays()).unwrap()).unwrap();
+    let hull = track::Mesh::parse(&res.read(kind.hull()).unwrap()).unwrap();
+    on_track(&mut disc, &["Tracks\\free07.res", "Tracks\\free07_2.res"], |world| {
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+    let c = PARKED[1].at;
+    let w = c + wrapper_at::OF_CAR;
+    let b = ee.u32_at(c + car_at::BODY);
+    let store = |ee: &Ee| (quad(ee, w + wrapper_at::SPOT), quad(ee, w + wrapper_at::NOSE), quad(ee, w + wrapper_at::UP));
+
+    // The port's load leaves the store as the original's: its pair squared once.
+    let mut p = game_sim::car::Parked::settled(Arc::new(car.clone()), &model, Rays::of(&rays), Arc::new(hull), world, BAJA_AT, baja_facing(), &acos, &curve);
+    let (spot, nose, up) = store(&ee);
+    // The x, y and z: the original's w lanes hold 1.0 (its factory's copies), the port's the file
+    // nose's 0, and the turn reads no w (S498 proved it bit for bit from the port's).
+    assert_eq!((bits3(p.store.nose), bits3(p.store.up)), (bits3(nose), bits3(up)), "the load's store");
+    // Its spot but for the ground's last bits (5e-5 ft, see the test above).
+    assert!((0..3).all(|i| (p.store.at.0[i] - spot.0[i]).abs() < 1e-4), "spot {:?} want {spot:?}", p.store.at);
+    p.store.at = spot;
+
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    // The world reset's part that puts the cars back: its game manager's (world +0x30) actor manager
+    // (+0x34) running every actor's reset. R67 found the whole world reset's bits the same; here the
+    // rest of it calls through a pointer the interpreter has no hook for.
+    let actors = ee.u32_at(ee.u32_at(ee.u32_at(app + 0x3cc) + 0x30) + 0x34);
+    assert_ne!(actors, 0, "the actor manager");
+    let each = addr("actor_manager_each_early").unwrap();
+    for restart in 1..=2 {
+        ee.call(each, &[u64::from(actors)], &[], 2_000_000_000);
+        p.put_back();
+        let (spot, nose, up) = store(&ee);
+        assert_eq!(bits3(spot), bits3(p.store.at), "restart {restart}: the spot is kept");
+        assert_eq!((bits3(p.store.nose), bits3(p.store.up)), (bits3(nose), bits3(up)), "restart {restart}: the store squared again");
+        let m = &p.machine.body;
+        for (name, o, v) in [("position", 0x60, m.position), ("quat", 0x170, m.quat), ("last quat", 0x150, m.last_quat), ("velocity", 0x70, m.velocity), ("rates", 0x1b0, m.rates)] {
+            let want = quad(&ee, b + o);
+            eprintln!("restart {restart}: {name} {v:?}, the original's {want:?}");
+            assert_eq!(bits3(v), bits3(want), "restart {restart}: {name} {v:?} want {want:?}");
+        }
+        assert_eq!(m.quat.to_bits()[3], quad(&ee, b + 0x170).to_bits()[3], "restart {restart}: quat w");
+    }
+    // R67's bits after one restart, which the second turns on from.
+    eprintln!("the store's up after two restarts {:?}", p.store.up);
+    });
 }

@@ -3170,6 +3170,21 @@ pub struct Parked {
     /// Where its body last fell asleep (S486): the node the AI riders' hull of it stands at
     /// ([`Parked::ai_hull`]), which moves only when it sleeps again, and which a resync carries.
     pub rest: crate::math::Mat4,
+    /// Where each put-back puts it (S500, [`Parked::put_back`]).
+    pub store: Store,
+    /// Its model, which each put-back builds it off again.
+    pub model: std::sync::Arc<CarModel>,
+}
+
+/// **A parked car's put-back store** (S500): the spot, nose and up its physics object keeps and puts
+/// it back at on every world reset (the load's and each Restart's). Each put-back squares the nose
+/// and up in place ([`crate::flight::spawn_axes`]) and turns the car by them, so after the load's
+/// they hold the pair squared once, and restart N turns the car by the pair squared N+1 times.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Store {
+    pub at: Vf,
+    pub nose: Vf,
+    pub up: Vf,
 }
 
 /// The node `body` stands at, as a matrix ([`crate::wreck_bike::node_of`]).
@@ -3203,13 +3218,59 @@ impl Parked {
         acos: &AcosTable,
         curve: &CurveTable,
     ) -> Parked {
+        Parked::settled_after(car, model, rays, hull, world, at, facing, acos, curve, 0)
+    }
+
+    /// **The same after `restarts` Restarts** (S500): put back that many times more
+    /// ([`Parked::put_back`]) before the settle, so it is turned by its store squared `restarts` + 1
+    /// times, as the original's car is after that many world resets. The settle after the last is
+    /// the load's: the shell's Restart loads the ride again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settled_after(
+        car: std::sync::Arc<Car>,
+        model: &CarModel,
+        rays: crate::flight_search::Rays,
+        hull: std::sync::Arc<crate::track::Mesh>,
+        world: &mut dyn crate::world::World,
+        at: Vf,
+        facing: Vf,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        restarts: usize,
+    ) -> Parked {
         let world = &mut Through(world);
         let spawn = parked_spawn(world, model, at);
-        let mut machine = Machine::new(&car, model, spawn, facing, parked_up(world, at));
-        let mut collision = collision_of_model(&car, model, &machine.body, rays);
-        machine.settle(&car, world, &mut collision, F(LOAD_DT), acos, curve, SETTLE_FRAMES);
+        let up = parked_up(world, at);
+        let machine = Machine::new(&car, model, spawn, facing, up);
+        let collision = collision_of_model(&car, model, &machine.body, rays);
+        // The load's put-back squared the store once.
+        let (nose, up) = crate::flight::spawn_axes(facing, up);
         let rest = node_matrix(&machine.body);
-        Parked { car, hull, machine, collision, rest }
+        let mut p = Parked { car, hull, machine, collision, rest, store: Store { at: spawn, nose, up }, model: std::sync::Arc::new(model.clone()) };
+        for _ in 0..restarts {
+            p.put_back();
+        }
+        let Parked { car, machine, collision, .. } = &mut p;
+        machine.settle(car, world, collision, F(LOAD_DT), acos, curve, SETTLE_FRAMES);
+        p.rest = node_matrix(&p.machine.body);
+        p
+    }
+
+    /// **The put-back of a world reset** (S500): the car built again at its store's spot, turned by
+    /// its store's nose and up squared ([`Machine::new`]), its collision object with it, and the
+    /// store's pair squared in place, as the original's car reset leaves it (R67: the reset of every
+    /// actor, which the pause menu's Restart runs). Its body is awake and where it last slept is
+    /// where it now stands.
+    ///
+    /// Proved in the interpreter on R52's free07 baja image (tests/car_spawn.rs): the body's place,
+    /// turn and store bit for bit after one and two of the original's world resets.
+    pub fn put_back(&mut self) {
+        let Store { at, nose, up } = self.store;
+        self.machine = Machine::new(&self.car, &self.model, at, nose, up);
+        self.collision = collision_of_model(&self.car, &self.model, &self.machine.body, (*self.collision.rays).clone());
+        let (nose, up) = crate::flight::spawn_axes(nose, up);
+        self.store = Store { at, nose, up };
+        self.rest = node_matrix(&self.machine.body);
     }
 
     /// Whether its body is awake.
