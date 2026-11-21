@@ -1,0 +1,13 @@
+# S475: from f68-2935 (balls 1 and 2 rolling after the strike): gas (to see the tape lands), coast,
+# then the reset chord, L1 first and R1 pressed on it, then coast.
+sleep 5t
+down cross
+sleep 20t
+up cross
+sleep 30t
+down l1
+sleep 3t
+down r1
+sleep 6t
+release
+sleep 100t
