@@ -1671,9 +1671,10 @@ actor_manager_remove        boot 0x0021a9d0 Remove(actor): find in the master li
 #                                           in the list, which the next lookup reads through
 actor_manager_each_early    boot 0x0021aa80 walk the master list head->tail calling vtable +0x28 on
 #                                           each actor
-#                                           R67: not per frame: the reset of every actor, run only by
-#                                           the game manager's reset (world_reset below); its +0x28
-#                                           is each actor's reset (on +0x48's vtable)
+#                                           R67: the reset of every actor; the game manager's reset
+#                                           (world_reset below) calls it. Whether anything else does
+#                                           (per frame) was not checked. Its +0x28 is each actor's
+#                                           reset (on +0x48's vtable)
 actor_manager_each_late     boot 0x0021aef0 the same walk calling vtable +0x58
 actor_manager_nearest       boot 0x0021aad0 (manager, point*, out_f32|0, exclude) -> actor|0: master
 #                                           list order; gates on actor+0x18 then +0x10; distance from
