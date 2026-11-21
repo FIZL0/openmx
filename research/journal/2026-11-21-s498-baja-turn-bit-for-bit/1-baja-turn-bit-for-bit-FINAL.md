@@ -47,4 +47,4 @@ Task S498. 2026-11-21.
 
 ## Next
 
-- none
+- R67: does the original put a parked car back again in play.
