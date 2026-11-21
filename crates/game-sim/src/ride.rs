@@ -2455,8 +2455,11 @@ impl Ride {
         }
 
         // 0 — the tail of the pad read: the stoppie's brake, and gas and brake held together, slow,
-        // are the reverse.
-        let c = &c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne).gate_cut();
+        // are the reverse. An AI rider's levers ([`Controls::squared`]) skip it: its hand-off writes
+        // the lever words itself, so the original's pad read never runs on them, and its reverse
+        // lever alone pushes the bike back at any speed (S493).
+        let tail = if c.squared { *c } else { c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne) };
+        let c = &tail.gate_cut();
         held.reverse = c.reverse;
 
         // 1 — the input layer's rate limit. MX vs. ATV's (MD63a) leaves the stick unsquared, cuts
@@ -2511,6 +2514,8 @@ impl Ride {
         // chassis — a substep behind the chassis' own measure while a wheel is down, which is what
         // S58's turn showed in the steering's speed fade (S58).
         let forward_speed = F(air.contact_vel.z());
+        // The first substep's push; the substeps below rotate it again by the transform as the last
+        // substep's integration left it (S493).
         let reverse_force = chassis::rotate(&rot, mv::reverse_push(&p.mv, forward_speed));
         // The donut's angle and deflection are the pad read's, off the stick before the squaring:
         // the trick decoder's look (`+0x634`, `+0x638`), which the ground step reads (S228b).
@@ -2791,7 +2796,10 @@ impl Ride {
                 let local = mv::reverse_push(mvp, s.speed);
                 if mvc.has_transform {
                     calls.push(mv::Call::Rotate(local));
-                    mvc.force = add_xyz(mvc.force, s.reverse_force);
+                    // The original's `transform_rotate` rebuilds the chassis' transform first, which
+                    // every substep's integration has moved: a bike turning while it backs up is
+                    // pushed down its heading as it stands now, not as the frame began (S493).
+                    mvc.force = add_xyz(mvc.force, chassis::rotate(&out.mat3(Frame::Chassis), local));
                 }
             }
             mv::wheel_clear(&mut front.mv);

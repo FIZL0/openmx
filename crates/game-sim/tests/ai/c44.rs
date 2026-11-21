@@ -19,12 +19,12 @@
 // the capture's row before it holds for each AI rider (the brain's levers, `+0x628`...`+0x648`),
 // and the bikes are compared with the row: the chassis centre, velocity, rates and orientation.
 //
-// What it finds: a1 is bit for bit (every chassis word compared) through 11134, a0 and a3 within
-// 0.001 ft, the plane where the original's is. On 11135 a1's brain backs up (`Recovery::back_up`:
-// the reverse lever alone), and the original pushes the bike back from 77 ft/s, its levers going
-// straight into the rider's; the port's ride lets go of that reverse (the pad's rule wants gas and
-// brake held, P72), so ours coasts on and meets the plane 12 ft further on and a different way. The
-// list and the push are not compared: they wait on the reverse (filed as a follow-up).
+// What it finds: a1 is bit for bit (every chassis word compared) through 11145, a0 and a3 within
+// 0.001 ft, the plane where the original's is. From 11135 a1's brain backs up (`Recovery::back_up`:
+// the reverse lever alone), and the bike is pushed back from 77 ft/s, as the original's levers go
+// straight into the rider's (S493). On 11145 a1 lists the plane's mirror, as the original's; on
+// 11146 the original's a1 also lists two of its own body rays on the plane's hull and ours none, and
+// a1 and the plane both part there.
 
 use super::race4::{Bikes, c33_bike, c44_human_bike};
 use super::sim::{S12eLists, s12e_bike, s12e_racer, s12e_u64};
@@ -36,7 +36,9 @@ use game_sim::eco::{Trees, Wooded};
 use game_sim::flight::Flight;
 use game_sim::flight_search;
 use game_sim::phy::{self, Phy, Plane};
-use game_sim::rider::Tables;
+use game_sim::contact::Contact;
+use game_sim::rider::{Rider, Tables};
+use game_sim::rider_contact;
 use game_sim::track::{self, Scene, Terrain};
 use game_sim::world::{Ground, Place, Props};
 use ps2_oracle::{Ee, Kit};
@@ -385,9 +387,10 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
     let by_tick: HashMap<u64, &Row> = rows.iter().map(|r| (r.n("frame_counter"), r)).collect();
     assert_eq!(by_tick[&(FIRST_LISTED - 1)].n("a1_rec_count"), 0, "a1 lists nothing before {FIRST_LISTED}");
     assert!(by_tick[&FIRST_LISTED].n("a1_rec_count") > 0, "a1 lists the plane at {FIRST_LISTED}");
-    let speed = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
-    let mut speeds: Option<(f32, f32)> = None;
-    let mut pushes: Vec<(u64, f32)> = Vec::new();
+    // a1's own entries on the plane's hull (kind 0) against the row's, and the plane against the
+    // row's, from the first tick a1 lists the plane: (tick, own entries ours/theirs, the worst point
+    // and normal gaps, the plane's gap).
+    let mut met: Vec<(u64, usize, usize, f32, f32, f32)> = Vec::new();
     for tick in frame + 1 + C44_HELD..=WRECKED {
         if let Some(last) = by_tick.get(&(tick - 1)).or_else(|| by_tick.get(&tick)) {
             let lane = sim.ai.as_deref_mut().unwrap();
@@ -396,6 +399,15 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
                 lane.pilots.iter_mut().find(|(q, _)| *q == p).unwrap().1.levers = last.levers(RIDERS[k].2);
             }
         }
+        // The Sim gathers the bikes' lists from where the last tick left them, before anyone is
+        // stepped, with the plane's hull in their world (`rider_contact::contacts_met`); the same
+        // gather here is a1's own entries the step resolves. The plane's mirrors (kind 1) are its
+        // frame's, which the Sim does not hand out.
+        let own: Vec<Contact> = {
+            let hulls: Vec<_> = sim.plane.as_ref().and_then(|p| p.hull(0)).into_iter().collect();
+            let seated: Vec<(&Rider, bool)> = std::iter::once((&sim.rider, false)).chain(sim.others.iter().map(|p| (&p.rider, true))).collect();
+            rider_contact::contacts_met(&seated, &hulls, dt, &world).map_or_else(Vec::new, |(l, _)| l[player_of(STRUCK)].clone())
+        };
         sim.step(dt, &Default::default(), &mut world);
         let Some(row) = by_tick.get(&tick) else {
             continue;
@@ -410,22 +422,22 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
         let plane_gap = (0..3).map(|c| (plane[c] - row.vf("plane_pos")[c]).powi(2)).sum::<f32>().sqrt();
         let others: Vec<String> = ais.iter().filter(|&&k| k != STRUCK).map(|&k| format!("{} {:.4}", RIDERS[k].2, gaps(&sim, player_of(k), row, RIDERS[k].2)[0])).collect();
         let r = sim.rider_of(player_of(STRUCK));
-        // Backing up, the brain's reverse lever alone (no gas, no brake): the original pushes the
-        // bike back by `[Move]`'s ReverseGain × (ReverseSpeed − speed) over its mass, whatever the
-        // speed, as its own levers go straight into the rider's (`+0x648`). The port's ride runs the
-        // pad's reverse rule on them, which lets go of a reverse with neither lever held, so its a1
-        // coasts. The original's extra slowing over ours is that push, tick by tick, while ours is
-        // still within 3 ft of it (further off, ours meets ground of its own: at 11141 it is 5.8 ft
-        // off and lands from a bump the original's never reached).
-        let (ours, theirs) = (speed(r.ride.chassis.vel), speed(row.vf("a1_ch_vel")));
-        let last = by_tick.get(&(tick - 1));
-        if let (Some((ours0, theirs0)), Some(last)) = (speeds, last) {
-            if last.f("a1_reverse") == 1.0 && last.f("a1_gas") == 0.0 && last.f("a1_brake") == 0.0 && g[0] < 3.0 {
-                let push = phy.mv.reverse_gain.0 * (phy.mv.reverse_speed.0 - theirs0) / phy.mass.mass.0 * dt.0;
-                pushes.push((tick, ((theirs - theirs0) - (ours - ours0)) / push));
+        if tick >= FIRST_LISTED {
+            let xyz3 = |name: String| Vf::new(row.f(&format!("{name}.x")), row.f(&format!("{name}.y")), row.f(&format!("{name}.z")), 0.0);
+            let theirs: Vec<(Vf, Vf)> = (0..row.n("a1_rec_count"))
+                .filter(|k| row.n(&format!("a1_c{k}.kind")) == 0)
+                .map(|k| (xyz3(format!("a1_c{k}.point")), xyz3(format!("a1_c{k}.normal"))))
+                .collect();
+            let ours: Vec<&Contact> = own.iter().filter(|c| c.kind == 0).collect();
+            let gap = |a: Vf, b: Vf| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>().sqrt();
+            let (mut point, mut normal) = (0.0f32, 0.0f32);
+            for (o, t) in ours.iter().zip(&theirs) {
+                point = point.max(gap(o.point, t.0));
+                normal = normal.max(gap(o.normal, t.1));
             }
+            println!("    own entries ours {} theirs {} (point {point:.5} normal {normal:.5})", ours.len(), theirs.len());
+            met.push((tick, ours.len(), theirs.len(), point, normal, plane_gap));
         }
-        speeds = Some((ours, theirs));
         if std::env::var_os("C44_SHOW").is_some() {
             let l = row.levers("a1");
             let (v, w) = (r.ride.chassis.vel, row.vf("a1_ch_vel"));
@@ -449,23 +461,35 @@ fn c44_a_plane_dropped_before_an_ai_bike_meets_it_as_the_original() {
         }
     }
     println!("a1 agrees through {:?} (worst {worst:?}); parts at {parted:?}", agreed.last().map(|a| a.0));
-    println!("the original's slowing over ours, in reverse pushes, while ours is near: {pushes:?}");
     let through = agreed.last().map_or(0, |a| a.0);
     assert!(through >= C44_AGREES_THROUGH, "a1 parts at {parted:?}, before {C44_AGREES_THROUGH}");
     assert_eq!(parted, C44_PARTS, "where a1 parts from the original (a regression mark: move it when it moves)");
     assert!(worst.iter().all(|&w| w == 0.0), "a1 is bit for bit until it parts: {worst:?}");
-    assert_eq!(pushes.iter().map(|p| p.0).collect::<Vec<_>>(), [11135, 11136, 11137, 11138], "a1's ticks backing up near the original's");
-    for &(tick, k) in &pushes {
-        assert!((0.75..1.3).contains(&k), "at {tick} the original's slowing over ours is {k} reverse pushes, not one");
-    }
+    // The list and the plane's push (regression marks: move them when they move). a1's own entries
+    // on the hull are the row's, in number and (within 0.001) in place, until the strike: on 11146
+    // the original's a1 lists two of its body rays on the plane's hull and ours none, though our a1
+    // is still bit for bit going into it, so its resolve has only the plane's mirror and both bodies
+    // part there.
+    let list_parts = met.iter().find(|m| m.1 != m.2 || m.3 >= 1e-3 || m.4 >= 1e-3).map(|m| m.0);
+    println!("a1's own entries part at {list_parts:?}: {:?}", met.iter().find(|m| Some(m.0) == list_parts));
+    assert_eq!(list_parts, C44_LIST_PARTS, "where a1's own entries on the plane's hull part from the original's");
+    let plane_parts = met.iter().find(|m| m.5 > 1e-3).map(|m| m.0);
+    assert_eq!(plane_parts, C44_PLANE_PARTS, "where the plane's push parts from the original's");
 }
 
 /// The image's RAM holds the bodies of the row this many ticks past its frame counter.
 const C44_HELD: u64 = 1;
 
 /// How far a1 rides as the original's (centre within 0.001 ft, velocity within 0.01 ft/s), and the
-/// tick it parts on: bit for bit through 11134, its brain's last tick of gas, and off on 11135,
-/// the first it rides backing up (the reverse rule, above). It never reaches the plane as the
-/// original's does: the plane it meets at 11145 is 12 ft further on.
-const C44_AGREES_THROUGH: u64 = 11134;
-const C44_PARTS: Option<u64> = Some(11135);
+/// tick it parts on. Its brain backs up from 11135 (the reverse lever alone), and the ride pushes it
+/// back as the original's does (S493: the brain's levers skip the pad's reverse rule, and the push
+/// turns with the chassis every substep), so a1 is bit for bit through 11145, its first tick listing
+/// the plane, and parts on 11146, the strike's first resolve, where a1 and the plane both leave the
+/// original's.
+const C44_AGREES_THROUGH: u64 = 11145;
+const C44_PARTS: Option<u64> = Some(11146);
+/// The first tick a1's own entries on the plane's hull (kind 0) are not the row's: ours finds none
+/// where the original's body rays strike the hull twice.
+const C44_LIST_PARTS: Option<u64> = Some(11146);
+/// The first tick the plane is off the row's (by more than 0.001 ft): the strike's.
+const C44_PLANE_PARTS: Option<u64> = Some(11146);
