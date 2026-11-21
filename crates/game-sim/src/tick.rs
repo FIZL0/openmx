@@ -816,7 +816,9 @@ impl crate::Sim {
     /// it. The others are their cards ([`crate::ai::Lane::feed_cards`]).
     pub fn think(&mut self, i: usize, dt: F, world: &mut dyn crate::world::World) {
         let Some(k) = self.ai.as_deref().and_then(|l| l.pilots.iter().position(|(p, _)| *p == i)) else { return };
-        let bikes: Vec<crate::ai::Ridden> = (0..1 + self.others.len()).filter_map(|j| crate::ai::Ridden::of(self.rider_of(j))).collect();
+        // F79: the other local seats' bikes after the Sim's own, as its race list has them (P350a).
+        let mut bikes: Vec<crate::ai::Ridden> = (0..1 + self.others.len()).filter_map(|j| crate::ai::Ridden::of(self.rider_of(j))).collect();
+        bikes.extend(self.ridden_guests.iter().cloned());
         let laps = self.race.as_deref().and_then(|r| r.laps.as_deref());
         let Some(lane) = self.ai.as_deref_mut() else { return };
         // The others off their cards (S330), as the last frame's end fed them; in a race with laps,

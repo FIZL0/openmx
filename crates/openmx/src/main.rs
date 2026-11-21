@@ -2847,10 +2847,16 @@ impl<P: sim_world::World> World<P> {
     /// P350: the other seats' riders told to the first seat's race before its pass, as its own
     /// players' bikes tell their cards after their frames ([`game_sim::race::CardFeed::of`]), and each
     /// that rode its bike this pass counted on its card's tracker as a player's bike counts in its
-    /// Sim's step (S319). Nothing without a race, or with the first seat alone.
+    /// Sim's step (S319). Nothing without a race, or with the first seat alone. Its AI riders'
+    /// avoidance is told their bikes too (F79, [`game_sim::Sim::ridden_guests`]).
     fn race_guests_in(&mut self, dt: F) {
         let (first, rest) = self.seats.split_first_mut().expect("a seat");
         let players = first.sim.players();
+        // F79: and their avoidance's scene walks the other seats' bikes after the Sim's own players'.
+        first.sim.ridden_guests = match first.sim.ai {
+            Some(_) => rest.iter().filter_map(|s| game_sim::ai::Ridden::of(&s.sim.rider)).collect(),
+            None => Vec::new(),
+        };
         // P350a: the AI riders' brains read the other seats off cards after the Sim's own players',
         // each its race player (`race_player`), as the Sim's last feed left theirs; its next feed
         // drops them again (`ai::Lane::feed_cards`).

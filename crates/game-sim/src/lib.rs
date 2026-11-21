@@ -195,6 +195,11 @@ pub struct Sim {
     /// steps and hashes as before; on the wire behind their own tag, the rotor's rays and the hull
     /// kept this machine's.
     pub parked_helis: Vec<parked_heli::ParkedHeli>,
+    /// The other local seats' bikes in a race over several seats (F79, [`ai::Ridden`]), as the
+    /// shell tells them before this Sim's pass with [`race::Race::guests`]: the AI riders' scene
+    /// walks them after the Sim's own players' ([`Sim::think`]). Empty — every ride but a split
+    /// screen race — walks as before. The shell's each pass: not walked, hashed or sent.
+    pub ridden_guests: Vec<ai::Ridden>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -313,6 +318,7 @@ impl Sim {
             parked_cars: Vec::new(),
             parked_planes: Vec::new(),
             parked_helis: Vec::new(),
+            ridden_guests: Vec::new(),
         }
     }
 
@@ -1224,6 +1230,7 @@ impl Clone for Sim {
             parked_cars: self.parked_cars.clone(),
             parked_planes: self.parked_planes.clone(),
             parked_helis: self.parked_helis.clone(),
+            ridden_guests: self.ridden_guests.clone(),
         }
     }
 }
