@@ -2,5 +2,8 @@
 
 2026-11-21. Task: `./kit plan S499`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+A driven car now meets the parked cars the original parks in play, alone and in split screen (a lone
+driven car): its rays strike their hulls, a struck one wakes and steps in the car's world after it, as
+the plane's does since S489. Disc tests: the buggy stops short of the truck and pushes it 2.35 ft, the
+same to the bit in split screen. Not yet proved against the original: the capture needs the desktop
+unlocked (wizard S499). Details in 1-PART.

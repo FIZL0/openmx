@@ -3554,6 +3554,10 @@ pub fn cars_from_car(parked: &mut Vec<Parked>, met: &mut crate::flight::Met, was
     resting
 }
 
+/// A driven car's entries on parked car `j`'s hull name `HULL_FROM + j` between its search and
+/// [`Machine::cars_met`] (S499), clear of [`crate::flight::WRECK_FROM`]'s wreck-bike mirrors.
+const HULL_FROM: usize = 1 << 22;
+
 /// **A parked car's hull as a driven car's search meets it** (S499): where its collision object's
 /// node stands it, on a world that wraps the copy nearest `from` (the driven car), moving with its
 /// body, as the plane's search has it ([`crate::parked_wreck::cars_in_plane`]).
@@ -3970,8 +3974,8 @@ impl Machine {
         drop(all);
         let hit = knocked.split_off(knocks.len());
         for e in &mut collision.record.contacts {
-            if let Some(j) = e.other.and_then(|o| o.checked_sub(crate::flight::KNOCK_FROM + knocks.len())) {
-                e.other = Some(crate::flight::WRECK_FROM + j);
+            if let Some(j) = e.other.filter(|&o| o < crate::flight::WRECK_FROM).and_then(|o| o.checked_sub(crate::flight::KNOCK_FROM + knocks.len())) {
+                e.other = Some(HULL_FROM + j);
             }
         }
         if let Some(m) = met.as_deref() {
@@ -4015,7 +4019,7 @@ impl Machine {
     /// on each car's hull) woken, its body after the `first` vehicles and the struck props in
     /// `bodies`, and each awake one searched after the car, `hull` (the car's) in its world: the car's
     /// mirrors at the head of its list, its own entries after them, and their mirrors on the car's
-    /// list. The car's entries on hull `j` ([`crate::flight::WRECK_FROM`]` + j`) renamed to its body.
+    /// list. The car's entries on hull `j` ([`HULL_FROM`]` + j`) renamed to its body.
     #[allow(clippy::too_many_arguments)]
     fn cars_met(
         &self,
@@ -4034,7 +4038,7 @@ impl Machine {
             crate::prop_contact::Pushed { collection: 0, object: k, collider: f.collider, body: f.body, mass: f.mass }
         }));
         for e in &mut collision.record.contacts {
-            if let Some(j) = e.other.and_then(|o| o.checked_sub(crate::flight::WRECK_FROM)) {
+            if let Some(j) = e.other.and_then(|o| o.checked_sub(HULL_FROM)) {
                 e.other = Some(first + at + j);
             }
         }
@@ -4094,7 +4098,8 @@ impl Machine {
         use crate::flight::KNOCK_FROM;
         let me = props.me;
         let mut order: Vec<usize> = Vec::new();
-        // Its entries on the parked cars' hulls name [`WRECK_FROM`] and on (S499): not props.
+        // Names from [`WRECK_FROM`] on are no props: the wreck bikes' mirrors, and (S499) its entries
+        // on the parked cars' hulls ([`HULL_FROM`]).
         //
         // [`WRECK_FROM`]: crate::flight::WRECK_FROM
         let prop = |o: usize| (o < crate::flight::WRECK_FROM).then_some(o).and_then(|o| o.checked_sub(KNOCK_FROM));

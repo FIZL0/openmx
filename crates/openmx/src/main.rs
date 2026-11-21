@@ -2531,11 +2531,8 @@ impl<P: sim_world::World> Game for World<P> {
         // S499: with no lone plane and one car driven (one with a hull and a collision object) they
         // step in its world instead, as a lone plane's (`CarRide::step_traffic`), and its pass says
         // which went to rest.
-        let lone_car = !lone_plane
-            && (self.seats.iter())
-                .filter(|s| !s.waiting && s.riding && s.garage.car_up().is_some_and(|c| c.hull.is_some() && c.struck.is_some() && c.driven.is_some()))
-                .count()
-                == 1;
+        let meets_cars = |s: &Seat| !s.waiting && s.riding && s.garage.car_up().is_some_and(|c| c.hull.is_some() && c.struck.is_some() && c.driven.is_some());
+        let lone_car = !lone_plane && self.seats.iter().filter(|s| meets_cars(s)).count() == 1;
         let mut resting: Vec<bool> = match parked.as_mut() {
             Some(cars) if lone_plane || lone_car => vec![false; cars.len()],
             Some(cars) => {
@@ -2753,7 +2750,7 @@ impl<P: sim_world::World> Game for World<P> {
             };
             // S499: and a lone driven car meets them in its world (`CarRide::step_traffic`): handed to
             // its pass in its met, and back after it. Kept: which were awake before.
-            let in_car = match (car.filter(|_| lone_car), met.as_mut(), parked.as_mut()) {
+            let in_car = match (car.filter(|_| lone_car && meets_cars(&self.seats[me])), met.as_mut(), parked.as_mut()) {
                 (Some(_), Some(m), Some(cars)) if !cars.is_empty() => Some(game_sim::car::cars_in_car(cars, m)),
                 _ => None,
             };
