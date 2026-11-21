@@ -3152,6 +3152,10 @@ pub struct InPlay {
     /// helicopters (a one-seat ride's only, S494a).
     handed: Option<Vec<bool>>,
     helis_handed: bool,
+    /// Each car's put-back query state for its safe-spot recorder (S501, [`InPlay::record`]), and
+    /// whether this seat's driving has recorded into its store this ride.
+    caches: Vec<Option<Box<game_sim::back_search::Cache>>>,
+    recorded: Vec<bool>,
 }
 
 impl InPlay {
@@ -3176,6 +3180,17 @@ impl InPlay {
         spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
         tables: &game_sim::ride::Tables, restarts: usize,
     ) -> InPlay {
+        InPlay::settled_from(spots, flying, read, world, tables, restarts, &[])
+    }
+
+    /// **The same after a Restart from the stores the last ride ended with** (S501,
+    /// [`InPlay::stores`]): a car with one in `carried` is put back from it once
+    /// ([`game_sim::car::Parked::settled_from`]), so a car driven off and recorded somewhere comes
+    /// back there; one without is put back `restarts` times from the load's.
+    pub fn settled_from(
+        spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
+        tables: &game_sim::ride::Tables, restarts: usize, carried: &[(Kind, game_sim::car::Store)],
+    ) -> InPlay {
         let parked = spots
             .iter()
             .filter(|(slot, ..)| !flying.get(*slot).copied().unwrap_or(false))
@@ -3187,7 +3202,8 @@ impl InPlay {
                     return None;
                 };
                 let car = std::sync::Arc::new(c.car);
-                let p = game_sim::car::Parked::settled_after(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve, restarts);
+                let store = carried.iter().find(|(k, _)| *k == kind).map(|(_, s)| *s);
+                let p = game_sim::car::Parked::settled_from(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve, restarts, store);
                 Some((kind, p))
             })
             .collect();
@@ -3238,6 +3254,34 @@ impl InPlay {
             helis: std::sync::Arc::clone(&self.helis),
             ..InPlay::default()
         }
+    }
+
+    /// **The safe-spot recorder of a car `kind` a player drives** (S501, R68,
+    /// [`game_sim::car::Store::record`]): from its root node's `place` and `nose`, into the store of
+    /// the parked copy of it, which is out of the Sim while it is driven and goes back to it with
+    /// the store. The original's car keeps recording while it holds the human's score card, which
+    /// the switch off it takes away (the switch gives it the spare slot's card, none in free ride),
+    /// so a car left rolling records no more. `true` when it stored; a kind not parked here stores
+    /// nothing.
+    pub fn record(&mut self, kind: Kind, place: Vf, nose: Vf, world: &mut dyn World, curve: &game_sim::camera::CurveTable) -> bool {
+        let Some(k) = self.parked.iter().position(|(c, _)| *c == kind) else { return false };
+        if self.kept.len() != self.parked.len() {
+            self.kept = self.parked.iter().map(|(_, p)| p.clone()).collect();
+        }
+        self.caches.resize(self.parked.len(), None);
+        self.recorded.resize(self.parked.len(), false);
+        let stored = self.kept[k].store.record(&mut self.caches[k], place, nose, world, curve);
+        self.recorded[k] |= stored;
+        stored
+    }
+
+    /// Each car's put-back store as this seat holds it ([`game_sim::car::Parked::store`]), and
+    /// whether its driving recorded into it this ride ([`InPlay::record`]): what a Restart puts the
+    /// cars back from ([`InPlay::settled_from`]).
+    pub fn stores(&self) -> Vec<(Kind, game_sim::car::Store, bool)> {
+        (self.parked.iter().enumerate())
+            .map(|(k, (kind, p))| (*kind, self.kept.get(k).map_or(p.store, |p| p.store), self.recorded.get(k).copied().unwrap_or(false)))
+            .collect()
     }
 
     /// **`sim`'s parked cars** ([`Sim::park_cars`], P380): every one but those a player is up on
@@ -3391,7 +3435,17 @@ impl Garage {
         let m = self.up.car();
         match self.cars.iter_mut().find(|c| Some(c.machine) == m) {
             // The car strikes the knockable props in the traffic's frame (S335).
-            Some(car) => car.step_traffic(sim, dt, world, met),
+            Some(car) => {
+                car.step_traffic(sim, dt, world, met);
+                // Its safe spot (S501): the car's post and the score manager each record it, from
+                // its root node's place and nose.
+                if let Some(d) = &car.driven {
+                    let node = game_sim::wreck_bike::node_of(&d.body);
+                    for _ in 0..2 {
+                        self.in_play.record(self.up, node.origin, node.rows[2], world, &sim.tables.ride.curve);
+                    }
+                }
+            }
             None => sim.traffic.frame(dt, world),
         }
         rider::Frame::default()
@@ -5341,6 +5395,51 @@ mod in_play_tests {
         let want = squared(squared((load.nose, load.up)));
         assert_eq!((again.nose.to_bits(), again.up.to_bits()), (want.0.to_bits(), want.1.to_bits()), "the store squared twice more");
         assert_eq!(again.at.to_bits(), load.at.to_bits(), "the spot is kept");
+    }
+
+    /// S501: a driven truck records its safe spot into its parked copy's store, which goes back to
+    /// the Sim with it when the seat leaves it, and a Restart from the stores the ride ended with
+    /// puts the truck there, not at its bay. A kind not parked records nothing.
+    #[test]
+    fn a_driven_truck_records_where_a_restart_puts_it() {
+        use game_render::disc::Disc;
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let read = &mut |n: &str| machines.read_suffix(n).ok();
+        let tables = game_sim::ride::Tables::build();
+        let spots = in_play(FREE09.as_bytes());
+        let mut floor = game_sim::world::Flat { y: F(135.0), ..Default::default() };
+        let mut parked = InPlay::settled(&spots, &[false], read, &mut floor, &tables);
+        let bay = parked.stores()[0].1;
+        let mut sim = Sim::new(0x501);
+        parked.hand_to(&mut sim, &[Kind::Monster]);
+        assert_eq!(sim.parked_cars.len(), 0, "driven, out of the Sim");
+        let (place, nose) = (Vf::new(4700.0, 138.0, 3700.0, 1.0), Vf::new(0.6, 0.1, 0.8, 0.0));
+        assert!(!parked.record(Kind::Buggy, place, nose, &mut floor, &tables.curve), "no buggy is parked");
+        assert!(parked.record(Kind::Monster, place, nose, &mut floor, &tables.curve), "a flat floor is safe");
+        let (kind, store, recorded) = parked.stores()[0];
+        assert_eq!((kind, recorded), (Kind::Monster, true));
+        // Half a foot up the floor's normal over the ground under the probe, the nose flattened.
+        assert_eq!((store.at.x(), store.at.y(), store.at.z()), (4700.0, 135.5, 3700.0));
+        assert_eq!((store.up.x(), store.up.y(), store.up.z()), (0.0, 1.0, 0.0));
+        assert!(store.nose.y().abs() < 1e-6 && (store.nose.x() - 0.6).abs() < 1e-5 && (store.nose.z() - 0.8).abs() < 1e-5, "{:?}", store.nose);
+        assert_ne!(store.at.to_bits(), bay.at.to_bits());
+        // Left: back in the Sim with the store it recorded.
+        parked.hand_to(&mut sim, &[Kind::Bike]);
+        assert_eq!(sim.parked_cars[0].store, store);
+        // A Restart puts it back there.
+        let carried: Vec<(Kind, game_sim::car::Store)> = parked.stores().into_iter().map(|(k, s, _)| (k, s)).collect();
+        let restarted = InPlay::settled_from(&spots, &[false], read, &mut floor, &tables, 1, &carried);
+        let (_, at) = restarted.at(0).unwrap();
+        assert!((at.x() - 4700.0).abs() < 1.0 && (at.z() - 3700.0).abs() < 1.0, "the truck rests at {at:?}, where it recorded");
+        let squared = game_sim::flight::spawn_axes(store.nose, store.up);
+        let again = restarted.parked[0].1.store;
+        assert_eq!((again.nose.to_bits(), again.up.to_bits()), (squared.0.to_bits(), squared.1.to_bits()), "squared once by the put-back");
+        assert_eq!(again.at.to_bits(), store.at.to_bits());
     }
 
     /// F80: free06's `[Machine1]` helicopter, at the file's height (`SetGroundHeight = FALSE`), settled

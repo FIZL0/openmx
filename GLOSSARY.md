@@ -23,3 +23,8 @@ _In code_: race::Race::clock
 The short tune that plays when a race ends, picked by the best place a player took; the tip popup comes up 2.05 s before it ends, or 7 s on when it has nothing to play
 _In code_: race::Supercross::outros, race::Race::stage, race_start::outro_lengths
 _Avoid_: race-end ditty
+
+**Safe spot**:
+The last place a driven car stood on level, clear ground: where a pause-menu Restart puts that car back, instead of its bay.
+_In code_: car::Store::record, InPlay::record
+_Avoid_: checkpoint, respawn point

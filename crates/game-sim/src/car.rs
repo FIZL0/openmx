@@ -3187,6 +3187,59 @@ pub struct Store {
     pub up: Vf,
 }
 
+/// How far the safe-spot recorder's probe stands off the root node's place (S501): five feet under.
+const SAFE_SPOT_LIFT: f32 = -5.0;
+/// A safe spot whose ground normal is not steeper than this is not kept.
+const SAFE_SPOT_LEVEL: f32 = 0.8;
+/// How far along the ground's normal a safe spot stands off the ground.
+const SAFE_SPOT_RAISE: f32 = 0.5;
+
+impl Store {
+    /// **The safe-spot recorder** (S501, R68): what a car the human has switched into (it holds a
+    /// score card and no activity) does each frame, from both its post and the score manager. A
+    /// probe five feet under its root node's `place` drops onto the ground; with nothing solid over
+    /// it ([`crate::ride::open_sky`]) and the ring around the spot clear ([`crate::ride::clearance`],
+    /// the bike's put-back test, which the car's runs probe for probe), on ground whose normal `n`
+    /// has `y` over 0.8, the store becomes: the spot half a foot up `n`, the root's `nose` flattened,
+    /// made unit and squared against `n`, and `n` itself. `true` when it stored.
+    ///
+    /// `cache` is the car's own put-back query state; it gathers the way free ride's card asks (the
+    /// props and plants, kind 3) and never counts checkpoints (no activity). The spot is also kept
+    /// only where the world keeps it ([`crate::world::World::keeps`]), as the bike's record is: the
+    /// port's own test, which refuses only a spot with no ground under it.
+    ///
+    /// Proved in the interpreter (tests/car_spawn.rs) on the original's recorder in its whole frame
+    /// off s342's driven free07 baja, from the same place and nose.
+    pub fn record(
+        &mut self,
+        cache: &mut Option<Box<crate::back_search::Cache>>,
+        place: Vf,
+        nose: Vf,
+        world: &mut dyn crate::world::World,
+        curve: &CurveTable,
+    ) -> bool {
+        let at = Vf::new(place.x(), (F(place.y()) + F(SAFE_SPOT_LIFT)).0, place.z(), place.w());
+        let Some(ground) = crate::ride::open_sky(at, world, cache) else {
+            return false;
+        };
+        let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
+        if !world.keeps(spot) {
+            return false;
+        }
+        let (point, n, clear) = crate::ride::clearance(spot, nose, world, curve, cache);
+        if !clear || !(F(n.y()) > F(SAFE_SPOT_LEVEL)) {
+            return false;
+        }
+        let raise = Vf::new(SAFE_SPOT_RAISE, SAFE_SPOT_RAISE, SAFE_SPOT_RAISE, SAFE_SPOT_RAISE);
+        let at = point.merge(Dest::XYZ, point.add(n.mul(raise)));
+        let flat = crate::ride::flat_unit(nose);
+        let side = flat.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(flat, n), n, flat));
+        let nose = n.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(n, side), side, n));
+        *self = Store { at, nose, up: n };
+        true
+    }
+}
+
 /// The node `body` stands at, as a matrix ([`crate::wreck_bike::node_of`]).
 fn node_matrix(body: &crate::biplane::Body) -> crate::math::Mat4 {
     let n = crate::wreck_bike::node_of(body);
@@ -3238,6 +3291,28 @@ impl Parked {
         curve: &CurveTable,
         restarts: usize,
     ) -> Parked {
+        Parked::settled_from(car, model, rays, hull, world, at, facing, acos, curve, restarts, None)
+    }
+
+    /// **The same after a Restart from the store the ride ended with** (S501): `carried`, the store
+    /// as the last ride left it (the load's squared pair, each Restart's squared again, or a safe
+    /// spot a driven car recorded, [`Store::record`]), taken in place of the load's and put back
+    /// from once, as the original's world reset puts the car back from whatever its store holds.
+    /// `None` is [`Parked::settled_after`]'s `restarts` put-backs from the load's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settled_from(
+        car: std::sync::Arc<Car>,
+        model: &CarModel,
+        rays: crate::flight_search::Rays,
+        hull: std::sync::Arc<crate::track::Mesh>,
+        world: &mut dyn crate::world::World,
+        at: Vf,
+        facing: Vf,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        restarts: usize,
+        carried: Option<Store>,
+    ) -> Parked {
         let world = &mut Through(world);
         let spawn = parked_spawn(world, model, at);
         let up = parked_up(world, at);
@@ -3247,7 +3322,14 @@ impl Parked {
         let (nose, up) = crate::flight::spawn_axes(facing, up);
         let rest = node_matrix(&machine.body);
         let mut p = Parked { car, hull, machine, collision, rest, store: Store { at: spawn, nose, up }, model: std::sync::Arc::new(model.clone()) };
-        for _ in 0..restarts {
+        let puts = match carried {
+            Some(store) => {
+                p.store = store;
+                1
+            }
+            None => restarts,
+        };
+        for _ in 0..puts {
             p.put_back();
         }
         let Parked { car, machine, collision, .. } = &mut p;

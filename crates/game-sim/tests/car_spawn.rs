@@ -527,3 +527,164 @@ fn a_restart_puts_the_parked_baja_back_as_the_original() {
     eprintln!("the store's up after two restarts {:?}", p.store.up);
     });
 }
+
+/// A function hooked in the interpreter run as itself (from the hook), as `ragdoll_wrecks.rs` does.
+fn through(ee: &mut Ee) {
+    let (pc, ra, sp, steps, stack) = (ee.pc, ee.r(31), ee.r(29), ee.steps, ee.stack);
+    let args: Vec<u64> = (4..12).map(|k| ee.r(k)).collect();
+    ee.stack = (sp as u32 - 0x800) & !0xf;
+    ee.call(pc, &args, &[], 2_000_000_000);
+    ee.set(31, ra);
+    ee.set(29, sp);
+    (ee.steps, ee.stack, ee.pc) = (steps, stack, pc);
+}
+
+/// The calls the original's whole frame makes that the interpreter has no hardware for: the
+/// interrupt switches, libpad's DMA to the IOP and the cache write-back (`ragdoll_wrecks.rs`).
+const SIF_SET_DMA: u32 = 0x003f_c3a0;
+const SIF_DMA_STAT: u32 = 0x003f_c380;
+const DCACHE_RANGE: u32 = 0x003f_c8d8;
+/// The `lui $r, 0x1000` instructions that form Timer 0's address, pointed at RAM's first page.
+const TIMER_READS: [u32; 2] = [0x0016_7dc0, 0x0013_21fc];
+/// `iop_rpc_send`'s length in bytes: the return addresses inside it.
+const IOP_RPC_SEND_LEN: u32 = 344;
+
+/// **The original's whole frame** on an image with no capture behind it: `ragdoll_wrecks.rs`'s
+/// `whole_frame` at `dt`, the pads left as the image saved them.
+fn whole_frame(ee: &mut Ee, dt: f32, clock: &mut f64) {
+    let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE, addr("sceSifCheckStatRpc").unwrap()];
+    ee.hooks.insert(stubs[0], Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(stubs[1], Box::new(|_: &mut Ee| {}));
+    ee.hooks.insert(SIF_SET_DMA, Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(SIF_DMA_STAT, Box::new(|ee: &mut Ee| ee.set(2, u64::MAX)));
+    ee.hooks.insert(DCACHE_RANGE, Box::new(|_: &mut Ee| {}));
+    let (check, send) = (addr("sceSifCheckStatRpc").unwrap(), addr("iop_rpc_send").unwrap());
+    let send_end = send + IOP_RPC_SEND_LEN;
+    ee.hooks.insert(
+        check,
+        Box::new(move |ee: &mut Ee| {
+            let ra = ee.r(31) as u32;
+            if (send..send_end).contains(&ra) { ee.set(2, 0) } else { through(ee) }
+        }),
+    );
+    for at in TIMER_READS {
+        let word = ee.u32_at(at);
+        assert!(word & 0xffe0_ffff == 0x3c00_1000 || word & 0xffe0_ffff == 0x3c00_0000, "{at:#x} is not a `lui $r, 0x1000`: a different build");
+        ee.set_u32(at, word & 0xffff_0000);
+    }
+    *clock += f64::from(dt) * 1000.0;
+    let wall = (*clock / 100.0).floor();
+    ee.set_u32(addr("wall_ticks").unwrap(), wall as u32);
+    ee.set_u32(0, ((*clock - wall * 100.0) * 576.0) as u32);
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let virt = |ee: &Ee, obj: u32, table: u32, slot: u32| ee.u32_at(ee.u32_at(obj + table) + slot);
+    let dev = ee.u32_at(app + 0x104);
+    ee.call(virt(ee, dev, 0x65c, 0x10), &[u64::from(dev), 1], &[dt], 4_000_000_000);
+    let marker = virt(ee, app, 0x3c4, 0x80);
+    ee.call(marker, &[u64::from(app), 1], &[], 4_000_000_000);
+    ee.set_u32(app + 0x32c, 2);
+    ee.set_f32(app + 0x344, dt);
+    ee.set_f32(app + 0x348, ps2_float::fpu::div(1.0, dt));
+    ee.set_u32(app + 0x374, ee.u32_at(app + 0x374) + 1);
+    let root = ee.u32_at(app + 0x378);
+    ee.call(virt(ee, root, 0x8, 0x38), &[u64::from(root)], &[dt], 4_000_000_000);
+    assert_ne!(ee.v0(), 0, "the simulation asked to stop");
+    ee.set_u32(app + 0x32c, 0);
+    ee.call(marker, &[u64::from(app), 2], &[], 4_000_000_000);
+    for at in stubs {
+        ee.hooks.remove(&at);
+    }
+}
+
+/// One call of the original's safe-spot recorder: the root node's place it probes under (asked of
+/// the node the original's way), the nose it was handed, and the store before and after.
+struct Recorded {
+    place: Vf,
+    nose: Vf,
+    before: [Vf; 3],
+    after: [Vf; 3],
+}
+
+/// **A switched car records its safe spot as the original's** (S501, R68). s342's baja is the
+/// human's (free ride: a score card and no activity), coasting after a burst of gas. The original's
+/// whole frame is run on the image (the pads as saved, dt 1/30) with its recorder hooked: each call
+/// is run as itself, and the port's recorder ([`game_sim::car::Store::record`]) is run on free07's
+/// world from the same place and nose with a query state of its own: the store bit for bit after
+/// every call (16 over eight frames, each storing).
+#[test]
+fn a_switched_car_records_its_safe_spot_as_the_original() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let Some(kit) = Kit::load().map_err(|why| skip(&why)).ok() else { return };
+    let Some(mut disc) = Disc::open_configured().map_err(|why| skip(&why)).ok() else { return };
+    let path = kit.ctx("states").join("s342-baja-free07.ee.bin");
+    let Some(mut ee) = Ee::from_ram(&path).map_err(|why| skip(&why)).ok() else { return };
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let c = PARKED[1].at;
+    // The human's: a card, no activity, the card's flag that skips the probe clear.
+    let card = ee.u32_at(c + 0xd24);
+    assert_ne!(card, 0, "the baja holds a score card");
+    assert_eq!(ee.u32_at(c + 0xd28), 0, "and no activity");
+    assert_eq!(ee.u32_at(card + 8) & 0x0080_0000, 0, "the card's own-spot flag");
+    let store_at = c + wrapper_at::OF_CAR + wrapper_at::SPOT;
+    let store = move |ee: &Ee| [0, 0x10, 0x20].map(|o| quad(ee, store_at + o));
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&calls);
+    let place_of = addr("node_world_position").unwrap();
+    ee.hooks.insert(
+        addr("car_safe_spot_record").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 != c {
+                return through(ee);
+            }
+            // The root node's place, by the call the recorder makes for it, into scratch under the
+            // stack the recorder is about to take.
+            let (pc, ra, sp, steps, stack) = (ee.pc, ee.r(31), ee.r(29), ee.steps, ee.stack);
+            let regs: Vec<u64> = (4..7).map(|k| ee.r(k)).collect();
+            let out = (sp as u32 - 0x200) & !0xf;
+            ee.stack = (sp as u32 - 0x800) & !0xf;
+            ee.call(place_of, &[u64::from(ee.u32_at(c + 0x18c)), 0, u64::from(out)], &[], 100_000_000);
+            let place = quad(ee, out);
+            (ee.steps, ee.stack, ee.pc) = (steps, stack, pc);
+            ee.set(31, ra);
+            ee.set(29, sp);
+            for (k, v) in (4..7).zip(regs) {
+                ee.set(k, v);
+            }
+            let nose = quad(ee, ee.r(6) as u32);
+            let before = store(ee);
+            through(ee);
+            log.borrow_mut().push(Recorded { place, nose, before, after: store(ee) });
+        }),
+    );
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    const FRAMES: usize = 8;
+    for _ in 0..FRAMES {
+        whole_frame(&mut ee, 1.0 / 30.0, &mut clock);
+    }
+    ee.hooks.clear();
+    let calls = calls.take();
+    assert_eq!(calls.len(), 2 * FRAMES, "the post and the score manager each call it once a frame");
+
+    let curve = CurveTable::build();
+    on_track(&mut disc, &["Tracks\\free07.res", "Tracks\\free07_2.res"], |world| {
+        let mut cache = None;
+        let mut stored = 0;
+        for (k, r) in calls.iter().enumerate() {
+            let [at, nose, up] = r.before;
+            let mut s = game_sim::car::Store { at, nose, up };
+            let moved = s.record(&mut cache, r.place, r.nose, world, &curve);
+            eprintln!("call {k}: place {:?} nose {:?}\n  port {s:?}\n  original {:?}", r.place, r.nose, r.after);
+            // The second call of a frame stores what the first did, so the store is compared, not
+            // whether it changed; one that does not store leaves both at `before`.
+            let [at, nose, up] = r.after;
+            assert_eq!(bits3(s.at), bits3(at), "call {k}: spot {:?} want {at:?}", s.at);
+            assert_eq!(bits3(s.nose), bits3(nose), "call {k}: nose {:?} want {nose:?}", s.nose);
+            assert_eq!(bits3(s.up), bits3(up), "call {k}: up {:?} want {up:?}", s.up);
+            assert_eq!([s.nose, s.up].map(|v| v.to_bits()[3]), [nose, up].map(|v| v.to_bits()[3]), "call {k}: the nose's and up's w");
+            stored += usize::from(moved);
+        }
+        eprintln!("{stored} of {} calls stored", calls.len());
+        assert!(stored > 0, "the coasting baja records somewhere");
+    });
+}

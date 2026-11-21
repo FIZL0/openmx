@@ -3850,6 +3850,10 @@ struct Args {
     /// How many times the pause menu's Restart has loaded this ride again (S500): the parked cars
     /// are put back once more each time ([`vehicle::InPlay::settled_after`]).
     restarts: usize,
+    /// The parked cars' put-back stores the ride before a Restart ended with (S501): what the
+    /// Restart puts them back from ([`vehicle::InPlay::settled_from`]), a driven car's recorded
+    /// safe spot among them. Empty on a ride's first load.
+    stores: Vec<(vehicle::Kind, game_sim::car::Store)>,
     /// The frame's size, from `--size`: the PS2-native 640x448 path and the tests. `None` draws at
     /// the window's own pixels — a window the size of the screen, and a frame that follows it.
     size: Option<(usize, usize)>,
@@ -4563,6 +4567,9 @@ struct Front {
     sound: audio::Speakers,
     /// `--mods` was given (MD7): the music packs are its folder's whatever the Mods row says.
     mods_asked: bool,
+    /// The parked cars' stores the ride left when its pause menu's Restart was picked (S501,
+    /// [`Args::stores`]).
+    stores: Vec<(vehicle::Kind, game_sim::car::Store)>,
 }
 
 impl Front {
@@ -4791,6 +4798,21 @@ enum Leave {
     Pick,
 }
 
+/// **The parked cars' stores a Restart puts them back from** (S501): each car's as the seats hold
+/// it ([`vehicle::InPlay::stores`]). Split screen's seats each drive their own copy and the
+/// original has one world: a car's store is the first seat's that recorded into it this ride, else
+/// the first seat's (all the same then).
+fn restart_stores(seats: &[Seat]) -> Vec<(vehicle::Kind, game_sim::car::Store)> {
+    let held: Vec<_> = seats.iter().map(|s| s.garage.in_play.stores()).collect();
+    let Some(first) = held.first() else { return Vec::new() };
+    (first.iter().enumerate())
+        .map(|(k, &(kind, store, _))| {
+            let recorded = held.iter().find_map(|h| h.get(k).filter(|(_, _, on)| *on).map(|(_, s, _)| *s));
+            (kind, recorded.unwrap_or(store))
+        })
+        .collect()
+}
+
 /// The front end (P36): the menus until one of them starts a ride, the ride, and back.
 async fn front_end(args: Args) -> Result<(), String> {
     let mut disc = Disc::open_configured()?;
@@ -4847,6 +4869,7 @@ async fn front_end(args: Args) -> Result<(), String> {
         network,
         sound,
         mods_asked: args.mods_asked,
+        stores: Vec::new(),
     };
     front.menu.music_choices = front.sound.choices();
     front.menu.music_games = music_games(&front.sound);
@@ -4973,6 +4996,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 let mut a = args.clone();
                 a.track = track.clone();
                 a.restarts = restarts;
+                let stores = std::mem::take(&mut shell.front.stores);
+                a.stores = if restarts == 0 { Vec::new() } else { stores };
                 // A results picture not taken yet is the race's that is gone (P390).
                 results_photo = false;
                 // P327: the menu's Race, or none for its Free Ride.
@@ -9524,8 +9549,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Off `machine.res` itself: the ride's cars are built without their collision files.
         let machine_res = (!lot.in_play.is_empty()).then(|| member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok())).flatten();
         let read = &mut |n: &str| machine_res.as_ref()?.read_suffix(n).ok();
-        // A Restart puts each car back from its store once more (S500).
-        let in_play = vehicle::InPlay::settled_after(&lot.in_play, &flying, read, &mut sim, &tables.ride, args.restarts);
+        // A Restart puts each car back from its store once more (S500): the store the ride before
+        // ended with, where a driven car recorded its safe spot (S501).
+        let in_play = vehicle::InPlay::settled_from(&lot.in_play, &flying, read, &mut sim, &tables.ride, args.restarts, &args.stores);
         // And the fliers (F80, free06's helicopter, free10's plane), for the AI riders to sweep.
         let in_play = in_play.with_fliers(&lot.in_play, &lot.in_play_ground, &flying, read, &mut sim, &tables.ride);
         for k in 0..in_play.len() {
@@ -10626,6 +10652,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // Online the ride goes on for the others: no restarting it alone.
                 Act::Restart if online.is_some() => {}
                 Act::Restart => {
+                    front.stores = restart_stores(&world.seats);
                     leave = Leave::Restart;
                     break;
                 }
@@ -17992,6 +18019,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         // The stock gear. Every other rider archive on the disc is a repaint of the same body.
         rider: "thq1".to_string(),
         restarts: 0,
+        stores: Vec::new(),
         size: None,
         scale: 1,
         seconds: None,

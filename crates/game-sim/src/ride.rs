@@ -1415,7 +1415,7 @@ fn held_transform(node: &[Vf; 3], quat: Vf, origin: Vf) -> Mat4 {
 
 /// `v` with its height taken out and the rest made unit length, `w` kept: the `vmul`/`vadday`/`vmaddz`
 /// sum of squares and `vrsqrt` the put-back's heading is flattened with (S66).
-fn flat_unit(v: Vf) -> Vf {
+pub(crate) fn flat_unit(v: Vf) -> Vf {
     let flat = Vf::new(v.x(), 0.0, v.z(), v.w());
     flat.merge(Dest::XYZ, flat.mul_q(vu::rsqrt(1.0, vu::dot3(flat.0, flat.0))))
 }
@@ -1437,7 +1437,7 @@ fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable, cache
 /// The ground under a probe, when nothing solid stands between it and the ground: the record
 /// update's overhead test (S66), one probe from ten feet over the point straight down to the ground,
 /// in a query a thousand feet wide. `None` is a roof — something met above the ground.
-fn open_sky(at: Vf, world: &mut dyn World, cache: &mut BackCache) -> Option<F> {
+pub(crate) fn open_sky(at: Vf, world: &mut dyn World, cache: &mut BackCache) -> Option<F> {
     let (under, _) = world.ground(at);
     let ground = F(under.y());
     let mut over = Bundle { count: 1, centre: at, radius: F(BACK_OVER_REACH), ..Bundle::default() };
@@ -1486,7 +1486,7 @@ fn back_solid(bundle: &Bundle, world: &mut dyn World, cache: &mut BackCache, fou
 /// [`clear`]'s whole answer: the spot on the ground (or lifted), its normal, and whether the spot is
 /// clear. The spot and normal are what the original's test leaves in its outputs either way, which
 /// the cannonball's branch reads (S77): its normal is the record's own word.
-fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable, cache: &mut BackCache) -> (Vf, Vf, bool) {
+pub(crate) fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable, cache: &mut BackCache) -> (Vf, Vf, bool) {
     let flat = flat_unit(heading);
     let (fx, fz) = (F(flat.x()), F(flat.z()));
     let y = F(spot.y());

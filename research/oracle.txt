@@ -7304,6 +7304,19 @@ car_safe_spot_record  boot 0x003a1a00 (car, spot, nose) car vt+0x31c (+0x48 vtab
 #   s342-baja-free07.ee.bin: every write to car +0xe0..+0x10f is in 0x003a1a00, twice a frame; none off
 #   r52-free07-baja (racer). ./kit oracle 0x0020b780 --ints 0x006168c0 over s342: body +0x50 = 457b2aeb
 #   430b1e31 45074da8 (4018.68, 139.12, 2164.85) = the store spot; bay (4020, 138.72, 2357).
+# S501 — ported (game-sim car::Store::record; shell vehicle::InPlay::record; test car_spawn.rs
+#   a_switched_car_records_its_safe_spot_as_the_original: 16 calls over 8 whole frames off s342, the
+#   store bit for bit from the hooked call's place (node_world_position 0x001b2870(root, 0, out)) and
+#   nose). Read off the code: lift 0x421960 = -5, half 0x421968 = 0.5; the overhead probe is the
+#   bike's open_sky (one ray from +10 down to the ground +10, radius 1000 = 0x447a0000 at list +0x160);
+#   0x003a1580 is the bike's put-back clearance probe for probe (14 probes radius 40 from 0x421950,
+#   lift 6.5 0x421930, back 20 0x421938, length 40 0x421940, UP 0x426db0); with an activity of type
+#   2 and card +0x40 set it is 1 probe radius 5 (not ported). 0x003a10b0 = put_back_solid's car twin
+#   (list car +0xdd4, centre +0xde0, reach +0xdf0 = 100 on s342; gather kind 1 when card +0x40 == 1,
+#   else 3; s342 card 0x01919bb0 +0x40 = 0, flags +8 = 0x180c06). Switch-out: machine_swap
+#   0x00210b90 gives the car left *(world +0xe0 + 4p), the spare-card slot, and moves the old car's
+#   card there for the next; C34 switched.p2s: world 0x006168c0 +0xe0 = 0, so a car left in free ride
+#   holds no card and records no more (read from the code + one image, not run).
 physics_object_struck boot 0x0015ad40 like 0x0015acf0: wakes the wrapper through vt +0x124
 # The wrapper's listener (0x0015b2a0, filed at +0x50) counts its own ResetTime down the same way.
 node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): rows x parent's rigid
