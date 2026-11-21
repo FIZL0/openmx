@@ -198,3 +198,59 @@ fn an_edited_bike_is_refused_online() {
     assert!(phy_editor::held(false, false, &laid, bytes.as_bytes(), &curve).is_some(), "another game's handling is no file the knobs edit");
     assert_eq!(Edits::default().changed(), 0);
 }
+
+/// P387a: a saved mod rides online where every seat holds it. Two machines, each with its own copy
+/// of the mod and its own disc file, build every seat's bike from the pick's `handling/<id>`: the
+/// seats ride bit for bit the same on both, and not as the disc's file. A machine whose mods folder
+/// lacks the mod is refused by the handshake, with the mod named.
+#[test]
+fn two_seats_with_the_mod_ride_bit_identical_and_one_without_is_refused() {
+    let root = std::env::temp_dir().join(format!("openmx-p387a-{}", std::process::id()));
+    let (here, there) = (root.join("a").join("mods"), root.join("b").join("mods"));
+    let mut editor = Editor::new("Bike\\Race125P.phy", bike().as_bytes());
+    editor.edits.0[knob("Engine Power")] = 150;
+    editor.edits.0[knob("Gravity")] = 70;
+    let folder = editor.save(&here, "Loose").unwrap();
+    // the other machine saved the same knobs on its own disc's file
+    editor.save(&there, "Loose").unwrap();
+    assert_eq!(phy_editor::matching(&here, "race125p.phy", &editor.edits).map(|s| s.id).as_deref(), Some("phy_loose"), "the editor on the saved knobs is on the mod");
+    assert!(phy_editor::matching(&here, "race125p.phy", &Edits::default()).is_none(), "the disc's knobs are no mod");
+    let packs = "machine/mxvatv_atv,handling/phy_loose";
+    assert_eq!(phy_editor::picked(packs), Some("phy_loose"));
+    assert_eq!(phy_editor::picked("machine/mxvatv_atv"), None);
+    let curve = curve();
+    let seat = |mods: &std::path::Path| phy_editor::seat_phy(Some(mods), packs, "Bike\\Race125P.phy", bike().as_bytes(), &curve).unwrap().expect("the pick's mod");
+    let rides: Vec<Vec<u64>> = [&here, &here, &there, &there].into_iter().map(|m| ride(&mut sim_on(seat(m)), 240)).collect();
+    assert!(rides.iter().all(|r| *r == rides[0]), "both seats on both machines ride the same bike");
+    assert_eq!(rides[0], ride(&mut sim_on(editor.phy(&curve)), 240), "the mod's knobs over the disc's file");
+    assert_ne!(rides[0], ride(&mut sim_on(Phy::read_bytes(bike().as_bytes(), &curve)), 240), "not the disc's file");
+    assert!(phy_editor::seat_phy(Some(&here), "", "Bike\\Race125P.phy", bike().as_bytes(), &curve).unwrap().is_none(), "no mod picked, the disc's file");
+    assert!(phy_editor::seat_phy(Some(&here), packs, "Bike\\Pro250P.phy", bike().as_bytes(), &curve).is_err(), "the mod edits another bike");
+    assert!(phy_editor::seat_phy(None, packs, "Bike\\Race125P.phy", bike().as_bytes(), &curve).is_err(), "mods off");
+
+    // the handshake: each machine says the packs it holds, and the seats' picks name the mod
+    struct Holds(Vec<openmx_net::Pack>);
+    impl openmx_net::Disc for Holds {
+        fn packs(&self) -> Vec<openmx_net::Pack> {
+            self.0.clone()
+        }
+    }
+    let mut hash = openmx_net::handshake::fnv(&std::fs::read(folder.join("mod.json")).unwrap());
+    hash = openmx_net::handshake::fnv_on(hash, &std::fs::read(folder.join("race125p.phy")).unwrap());
+    let held = openmx_net::Pack { kind: phy_editor::KIND.into(), id: "phy_loose".into(), hash, name: "Loose 1.0".into(), how: String::new() };
+    let pick = openmx_net::Pick { packs: "handling/phy_loose".into(), ..openmx_net::Pick::new("thq1", "race125p") };
+    let mut room = openmx_net::Room::new("h", "free06", 2);
+    room.take(openmx_net::HOST, std::slice::from_ref(&pick));
+    room.take("g", &[pick]);
+    let host = openmx_net::Handshake::of(&room, &Holds(vec![held.clone()]));
+    assert_eq!(host.needs, vec!["handling/phy_loose".to_string()]);
+    assert_eq!(openmx_net::Handshake::of(&room, &Holds(vec![held.clone()])).check(&host), Ok(()), "a seat with the mod rides");
+    assert_eq!(
+        openmx_net::Handshake::of(&room, &Holds(vec![])).check(&host),
+        Err("Can't ride: a rider is on the pack Loose 1.0 (handling/phy_loose), and it isn't in your mods folder.".into()),
+        "a seat without it is refused"
+    );
+    let other = openmx_net::Pack { hash: hash ^ 1, ..held };
+    assert!(openmx_net::Handshake::of(&room, &Holds(vec![other])).check(&host).unwrap_err().contains("isn't the same files"), "nor one with other knobs");
+    std::fs::remove_dir_all(&root).unwrap();
+}

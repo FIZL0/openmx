@@ -4653,6 +4653,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     let mut escape = false;
     // 1P's saved markers on the lobby's track, for this machine's pick (P99).
     let mut pick_markers = saved_markers::PickMarkers::default();
+    // the handling mod 1P's lobby pick rides (P387a), and what it was read off
+    let mut picked_mod = (String::new(), None);
     loop {
         // The picture before this one is the page's until its next frame (P196).
         pace::shown().await;
@@ -5122,6 +5124,11 @@ async fn front_end(args: Args) -> Result<(), String> {
         // And the quad 1P's Garage picked (MD37e), which the handshake holds every seat to.
         let quad = shell.front.menu.quad_pick();
         shell.front.menu.lobby.set_quad(quad.as_ref().map(|(p, s)| (p.as_str(), s.as_str())));
+        // And the saved handling mod 1P's physics editor is on (P387a), which the handshake holds
+        // every seat to and every machine builds 1P's seat from.
+        let set = shell.front.menu.lobby.pick.bike.clone();
+        let handling_mod = physics_pick(&shell.front.menu, &set, shell.front.network.disc.mods(), &mut picked_mod);
+        shell.front.menu.lobby.set_handling_mod(handling_mod.as_deref());
         // 1P's own modifiers into it too, and the host's room every seat's (P134).
         shell.front.menu.lobby_mods();
         // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.
@@ -9280,8 +9287,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
             // on the room's handling (N21), as the host's machine reads it
             let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
-            let mut stock = room_handling_phy(handling_pack.as_ref(), &first.pick.bike, &tables.ride.curve)
-                .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
+            // else its handling mod's knobs over the disc's file (P387a)
+            let mut stock = match room_handling_phy(handling_pack.as_ref(), &first.pick.bike, &tables.ride.curve) {
+                Some(phy) => room_handling_over_mod(&first.pick, phy),
+                None => room_mod_phy(disc, &first.pick, &bytes, &tables.ride.curve)?.unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve)),
+            };
             // the room's trick packs over it (MD19, MD77), as the host's machine has
             let packs = args.room_tricks.as_ref().map(|(dir, ids)| trick_packs::on(dir, &trick_packs::ids_of_room(ids))).transpose()?.unwrap_or_default();
             lay_room_tricks(&packs, &mut stock, &first.pick.bike);
@@ -9323,8 +9333,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // The room's modifiers, a row a seat (P134): each seat's player's own, which
                     // the host gathered from the picks, the world's the host's.
                     // on the room's handling (N21), then its trick pack, as on every machine
-                    let mut phy = room_handling_phy(handling_pack.as_ref(), &seat.pick.bike, &tables.ride.curve)
-                        .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
+                    // else the seat's handling mod's knobs over the disc's file (P387a)
+                    let mut phy = match room_handling_phy(handling_pack.as_ref(), &seat.pick.bike, &tables.ride.curve) {
+                        Some(phy) => room_handling_over_mod(&seat.pick, phy),
+                        None => room_mod_phy(disc, &seat.pick, &bytes, &tables.ride.curve)?.unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve)),
+                    };
                     lay_room_tricks(&packs, &mut phy, &seat.pick.bike);
                     *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(i, &mut phy);
@@ -16602,6 +16615,46 @@ fn physics_carried(
         *live = true;
         println!("physics editor: {} knobs changed on {}, from the last ride", desk.edits.changed(), desk.file_name());
     }
+}
+
+/// The handling mod 1P rides into a lobby (P387a), by id: with the physics editor on, the saved one
+/// in `mods` whose knobs the page is on, where the page's bike is the lobby pick's bike set `set`'s
+/// file; none otherwise, and the seat rides the disc's file. `kept` holds what it was read off and
+/// the answer, so the mods folder is listed again only when one of those changes.
+fn physics_pick(menu: &menu::Menu, set: &str, mods: Option<std::path::PathBuf>, kept: &mut (String, Option<String>)) -> Option<String> {
+    let p = &menu.physics;
+    let file = roster::Set::from_player_word(set).map(|s| phy_editor::file_leaf(&s.file()));
+    let on = menu.settings.physics_editor && file.as_deref() == Some(p.bike.as_str()) && p.knobs.len() == phy_editor::COUNT;
+    let pcts: Vec<u16> = p.knobs.iter().map(|k| k.pct).collect();
+    let look = format!("{on} {mods:?} {} {pcts:?} {:?}", p.bike, p.saved);
+    if kept.0 != look {
+        let mut edits = phy_editor::Edits::default();
+        edits.0.iter_mut().zip(&pcts).for_each(|(e, p)| *e = *p);
+        let id = mods.filter(|_| on).and_then(|dir| phy_editor::matching(&dir, &p.bike, &edits)).map(|s| s.id);
+        *kept = (look, id);
+    }
+    kept.1.clone()
+}
+
+/// A lobby seat's bike on the handling mod its pick carries (P387a), off this machine's own disc
+/// file `bytes` for the seat's bike set, as every machine builds it; `None` rides the file as it is.
+fn room_mod_phy(disc: &lobby::DiscFiles, pick: &openmx_net::Pick, bytes: &[u8], curve: &game_sim::camera::CurveTable) -> Result<Option<Phy>, String> {
+    let Some(set) = roster::Set::from_player_word(&pick.bike) else { return Ok(None) };
+    let phy = phy_editor::seat_phy(disc.mods().as_deref(), &pick.packs, &set.file(), bytes, curve).map_err(|e| format!("{}: {e}", set.word()))?;
+    if let Some(id) = phy.as_ref().and(phy_editor::picked(&pick.packs)) {
+        println!("{}: the handling mod {id}", set.word());
+    }
+    Ok(phy)
+}
+
+/// A lobby seat's bike on the room's handling (N21), `phy`, though its pick carries a handling mod
+/// (P387a): the mod edits the disc's file, which the room's handling is not, so the room's wins on
+/// every machine, and the line says the mod is left off.
+fn room_handling_over_mod(pick: &openmx_net::Pick, phy: Phy) -> Phy {
+    if let Some(id) = phy_editor::picked(&pick.packs) {
+        println!("{}: the room's handling, not the handling mod {id}, which edits the disc's file", pick.bike);
+    }
+    phy
 }
 
 /// A frame of the physics editor (P387): what its page asked done — a knob turned or put back, the

@@ -9,8 +9,10 @@
 //!
 //! Saved, the edited file goes to `mods/handling/<id>/` beside a `mod.json` of kind `handling`
 //! (which names the bike file and the knobs), a pack as every other mod is (P318), which the lobby
-//! lists and hashes like any. An online ride takes no edits ([`held`]): riding a saved one there,
-//! where every seat holds it, is P387a's.
+//! lists and hashes like any. An online ride takes no edits ([`held`]), but rides a saved one where
+//! every seat holds it (P387a): the lobby pick carries `handling/<id>` ([`picked`]), the handshake
+//! refuses a seat without the same folder, and every machine builds that seat's bike from the mod's
+//! knobs over its own disc file ([`seat_phy`]).
 
 use game_sim::camera::CurveTable;
 use game_sim::phy::{Ini, Phy};
@@ -228,7 +230,7 @@ impl Editor {
 
     /// The bike file's own name (`race125p.phy`), what the saved mod keeps it as.
     pub fn file_name(&self) -> String {
-        self.member.rsplit(['\\', '/']).next().unwrap_or(&self.member).to_ascii_lowercase()
+        file_leaf(&self.member)
     }
 
     /// Keep the edited file as the handling mod `name` in `mods/handling/` (P387): a folder of its
@@ -324,6 +326,44 @@ pub fn held(online: bool, tape: bool, stock: &Phy, bytes: &[u8], curve: &CurveTa
         return Some("A tape rides the bike's own file.");
     }
     (format!("{stock:?}") != format!("{:?}", Phy::read_bytes(bytes, curve))).then_some("Only on the original's handling, with no trick pack laid over the bike.")
+}
+
+/// A bike file's own name off its member (`Bike\Race125P.phy` is `race125p.phy`), as a saved mod
+/// names the file it edits.
+pub fn file_leaf(member: &str) -> String {
+    member.rsplit(['\\', '/']).next().unwrap_or(member).to_ascii_lowercase()
+}
+
+/// The handling mod a lobby pick's packs (`machine/mxvatv_atv,handling/phy_loose`) ride (P387a):
+/// the id under the first `handling/` key, none without one.
+pub fn picked(packs: &str) -> Option<&str> {
+    packs.split(',').map(str::trim).find_map(|k| k.strip_prefix(KIND)?.strip_prefix('/')).filter(|id| !id.is_empty())
+}
+
+/// The saved mod in `mods` for the bike file `bike` whose knobs are `edits` (P387a): the one a
+/// player whose editor is on them rides into a lobby. None where the knobs are the disc's, or no
+/// saved mod has them: an edited bike nobody else can hold rides the disc's file online.
+pub fn matching(mods: &Path, bike: &str, edits: &Edits) -> Option<Saved> {
+    if edits.is_stock() {
+        return None;
+    }
+    listed(mods, bike).into_iter().find(|s| s.edits == *edits)
+}
+
+/// A lobby seat's bike on the handling mod its pick's `packs` carry (P387a): the mod's knobs over
+/// this machine's own disc file `member`'s `bytes`, which the handshake held every seat to as it
+/// held them to the mod's folder, so every machine builds the same bike. `None` without a mod in
+/// the pick; an error where `mods` lacks it or it edits another bike's file.
+pub fn seat_phy(mods: Option<&Path>, packs: &str, member: &str, bytes: &[u8], curve: &CurveTable) -> Result<Option<Phy>, String> {
+    let Some(id) = picked(packs) else { return Ok(None) };
+    let mods = mods.ok_or_else(|| format!("a rider is on the handling mod {id}, and the mods folder is off"))?;
+    let saved = load(&mods.join(HANDLING_DIR).join(id))?;
+    let mut editor = Editor::new(member, bytes);
+    if !saved.bike.eq_ignore_ascii_case(&editor.file_name()) {
+        return Err(format!("the handling mod {id} edits {}, not {}", saved.bike, editor.file_name()));
+    }
+    editor.take(&saved);
+    Ok(Some(editor.phy(curve)))
 }
 
 /// `s` as a JSON string.

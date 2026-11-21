@@ -1468,6 +1468,17 @@ fn joined_packs(a: &str, b: &str) -> String {
     [a, b].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(",")
 }
 
+/// The `mod.json` kind of the handling mods the physics editor saves (P387a), as
+/// `phy_editor::KIND` says it.
+pub const HANDLING_MOD_KIND: &str = "handling";
+
+/// A pick's packs' handling mod keys (`handling/phy_loose`, P387a), joined as they were: what the
+/// flier and quad setters keep when they lay their own packs again.
+fn handling_packs(packs: &str) -> String {
+    let lead = format!("{HANDLING_MOD_KIND}/");
+    packs.split(',').map(str::trim).filter(|k| k.starts_with(&lead)).collect::<Vec<_>>().join(",")
+}
+
 /// The Garage's fliers in a lobby (P318a): `offer`, each pack's skin greyed with the room's why
 /// ([`openmx_net::Offered::why`]) where some seat's machine lacks its pack or holds other files
 /// under it, or with what this machine's room copy has not heard of it. MX Unleashed's, and a skin
@@ -6390,7 +6401,7 @@ impl Lobby {
             }
             _ => (String::new(), String::new()),
         };
-        let packs = joined_packs(&packs, &machine_pack(&self.pick.quad));
+        let packs = joined_packs(&joined_packs(&packs, &machine_pack(&self.pick.quad)), &handling_packs(&self.pick.packs));
         if self.pick.flier != word || self.pick.packs != packs {
             (self.pick.flier, self.pick.packs) = (word, packs);
             self.repick = self.room.is_some();
@@ -6415,9 +6426,22 @@ impl Lobby {
             Some((pack, stem)) if !stem.is_empty() && open(pack) => format!("{pack}/{stem}"),
             _ => String::new(),
         };
-        let packs = joined_packs(&machine_pack(&self.pick.flier), &machine_pack(&word));
+        let packs = joined_packs(&joined_packs(&machine_pack(&self.pick.flier), &machine_pack(&word)), &handling_packs(&self.pick.packs));
         if self.pick.quad != word || self.pick.packs != packs {
             (self.pick.quad, self.pick.packs) = (word, packs);
+            self.repick = self.room.is_some();
+        }
+    }
+
+    /// The physics editor's handling mod this machine's player rides (P387a), by its id: its key
+    /// goes in the pick's packs after a flier's and a quad's, so the handshake holds every seat to
+    /// its folder and refuses one without it, and every machine builds the seat's bike from it. None
+    /// takes it out. A change goes out as [`Lobby::set_machine`]'s does.
+    pub fn set_handling_mod(&mut self, id: Option<&str>) {
+        let key = id.map(|id| openmx_net::handshake::pack_key(HANDLING_MOD_KIND, id)).unwrap_or_default();
+        let packs = joined_packs(&joined_packs(&machine_pack(&self.pick.flier), &machine_pack(&self.pick.quad)), &key);
+        if self.pick.packs != packs {
+            self.pick.packs = packs;
             self.repick = self.room.is_some();
         }
     }
