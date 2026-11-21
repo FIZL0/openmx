@@ -1,4 +1,4 @@
-# 1 — old world mxu moved out (PART)
+# 1 — old world mxu moved out (FINAL)
 
 Task B2. 2026-11-21.
 
@@ -12,7 +12,8 @@ Task B2. 2026-11-21.
 - The same test was red on the other two installed worlds, both restitched after MD50 (mod.json dated
   2026-11-16): world_mxu_free now starts on mxu_free07 (was mxu_free10) and world_ultra on mxvatv_nat14
   (was mxvatv_nat06). Re-pinned both. Each start lies near its world's middle (world_mxu_free 14020,3503
-  of 27585 x 5589 feet; world_ultra 56226,16127 of 115642 x 35164 feet).
+  of 27585 x 5589 feet; world_ultra 56226,16127 of 115642 x 35164 feet). The task named only world_mxu;
+  these two are re-pinned because the test it asks to run stays red without them.
 
 ## What the original does
 

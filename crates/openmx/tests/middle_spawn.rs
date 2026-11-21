@@ -121,7 +121,7 @@ fn a_wrapped_world_rides_from_its_middle_tile() {
 /// is installed; world_mxu_free and world_ultra as restitched after MD50), and its ride's first
 /// tick stands by that start.
 #[test]
-#[ignore = "needs openmx-mods' stitched worlds in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods), and the disc; release build"]
+#[ignore = "needs openmx-mods' stitched worlds in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods; world_mxu builds off the disc), and the disc; release build"]
 fn the_installed_wrapped_worlds_start_on_their_middle_tile() {
     let mods = std::env::var_os("OPENMX_WORLDS").map(PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join("repos/openmx/mods"));
     for (id, middle) in [("world_mxu_free", "mxu_free07"), ("world_mxu", "mxu_free07"), ("world_ultra", "mxvatv_nat14")] {
