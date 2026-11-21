@@ -2945,6 +2945,11 @@ impl Machine {
     /// The body stands at `at` itself, not `at` moved by the centre of mass (S484: the original's
     /// place puts recording2's truck's body at its spawn to the bit).
     ///
+    /// The turn is the load's put-back's to the bit (S498: free07's baja). The original's put-back
+    /// squares its stored nose and up in place, so each later put-back squares them again and the
+    /// up's last bits drift; a second put-back is this called with [`crate::flight::spawn_axes`] of
+    /// the first's pair.
+    ///
     /// The original takes each node's place with the model already placed at the spot and turns it
     /// back into the root's frame; this takes it with the root unplaced, so a mount differs from the
     /// original's by that round trip's rounding (under 0.002 ft on the three parked cars, the most on the buggy, whose spot leans).

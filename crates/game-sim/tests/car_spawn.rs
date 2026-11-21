@@ -55,6 +55,8 @@ mod wrapper_at {
     pub const OF_CAR: u32 = 0x50;
     pub const VTABLE: u32 = 0x38;
     pub const NODE: u32 = 0x134;
+    pub const NOSE: u32 = 0xa0;
+    pub const UP: u32 = 0xb0;
     pub const STORE: u32 = 0xe0;
     pub const PUT_BACK: u32 = 0xdc;
     pub const ENABLE: u32 = 0x124;
@@ -353,6 +355,14 @@ fn free07s_parked_baja_rolls_on_as_the_original() {
     let w = c + wrapper_at::OF_CAR;
     let vt = ee.u32_at(w + wrapper_at::VTABLE);
     let node = ee.u32_at(w + wrapper_at::NODE);
+    // The put-back squares the store's nose and up in place, so the image's store holds the load's
+    // put-back's squared pair and a second put-back squares it again (the up's last bits move).
+    // Give it back the pair the load stored, the car's own copies, so this put-back is the load's.
+    for (to, from) in [(wrapper_at::NOSE, car_at::FACING), (wrapper_at::UP, car_at::UP)] {
+        for i in [0, 4, 8, 12] {
+            ee.set_u32(w + to + i, ee.u32_at(c + from + i));
+        }
+    }
     ee.call(ee.u32_at(vt + wrapper_at::PUT_BACK), &[u64::from(w)], &[], 50_000_000);
     ee.call(ee.u32_at(vt + wrapper_at::ENABLE), &[u64::from(w)], &[], 50_000_000);
     for t in car_at::TIRES.map(|o| ee.u32_at(c + o)) {
@@ -376,11 +386,9 @@ fn free07s_parked_baja_rolls_on_as_the_original() {
     let up = parked_up(world, at);
     assert_eq!(bits3(up), bits3(quad(&ee, c + car_at::UP)), "up {up:?}");
     let mut m = Machine::new(&car, &model, quad(&ee, c + car_at::SPAWN), nose, up);
-    // Within two bits: the put-back turns it from the store's squared nose and up (x one bit under
-    // the original's, z two; y and w bit for bit).
+    // Turned bit for bit: squared once, from the file's nose and the ground's up, as the load's put-back.
     let turn = quad(&ee, b + 0x170);
-    let ulps = |a: f32, b: f32| (a.to_bits() as i32).abs_diff(b.to_bits() as i32);
-    assert!((0..4).all(|i| ulps(m.body.quat.0[i], turn.0[i]) <= 2), "turned {:?} want {turn:?}", m.body.quat);
+    assert_eq!(m.body.quat.to_bits(), turn.to_bits(), "turned {:?} want {turn:?}", m.body.quat);
     for (k, o) in car_at::TIRES.into_iter().enumerate() {
         m.wheels[k].mount = quad(&ee, ee.u32_at(c + o) + 0x80);
     }
