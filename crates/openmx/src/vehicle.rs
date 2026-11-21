@@ -3129,8 +3129,9 @@ pub fn parked_flier(
 ///
 /// The fliers (free06's helicopter, free10's plane; F80, [`InPlay::with_fliers`]) are settled once
 /// ([`parked_flier`]) and their hulls handed to [`Sim::parked`] after the cars'
-/// ([`Sim::park_cars_and_fliers`]), for the AI riders. A one-seat ride's bike strikes and pushes
-/// the plane too (S494, [`Sim::park_planes`]), and the helicopter (S494a, [`Sim::park_helis`]).
+/// ([`Sim::park_cars_and_fliers`]), for the AI riders. A bike strikes and pushes the plane too
+/// (S494, [`Sim::park_planes`]; split screen's too, S494b), and a one-seat ride's the helicopter
+/// (S494a, [`Sim::park_helis`]).
 #[derive(Clone, Debug, Default)]
 pub struct InPlay {
     /// The cars as the load settled them.
@@ -3147,9 +3148,10 @@ pub struct InPlay {
     kept: Vec<game_sim::car::Parked>,
     /// Each flier's plane as this seat's Sim last held it (S494), as `kept` for the cars.
     kept_planes: Vec<Option<Flight>>,
-    /// Which of them the Sim was last handed, once it has been, and whether it was handed the planes.
+    /// Which of them the Sim was last handed, once it has been, and whether it was handed the
+    /// helicopters (a one-seat ride's only, S494a).
     handed: Option<Vec<bool>>,
-    planes_handed: bool,
+    helis_handed: bool,
 }
 
 impl InPlay {
@@ -3234,18 +3236,19 @@ impl InPlay {
     /// in [`Sim::parked`] (F80, [`Sim::park_cars_and_fliers`]), but for a flier whose kind a player
     /// is up on.
     ///
-    /// On a one-seat ride (`driven` one long) the shown planes go to [`Sim::park_planes`] too (S494),
-    /// and the shown helicopters to [`Sim::park_helis`] (S494a), as the Sim last held them, as for
-    /// the cars. Split screen's seats each step their own Sim, and a flier in each would drift apart,
-    /// so theirs stay the AI riders' hulls only.
+    /// The shown planes go to [`Sim::park_planes`] too (S494), as the Sim last held them, as for the
+    /// cars; split screen's seats share one copy of them as of the cars (S494b, `World::parked_out`).
+    /// On a one-seat ride (`driven` one long) the shown helicopters go to [`Sim::park_helis`]
+    /// (S494a); split screen's seats each step their own Sim, and a helicopter in each would drift
+    /// apart, so theirs stay the AI riders' hulls only.
     pub fn hand_to(&mut self, sim: &mut Sim, driven: &[Kind]) {
         if self.parked.is_empty() && self.fliers.is_empty() {
             return;
         }
         let cars = self.parked.len();
         let shown: Vec<bool> = (self.parked.iter().map(|(kind, _)| kind).chain(self.fliers.iter().map(|(kind, ..)| kind))).map(|kind| !driven.contains(kind)).collect();
-        let planes = driven.len() == 1;
-        if self.handed.as_ref() == Some(&shown) && self.planes_handed == planes {
+        let helis = driven.len() == 1;
+        if self.handed.as_ref() == Some(&shown) && self.helis_handed == helis {
             return;
         }
         if self.kept.len() != self.parked.len() {
@@ -3266,14 +3269,14 @@ impl InPlay {
                 }
             }
             // And to the planes (S494).
-            let held: Vec<usize> = (0..self.fliers.len()).filter(|&k| self.planes_handed && was[cars + k] && self.kept_planes[k].is_some()).collect();
+            let held: Vec<usize> = (0..self.fliers.len()).filter(|&k| was[cars + k] && self.kept_planes[k].is_some()).collect();
             if held.len() == sim.parked_planes.len() {
                 for (k, p) in held.into_iter().zip(std::mem::take(&mut sim.parked_planes)) {
                     self.kept_planes[k] = Some(p);
                 }
             }
             // And to the helicopters (S494a).
-            let held: Vec<usize> = (0..self.kept_helis.len()).filter(|&k| self.planes_handed && was[cars + k] && self.kept_helis[k].is_some()).collect();
+            let held: Vec<usize> = (0..self.kept_helis.len()).filter(|&k| self.helis_handed && was[cars + k] && self.kept_helis[k].is_some()).collect();
             if held.len() == sim.parked_helis.len() {
                 for (k, h) in held.into_iter().zip(std::mem::take(&mut sim.parked_helis)) {
                     self.kept_helis[k] = Some(h);
@@ -3282,12 +3285,12 @@ impl InPlay {
         }
         let fliers = (self.fliers.iter().zip(&shown[cars..])).filter(|(_, on)| **on).map(|((_, hull, body, _), _)| game_sim::ai::parked_hull(hull.clone(), body));
         sim.park_cars_and_fliers((self.kept.iter().zip(&shown)).filter(|(_, on)| **on).map(|(p, _)| p.clone()).collect(), fliers);
-        let handed = (self.kept_planes.iter().zip(&shown[cars..])).filter(|(_, on)| planes && **on).filter_map(|(p, _)| p.clone()).collect();
+        let handed = (self.kept_planes.iter().zip(&shown[cars..])).filter(|(_, on)| **on).filter_map(|(p, _)| p.clone()).collect();
         sim.park_planes(handed);
-        let handed = (self.kept_helis.iter().zip(&shown[cars..])).filter(|(_, on)| planes && **on).filter_map(|(h, _)| h.clone()).collect();
+        let handed = (self.kept_helis.iter().zip(&shown[cars..])).filter(|(_, on)| helis && **on).filter_map(|(h, _)| h.clone()).collect();
         sim.park_helis(handed);
         self.handed = Some(shown);
-        self.planes_handed = planes;
+        self.helis_handed = helis;
     }
 }
 
