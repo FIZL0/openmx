@@ -303,6 +303,13 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
+    /// Whether this is the openmx bin's copy of these tests (K81). Ten test files and the web lib
+    /// mount `net` too, and each copy would bind real sockets against a two-second clock beside
+    /// the others under a busy gate; the bin's run is the one that proves them.
+    fn the_bins_copy() -> bool {
+        env!("CARGO_CRATE_NAME") == "openmx"
+    }
+
     /// What `u` received within two seconds, or its refusal.
     fn wait(u: &mut Udp) -> Result<Vec<(String, Vec<u8>)>, String> {
         let until = Instant::now() + Duration::from_secs(2);
@@ -324,6 +331,9 @@ mod tests {
 
     #[test]
     fn one_build_rides() {
+        if !the_bins_copy() {
+            return;
+        }
         // g echoes what a sent it: the same build's datagram, which a hears with the id taken off
         let (mut a, g) = pair("0.1.0 dev, 30 Hz");
         a.send("g", b"\x01session");
@@ -337,6 +347,9 @@ mod tests {
 
     #[test]
     fn another_build_is_refused_by_name() {
+        if !the_bins_copy() {
+            return;
+        }
         let (mut a, g) = pair("0.1.0 dev, 30 Hz");
         let d = [&MAGIC[..], &[16], b"0.1.0 dev, 60 Hz", &[1, 0], b"\x01session"].concat();
         g.send_to(&d, a.sock.local_addr().unwrap()).unwrap();
@@ -351,6 +364,9 @@ mod tests {
 
     #[test]
     fn two_builds_since_the_id_both_say_why() {
+        if !the_bins_copy() {
+            return;
+        }
         // both bound on ports of their own before either names the other: a port freed and bound
         // again is anyone's in between, another test's under a busy gate (K11)
         let mut a = Udp::bind_as(local(), vec![], "0.1.0 dev, 30 Hz", &[0]).unwrap();
@@ -365,6 +381,9 @@ mod tests {
 
     #[test]
     fn a_build_before_the_id_is_refused() {
+        if !the_bins_copy() {
+            return;
+        }
         let (mut a, g) = pair("0.1.0 dev, 30 Hz");
         // N2's datagrams start with the session's own bytes
         g.send_to(b"\x01\x00\x07session", a.sock.local_addr().unwrap()).unwrap();
@@ -374,6 +393,9 @@ mod tests {
 
     #[test]
     fn a_build_before_the_card_is_refused() {
+        if !the_bins_copy() {
+            return;
+        }
         let (mut a, g) = pair("0.1.0 dev, 30 Hz");
         // N7's: the same build id, and the session's bytes straight after it
         let d = [&NO_CARD[..], &[16], b"0.1.0 dev, 30 Hz", b"\x01session"].concat();
@@ -386,6 +408,9 @@ mod tests {
     /// peer has been heard, an empty seat's 0.
     #[test]
     fn every_seat_has_its_preset_once_every_peer_is_heard() {
+        if !the_bins_copy() {
+            return;
+        }
         let lineup = Lineup::parse("host,g,-,k,k").unwrap();
         let mut host = Udp::bind_as(local(), vec![], "b", &[3]).unwrap();
         let mut g = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[2]).unwrap();
@@ -417,6 +442,9 @@ mod tests {
     /// preset; every machine reads the same seats in the plane, and the bit is no preset.
     #[test]
     fn every_seat_s_starting_machine_is_known_once_every_peer_is_heard() {
+        if !the_bins_copy() {
+            return;
+        }
         let lineup = Lineup::parse("host,g,-,g").unwrap();
         let mut host = Udp::bind_as(local(), vec![], "b", &[2 | PLANE]).unwrap();
         let mut g = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[1, PLANE]).unwrap();
@@ -434,6 +462,9 @@ mod tests {
 
     #[test]
     fn a_build_before_the_saved_markers_is_refused() {
+        if !the_bins_copy() {
+            return;
+        }
         let (mut a, g) = pair("0.1.0 dev, 30 Hz");
         // N15's to P104's: the same id and card, under the magic before P105's
         let d = [&NO_MARKERS[..], &[16], b"0.1.0 dev, 30 Hz", &[1, 0], b"\x01session"].concat();
@@ -448,6 +479,9 @@ mod tests {
     /// never reach the session.
     #[test]
     fn every_seat_has_its_saved_markers_once_every_piece_is_in() {
+        if !the_bins_copy() {
+            return;
+        }
         let lineup = Lineup::parse("host,g,-,k,k").unwrap();
         let mut host = Udp::bind_as(local(), vec![], "b", &[3]).unwrap();
         let mut g = Udp::bind_as(local(), vec![("host".into(), host.at())], "b", &[2]).unwrap();
@@ -495,6 +529,9 @@ mod tests {
 
     #[test]
     fn a_peer_named_on_port_0_is_the_first_to_write_from_its_host() {
+        if !the_bins_copy() {
+            return;
+        }
         let mut a = Udp::bind_as(local(), vec![("g".into(), "127.0.0.1:0".parse().unwrap())], "0.1.0 dev, 30 Hz", &[0]).unwrap();
         let stranger = UdpSocket::bind(local()).unwrap();
         stranger.send_to(b"anything", a.at()).unwrap();
@@ -511,6 +548,9 @@ mod tests {
 
     #[test]
     fn strangers_are_still_dropped() {
+        if !the_bins_copy() {
+            return;
+        }
         let (mut a, _g) = pair("0.1.0 dev, 30 Hz");
         let stranger = UdpSocket::bind(local()).unwrap();
         stranger.send_to(b"anything", a.sock.local_addr().unwrap()).unwrap();
