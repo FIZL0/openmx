@@ -7278,18 +7278,22 @@ pause_menu_input      boot 0x0028be30 switch on the picked row's id (+0x1d4 = +0
 #   3f374c7b; one put-back per world reset. A driven car's store spot moves with it (s342, R68).
 # R68 — a switched car records its own safe spot into the store every frame, so a Restart after driving
 #   puts it there, not at its bay (journal research/journal/2026-11-21-r68-driven-car-store-writer).
+#   The store is the wrapper's (car +0x50) +0x90/+0xa0/+0xb0 = car +0xe0 spot, +0xf0 nose, +0x100 up.
 car_safe_spot_record  boot 0x003a1a00 (car, spot, nose) car vt+0x31c (+0x48 vtable slot 0x0045d29c =
 #                                    thunk 0x003a2180, a0 -= 0xd24: the vehicle interface at car +0xd24,
 #                                    its vtable at iface +0x20, slot +0x20). car +0xd24 = 0 (no score
 #                                    card): return 0. car +0xd28 = 0 (no activity) and card +8 bit
 #                                    0x800000 clear: point = root node place (0x001b2870) + lift
 #                                    (0x00421960), dropped by 0x001dc960 / 0x003a10b0 on the ray +0xdd0;
-#                                    no ground: return 1, nothing stored; else the passed spot. State
+#                                    no ground: return 1, nothing stored. With an activity or that bit
+#                                    set, the passed spot is the point instead. State
 #                                    +0x754 != 13: 0x003a1580(car, point, nose, &n, 0); hit and n.y > 0.8:
 #                                    +0xe0 = point + 0.5 (0x00421968) n (.xyz), +0xf0 = nose (y = 0,
 #                                    rsqrt-normalised), +0x100 = n, side = nose x up, +0xf0 = up x side
 #                                    (opmula/opmsub). State 13 with +0x530: spot = root +0xb0, nose =
 #                                    root +0xa0 flattened, 0x003a1580(.., car +0x100, 1), stored on a hit
+#                                    (read from the code, not run: whether a miss leaves the up written
+#                                    and the spot old is unchecked)
 #                                    Callers each frame: the car post 0x003a04e0 (car +0xd28 == 0;
 #                                    root +0xb0, root +0xa0) and score_mode3 0x00269160 (mgr +4 vt+0x20,
 #                                    mgr +0x60, mgr +0x120). Interface words: +0 (car +0xd24) the card

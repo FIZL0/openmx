@@ -67,6 +67,10 @@ Task R68. 2026-11-21.
 - **Switching out was not seen.** No image after the human leaves a car: whether the card stays on it
   (so an awake, rolling car keeps recording) or goes was not checked. Either way nothing found puts the
   bay back in the store, but that rests on the eleven-frame log and R67's vt+0xe0 scan, not a global one.
+- **The turn after the reset was not checked.** Only the body's place was read against the store spot;
+  the body's quat and the re-squared nose/up after the put-back were not compared with anything.
+- **The recorder does not store every frame**: no ground under the lift, or a normal with y <= 0.8,
+  leaves the store as it was. So "the last recorded spot" can lag the car.
 - **Other writers in other situations** (a wreck, a reset after a wreck, the car flipped, a machine race)
   were not traced: the log covered eleven coasting frames only.
 - **Car state +0x754 == 13** (the second branch, with car +0x530) is not named or run: no image has it.
