@@ -1,6 +1,7 @@
 //! S245: the cars drawn in the app. The shell rides each car's own track headless and says under
-//! `--trace-picture` what each drawn frame did. Parked, the car stands see-through in the bay
-//! `machine.txt` puts it in, on the ground (`picture bay:`), and a track that is not its own parks
+//! `--trace-picture` what each drawn frame did. Parked, the car stands solid in play where
+//! `machine.txt` puts it, on the ground (`picture parked:`, F72), with no see-through bay drawn
+//! inside it (F74; a bay elsewhere, as free07's, still is), and a track that is not its own parks
 //! none. Taken (a hand-written tape's switch, then the gas held), it is drawn at its bay and on, by
 //! both renderers, posed by its tires — their spin and their suspension's compression
 //! (`picture car:`) — with its driver rooted in the seat (`pilot:`). Each run writes a shot, which is
@@ -109,15 +110,27 @@ fn each_car_parks_on_its_own_track_and_is_drawn_driven() {
         let seat = drawn.seat(&assets).expect("the seat");
         let key = format!("car:{model}");
 
-        // Parked: see-through in its bay, on the ground under the file's spot.
+        // Parked: solid where the Sim holds it in play (F72), on the ground under the file's spot,
+        // and its see-through bay not drawn inside it (F74): free09's and free11's bays are where
+        // the car rests, so they are not drawn; free07's is 140 ft from its baja and is.
         let shot = scratch().join(format!("{track}-parked.png"));
         let said = ride(track, None, "gpu", 12, &shot, None);
         assert!(said.contains(&format!("{machine} parked here")), "{track}: the {machine} is not parked:\n{said}");
-        let bay = said.lines().find(|l| l.starts_with("picture bay: ")).unwrap_or_else(|| panic!("{track}: no bay drawn:\n{said}"));
-        assert_eq!(word(bay, "bay:"), key, "{bay}");
-        assert!(said.lines().filter(|l| l.starts_with("picture bay: ")).all(|l| word(l, "bay:") == key), "{track}: another car parked:\n{said}");
-        let at: [f32; 3] = after(bay, "at");
-        assert!(at[1] > 100.0, "{track}: the bay is not on the ground: {bay}");
+        let parked = said.lines().find(|l| l.starts_with("picture parked: ")).unwrap_or_else(|| panic!("{track}: no parked car drawn:\n{said}"));
+        assert_eq!(word(parked, "gpu"), key, "{parked}");
+        assert!(said.lines().filter(|l| l.starts_with("picture parked: ")).all(|l| word(l, "gpu") == key), "{track}: another car parked:\n{said}");
+        let rest: [f32; 3] = after(parked, "at");
+        assert!(rest[1] > 100.0, "{track}: the parked car is not on the ground: {parked}");
+        let bays: Vec<&str> = said.lines().filter(|l| l.starts_with("picture bay: car:")).collect();
+        assert!(bays.iter().all(|l| word(l, "bay:") == key), "{track}: another car's bay:\n{said}");
+        for line in &bays {
+            let at: [f32; 3] = after(line, "at");
+            assert!((at[0] - rest[0]).hypot(at[2] - rest[2]) > 10.0, "{track}: the bay is drawn inside the parked car {rest:?}: {line}");
+        }
+        assert_eq!(bays.is_empty(), track != "free07", "{track}: bays drawn {bays:?}");
+        // The bay, where the car is taken: the parked car's spot where it is not drawn.
+        let at: [f32; 3] = bays.first().map_or(rest, |l| after(l, "at"));
+        assert!(at[1] > 100.0, "{track}: the bay is not on the ground: {at:?}");
         // And a shot of it from behind it, looking along +z.
         let shot = scratch().join(format!("{track}-parked-behind.png"));
         let pose = format!("{},{},{},0,-12,60", at[0], at[1] + 10.0, at[2] - 34.0);
@@ -133,9 +146,11 @@ fn each_car_parks_on_its_own_track_and_is_drawn_driven() {
             assert!(frames.len() >= 40, "{renderer}: the {machine} was hardly drawn:\n{said}");
             assert!(frames.iter().all(|l| word(l, renderer) == key), "{renderer}: another model: {}", frames[0]);
 
-            // Taken at its bay: the first frame stands it there.
+            // Taken at its bay: the first frame stands it there; where its bay is not drawn, within
+            // the 10 ft the parked car hides it by (the truck rests 0.05 ft off it, the buggy 1.06).
             let first: [f32; 3] = after(frames[0], "at");
-            assert!((first[0] - at[0]).abs() < 0.01 && (first[2] - at[2]).abs() < 0.01, "{renderer}: not taken at its bay {at:?}: {}", frames[0]);
+            let near = if bays.is_empty() { 10.0 } else { 0.01 };
+            assert!((first[0] - at[0]).hypot(first[2] - at[2]) < near, "{renderer}: not taken at its bay {at:?}: {}", frames[0]);
 
             // Posed by its tires: the springs take its weight and the gas spins them.
             let (rest, last) = (tires(frames[0]), tires(frames[frames.len() - 1]));
@@ -163,6 +178,7 @@ fn each_car_parks_on_its_own_track_and_is_drawn_driven() {
     let said = ride("free06", None, "gpu", 12, &shot, None);
     assert!(said.contains("none parked here"), "free06 parks a car:\n{said}");
     assert!(!said.lines().any(|l| l.starts_with("picture bay: car:")), "free06 draws a car's bay:\n{said}");
+    assert!(!said.lines().any(|l| l.starts_with("picture parked: ")), "free06 draws a parked car:\n{said}");
 }
 
 /// S265: [`tape`] with the left stick's x held at `x` from tick 30 beside the gas: `00` full left,

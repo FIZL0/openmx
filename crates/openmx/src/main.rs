@@ -13167,8 +13167,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let at = M4::placement(vector(bay.spawn.at), vector(bay.spawn.facing), v3(0.0, 1.0, 0.0));
                 actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor::WHOLE, at, vehicle::BAY_ALPHA, &mut gpu_poses));
             }
-            // And every car's bay (S245), at rest, where the port parks it: on its own track.
-            for bay in bays.iter().filter(|b| !args.overview && b.machine.car_kind().is_some()) {
+            // The cars the original parks in play (F72), drawn after the bays.
+            let parked = parked_drawn(&world.seats[0], &before_parked, cut[0], &blend);
+            // And every car's bay (S245), at rest, where the port parks it: on its own track; not one
+            // where a car of its kind the original parks in play came to rest at the load (F74),
+            // whose solid car stands there or was pushed on from there: within a car's length
+            // across (free09's truck rests 0.05 ft off its bay; free07's baja 140 ft off its own).
+            const HELD: f32 = 10.0;
+            let in_play = &world.seats[0].garage.in_play;
+            let handed: Vec<Machine> = parked.iter().map(|(m, _, _)| *m).collect();
+            let rests: Vec<(Machine, Vf)> = (0..in_play.len()).filter_map(|k| in_play.at(k)).filter_map(|(kind, at)| Some((kind.car()?, at))).filter(|(m, _)| handed.contains(m)).collect();
+            let held = |bay: &vehicle::Bay| rests.iter().any(|(m, at)| *m == bay.machine && (at.x() - bay.spawn.at.x()).hypot(at.z() - bay.spawn.at.z()) < HELD);
+            for bay in bays.iter().filter(|b| !args.overview && b.machine.car_kind().is_some() && !held(b)) {
                 let Some(drawn) = car_draw::find(&car_models, bay.machine, bay.livery) else { continue };
                 actors.extend(car_draw::actors(drawn, &assets, &[game_render::car::Tire::REST; 4], car_draw::bay_at(bay), vehicle::BAY_ALPHA, &mut gpu_poses));
                 if args.trace_picture {
@@ -13177,7 +13187,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // And the cars the original parks in play (F72, free09's monster truck), solid where the
             // Sim holds them, posed by their tires: one a bike pushed is seen moved.
-            let parked = parked_drawn(&world.seats[0], &before_parked, cut[0], &blend);
             for (k, (machine, p, at)) in parked.into_iter().enumerate().filter(|_| !args.overview) {
                 let Some(drawn) = car_draw::find(&car_models, machine, 0) else { continue };
                 actors.extend(car_draw::actors(drawn, &assets, &car_draw::machine_tires(&p.car, &p.machine), at, 1.0, &mut gpu_poses));

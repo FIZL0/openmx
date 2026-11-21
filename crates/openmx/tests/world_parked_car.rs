@@ -2,8 +2,8 @@
 //! `machine.txt` (world_mxu_free's is free06, which parks no car), so before S266 no car stood in a
 //! world. Now each car stands where its own track parks it (S245: the truck on free09, the baja on
 //! free07, the buggy on free11), moved by that tile's offset in the world: the shell's
-//! `--trace-picture` bay line in world_mxu_free is its bay on the track alone, plus the tile's `at`,
-//! at the same height. A shot of the truck from behind its bay is written and was looked at by eye.
+//! `--trace-picture` parked line in world_mxu_free is its spot on the track alone, plus the tile's
+//! `at`, at about the same height (F74: each car settles on its own; its bay is not drawn). A shot of the truck from behind its bay is written and was looked at by eye.
 //! Skips without the disc or the installed world.
 
 use std::path::{Path, PathBuf};
@@ -46,10 +46,12 @@ fn ride(args: &[&str]) -> String {
     said
 }
 
-/// Where the `picture bay:` line of `model` stands it.
+/// Where the first `picture parked:` line of `model` stands it (F72; the see-through bay is not
+/// drawn inside it since F74).
 fn bay(said: &str, model: &str) -> [f32; 3] {
-    let key = format!("picture bay: car:{model} at ");
-    let line = said.lines().find_map(|l| l.strip_prefix(key.as_str())).unwrap_or_else(|| panic!("no {model} bay drawn:\n{said}"));
+    let key = format!(" gpu car:{model} at ");
+    let line = said.lines().filter(|l| l.starts_with("picture parked: ")).find_map(|l| l.split_once(key.as_str()).map(|(_, at)| at));
+    let line = line.unwrap_or_else(|| panic!("no {model} parked:\n{said}"));
     let w: Vec<f32> = line.split_whitespace().take(3).map(|n| n.parse().expect("a number")).collect();
     [w[0], w[1], w[2]]
 }
@@ -77,6 +79,15 @@ fn world_mxu_free_parks_each_car_on_its_own_tile() {
         let at = tile_at(&mods, tile);
         let got = bay(&world, model);
         let want = [own[0] + at[0], own[1], own[2] + at[1]];
-        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01), "{model}: parked at {got:?} in the world, {want:?} is {track}'s bay moved by {tile}'s {at:?}");
+        // Each car is settled on the ground where it is put (P378), so it rests a little apart
+        // in the world, far from the origin: up to 0.16 ft across, 0.05 ft up on free07's baja.
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.25), "{model}: parked at {got:?} in the world, {want:?} is {track}'s spot moved by {tile}'s {at:?}");
+    }
+    // And no car's bay is drawn inside its parked car (F74).
+    for line in world.lines().filter(|l| l.starts_with("picture bay: car:")) {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let at: Vec<f32> = w[4..7].iter().map(|n| n.parse().expect("a number")).collect();
+        let rest = bay(&world, w[2].trim_start_matches("car:"));
+        assert!((at[0] - rest[0]).hypot(at[2] - rest[2]) > 10.0, "a bay is drawn inside its parked car at {rest:?}: {line}");
     }
 }
