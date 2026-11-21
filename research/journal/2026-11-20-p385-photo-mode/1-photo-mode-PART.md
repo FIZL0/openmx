@@ -55,6 +55,22 @@ no code or data from it.
 - In a window on the GPU path, the frame that takes the picture is drawn without the menu sprites,
   so the controls card blinks off for one frame. Not seen on screen (headless only).
 - The free camera has no collision; it can fly into the ground. Not asked for.
+- MXA's auto-shots (wrecks, tricks, results) are not done. The brief names them as MXA's, not as
+  asked, so they are filed as P390.
+- The brief's files (menu_pages.rs, game-sim camera.rs, chase.rs) are untouched. The pause rows are
+  in menu.rs, and the free camera only overrides the shell's camera, so the sim camera is not changed.
+
+## Spec review
+
+A fresh reviewer read only the diff and the brief. It confirmed no bugs. I checked its three risks:
+- The free camera's pad list is filled every frame from the raw pad, not only on the Tricks page.
+- With `paused` false and `riding` false, only the bike's alpha reads `paused` alone, which is the point.
+- `view_up` is used only by the two view-matrix builders.
+I kept what it called "not asked", each needed by the brief:
+- the global roll, for "roll"
+- the one-rider limit, because that roll is renderer-wide
+- `--photo-at`, for the test
+- Triangle hiding the card, for a clean view
 
 ## Next
 

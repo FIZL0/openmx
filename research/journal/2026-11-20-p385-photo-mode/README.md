@@ -2,5 +2,7 @@
 
 2026-11-20. Task: `./kit plan P385`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+Photo mode, opened from the pause: the ride stays frozen, a free camera flies (move, orbit, roll,
+FOV), the HUD hides and Cross writes a PNG at the window size. A headless shell test proves the sim
+tick count holds and the PNG size. The shell has no replay view, so it opens from the pause only.
+Details in 1-photo-mode.
