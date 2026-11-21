@@ -632,6 +632,12 @@ fn the_settings_file_reads_back_as_it_was_written() {
             c[2].own.push(Own { machine: Machine::Biplane, base: "Flight Cam 1".into(), name: "Far Plane".into(), look: Look { fov: 10, distance: 200, height: 150, ..Look::ORIGINAL } });
             c
         },
+        // 2P's first-person eye still and a little forward, the view wider (P389).
+        fp_adjust: {
+            let mut t = [menu::FpTrim::ORIGINAL; menu::SEATS_MAX];
+            t[1] = menu::FpTrim { bob: 0, up: -2, forward: 4, fov: 6 };
+            t
+        },
         // The mods folder not read (MD2).
         mods: false,
         // One pack of it switched off (P118).
@@ -1169,7 +1175,12 @@ fn the_camera_rows_change_by_pad_and_are_saved() {
             Key::CameraOriginal,
             Key::CameraSave,
             Key::CameraSaveOver,
-            Key::CameraCycle
+            Key::CameraCycle,
+            Key::Heading,
+            Key::FirstPerson(0),
+            Key::FirstPerson(1),
+            Key::FirstPerson(2),
+            Key::FirstPerson(3)
         ]
     );
     assert_eq!(rows[0].value, "1P");
@@ -1229,6 +1240,79 @@ fn the_camera_rows_change_by_pad_and_are_saved() {
     // Back out to the main menu.
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// P389: the Camera page's First Person sliders set the seat's first-person trim, which the shell
+/// hands the camera as `--fp-adjust` would; Cross puts one back, the Player row keeps seats apart,
+/// and it is saved and read back. Untouched, it is the disc's camera (`--fp-adjust 1,0,0,0`) and the
+/// file gains no line.
+#[test]
+fn menu_sliders_set_fp_adjust_and_save_it() {
+    use chase::FpAdjust;
+    use menu::{FpTrim, Key};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.fp_adjust, [FpTrim::ORIGINAL; menu::SEATS_MAX]);
+    assert_eq!(FpAdjust::from(FpTrim::ORIGINAL.adjust()), FpAdjust::ORIGINAL, "the default is the disc's camera");
+    assert!(!m.settings.text().contains("fp_adjust"), "an untouched trim writes nothing");
+
+    settings_at(&mut m, &mut r, "Camera");
+    let value = |m: &Menu, i: usize| m.page().iter().find(|r| r.key == Key::FirstPerson(i)).unwrap().value.clone();
+    for i in 0..menu::FP_SLIDERS {
+        assert_eq!(value(&m, i), "Original", "slider {i}");
+    }
+    // Head bob a step left: 90% of the head's sway, 1P's alone.
+    down_to(&mut m, &mut r, Key::FirstPerson(0));
+    tap(&mut m, &mut r, Control::Left);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.fp_adjust[0].bob, 100 - menu::FP_BOB_STEP);
+    assert_eq!(value(&m, 0), "90%");
+    assert_eq!(m.settings.fp_adjust[1], FpTrim::ORIGINAL, "2P's is their own");
+    // Eye up two tenths, forward five tenths back, the view three degrees wider.
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(value(&m, 1), "+0.2 ft");
+    tap(&mut m, &mut r, Control::Down);
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Left);
+    }
+    tap(&mut m, &mut r, Control::Down);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(value(&m, 3), "+3 deg");
+    let want = FpAdjust::parse("0.9,0.2,-0.5,3").unwrap();
+    assert_eq!(FpAdjust::from(m.settings.fp_adjust[0].adjust()), want, "as --fp-adjust 0.9,0.2,-0.5,3");
+    // Held at the ends: the field of view stops at 30 degrees, as --fp-adjust clamps it.
+    for _ in 0..40 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(m.settings.fp_adjust[0].fov, menu::FP_FOV.1);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.fp_adjust[0].fov, 0, "Cross puts it back");
+    assert_eq!(value(&m, 3), "Original");
+
+    // 2P's eye forward, which leaves 1P's.
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(value(&m, 0), "Original", "the sliders show 2P's");
+    down_to(&mut m, &mut r, Key::FirstPerson(2));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.fp_adjust[1].forward, 1);
+    assert_eq!(m.settings.fp_adjust[0].forward, -5);
+
+    // Saved and read back, one set a seat.
+    let dir = scratch("fp_adjust");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let back = menu::load(&dir).0;
+    assert_eq!(back.fp_adjust, m.settings.fp_adjust);
+    assert!(m.settings.text().contains("fp_adjust = 90 2 -5 0, 100 0 1 0, 100 0 0 0\n"), "{}", m.settings.text());
+    // A file from before P389 is the disc's camera, a short line carries its last set on, and out
+    // of range is held to the sliders' ends.
+    assert_eq!(Settings::parse("name = Rider\n").fp_adjust, [FpTrim::ORIGINAL; menu::SEATS_MAX]);
+    assert_eq!(Settings::parse("fp_adjust = 50 1 2 3\n").fp_adjust, [FpTrim { bob: 50, up: 1, forward: 2, fov: 3 }; menu::SEATS_MAX]);
+    assert_eq!(Settings::parse("fp_adjust = 900 -99 99 -99\n").fp_adjust[0], FpTrim { bob: 200, up: -30, forward: 30, fov: -30 });
     std::fs::remove_dir_all(dir).ok();
 }
 

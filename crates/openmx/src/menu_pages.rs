@@ -87,6 +87,14 @@ const PRESET_CAMERAS: [(&str, &str); cameras::SLIDERS] = [
     ("Follow Lag", "How slowly this preset's eye follows its machine: lower keeps it tight, higher lets it swing wide and catch up."),
 ];
 
+/// The first-person camera's sliders (P389), in [`FpTrim::get`]'s order.
+const FIRST_PERSON: [(&str, &str); FP_SLIDERS] = [
+    ("Head Bob", "How much of the rider's head sway the first-person eye keeps: all of it as the original, none holds it still on the bike."),
+    ("Eye Up", "The first-person eye moved up or down, in feet along the bike."),
+    ("Eye Forward", "The first-person eye moved forward or back, in feet along the bike."),
+    ("First Person FOV", "How wide the first-person view is: the original's angle, opened or narrowed by this many degrees."),
+];
+
 /// What Music Plays offers, as `settings.txt`'s words; One Song is a song's id there.
 const PLAYS: [&str; 4] = ["Shuffle", "In Order", "One Song", "Off"];
 const PLAYS_ONE: usize = 2;
@@ -203,6 +211,8 @@ pub enum Key {
     CameraDelete,
     /// What the camera button cycles through.
     CameraCycle,
+    /// A first-person camera slider (P389), by its index in [`FIRST_PERSON`].
+    FirstPerson(usize),
     Garage(roster::Row),
     Knob(Knob),
     /// The modifiers page's Machine row (P272): whose knobs show under it.
@@ -1239,6 +1249,15 @@ impl Menu {
             Row::choice(Key::CameraCycle, "Camera Button", &cycles, at(&cameras::Cycle::ALL, set.cycle), "What the camera button steps through: the disc's presets, the disc's and then yours, or yours in place of the disc's.")
                 .tips(&["The disc's presets alone.", "The disc's, then yours.", "Yours alone, while you have some for that machine."]),
         );
+        rows.push(Row::heading("First Person"));
+        let fp = self.settings.fp_adjust[seat];
+        for (i, (label, about)) in FIRST_PERSON.iter().enumerate() {
+            let (lo, hi) = FpTrim::span(i);
+            let meter = (fp.get(i) - lo) as f32 / (hi - lo) as f32;
+            let mut r = Row::slider(Key::FirstPerson(i), label, fp.label(i), meter, about);
+            r.note = Some("Cross puts it back to the original's.".into());
+            rows.push(r);
+        }
         rows
     }
 
@@ -2131,6 +2150,11 @@ impl Menu {
             Key::CameraCycle => {
                 let seat = self.camera_seat();
                 self.settings.camera_sets[seat].cycle = cameras::Cycle::ALL[next(row)];
+            }
+            Key::FirstPerson(i) => {
+                let seat = self.camera_seat();
+                // Cross puts the slider back to the original's.
+                self.settings.fp_adjust[seat].step(i, p.left, p.right);
             }
             Key::Garage(g) => {
                 self.change_garage(g, p);

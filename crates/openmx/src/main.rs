@@ -3595,8 +3595,9 @@ struct Args {
     /// shipped default.
     camera_view: Option<menu::CameraView>,
     /// `--fp-adjust BOB,UP,FORWARD,FOV` (P384): the first-person camera's trim, MXA's onboard adjust
-    /// as an idea ([`chase::FpAdjust`]). Unset, the disc's camera untouched.
-    fp_adjust: chase::FpAdjust,
+    /// as an idea ([`chase::FpAdjust`]). Unset, the Camera page's First Person sliders (P389), or
+    /// without a front end the disc's camera untouched.
+    fp_adjust: Option<chase::FpAdjust>,
     /// `--trace-camera` (P119): one line a frame for each view of what its follow camera did — the
     /// preset, the distance, the pitch, the field of view, the eye and the look-at — for finding a
     /// camera that swings.
@@ -12059,7 +12060,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let head = rig.body.as_ref().filter(|b| b.posed).and_then(|b| {
                         let m = b.rig.world().get(b.rig.set.skeleton.find("Head")?)?.mul(chassis_at(ride));
                         Some(Vf::new(m.0[3][0], m.0[3][1], m.0[3][2], 1.0))
-                    });                    rig.first_person.frame(ride, head, args.fp_adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
+                    });
+                    // The command line's trim, or the Camera page's (P389), live as the view's framing is.
+                    let adjust = args.fp_adjust.unwrap_or_else(|| {
+                        let trim = front.as_deref().map(|f| f.menu.settings.fp_adjust[i.min(menu::SEATS_MAX - 1)]).unwrap_or(menu::FpTrim::ORIGINAL);
+                        chase::FpAdjust::from(trim.adjust())
+                    });
+                    rig.first_person.frame(ride, head, adjust, dt, &seat.sim.tables.ride.curve, &mut world.place).map(|(v, _up)| v)
                 }
                 _ => None,
             };
@@ -17407,7 +17414,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         camera: START_CAMERA.to_string(),
         camera_asked: false,
         camera_view: None,
-        fp_adjust: chase::FpAdjust::ORIGINAL,
+        fp_adjust: None,
         trace_camera: false,
         moment: None,
         wrecks: true,
@@ -17759,7 +17766,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--fp-adjust" => {
                 let v = next("four numbers: bob,up,forward,fov")?;
-                args.fp_adjust = chase::FpAdjust::parse(&v).ok_or_else(|| format!("--fp-adjust: four numbers like 1,0,0.5,5, not {v:?}"))?;
+                args.fp_adjust = Some(chase::FpAdjust::parse(&v).ok_or_else(|| format!("--fp-adjust: four numbers like 1,0,0.5,5, not {v:?}"))?);
             }
             "--moment" => {
                 let file: std::path::PathBuf = next("a moment file")?.into();

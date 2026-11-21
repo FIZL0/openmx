@@ -1538,6 +1538,14 @@ impl FpAdjust {
     }
 }
 
+/// `(bob, up, forward, fov)` in `--fp-adjust`'s order: the Camera page's First Person sliders (P389)
+/// as `menu::FpTrim::adjust` hands them over.
+impl From<(f32, f32, f32, f32)> for FpAdjust {
+    fn from((bob, up, forward, fov): (f32, f32, f32, f32)) -> FpAdjust {
+        FpAdjust { bob, up, forward, fov }
+    }
+}
+
 /// A seat's first-person camera (P384) and whether it has the screen. The camera button walks onto
 /// it after the bike's last cycling preset and off it onto the first; the follow camera keeps its
 /// frame underneath, so letting go hands back a camera already where it should be.

@@ -549,6 +549,8 @@ pub struct Settings {
     /// Each seat's camera presets (P163): the preset each machine's camera was last left on, the
     /// disc presets' own numbers and the player's own presets, and what the camera button cycles.
     pub camera_sets: [cameras::Seat; SEATS_MAX],
+    /// Each seat's first-person camera trim (P389), the Camera page's First Person sliders.
+    pub fp_adjust: [FpTrim; SEATS_MAX],
     /// Whether the shell reads the `mods/` folder beside this file (MD2): Off, nothing is read from it
     /// and the pick is the disc's alone. On unless turned off.
     pub mods: bool,
@@ -1333,6 +1335,118 @@ impl CameraView {
     }
 }
 
+/// One player's first-person camera trim (P389), as the Camera page sets it and `--fp-adjust` takes
+/// it (`chase::FpAdjust`): how much head bob the eye keeps, in percent, the eye moved up and forward,
+/// in tenths of a foot, and degrees added to the field of view. The menu knows notches only; at
+/// [`FpTrim::ORIGINAL`] the shell hands the camera the disc's numbers untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FpTrim {
+    pub bob: i16,
+    pub up: i16,
+    pub forward: i16,
+    pub fov: i16,
+}
+
+/// The first-person sliders' spans in notches, `--fp-adjust`'s clamps: bob 0 to 200%, up and
+/// forward 3 ft either way, the field of view 30 degrees either way.
+pub const FP_BOB: (i16, i16) = (0, 200);
+pub const FP_SHIFT: (i16, i16) = (-30, 30);
+pub const FP_FOV: (i16, i16) = (-30, 30);
+/// The head bob slider's step, in percent; the others step one notch.
+pub const FP_BOB_STEP: i16 = 10;
+/// The Camera page's first-person sliders: head bob, up, forward, field of view.
+pub const FP_SLIDERS: usize = 4;
+
+impl FpTrim {
+    /// The disc's camera: the eye on the head node, nothing added. `--fp-adjust 1,0,0,0`.
+    pub const ORIGINAL: FpTrim = FpTrim { bob: 100, up: 0, forward: 0, fov: 0 };
+
+    /// Slider `slider`'s span, as its meter is drawn.
+    pub fn span(slider: usize) -> (i32, i32) {
+        let (lo, hi) = match slider {
+            0 => FP_BOB,
+            1 | 2 => FP_SHIFT,
+            _ => FP_FOV,
+        };
+        (i32::from(lo), i32::from(hi))
+    }
+
+    /// Slider `slider` (head bob, up, forward, field of view) as a notch.
+    pub fn get(&self, slider: usize) -> i32 {
+        i32::from(match slider {
+            0 => self.bob,
+            1 => self.up,
+            2 => self.forward,
+            _ => self.fov,
+        })
+    }
+
+    fn set(&mut self, slider: usize, v: i32) {
+        let (lo, hi) = FpTrim::span(slider);
+        let v = v.clamp(lo, hi) as i16;
+        match slider {
+            0 => self.bob = v,
+            1 => self.up = v,
+            2 => self.forward = v,
+            _ => self.fov = v,
+        }
+    }
+
+    /// Slider `slider` a step left or right, held at its ends; with neither, back to the disc's.
+    pub fn step(&mut self, slider: usize, left: bool, right: bool) {
+        let step = if slider == 0 { i32::from(FP_BOB_STEP) } else { 1 };
+        let v = self.get(slider);
+        let to = match (left, right) {
+            (true, _) => v - step,
+            (_, true) => v + step,
+            _ => FpTrim::ORIGINAL.get(slider),
+        };
+        self.set(slider, to);
+    }
+
+    /// A slider's value as its row shows it: `Original` on the disc's notch.
+    pub fn label(&self, slider: usize) -> String {
+        let v = self.get(slider);
+        match slider {
+            _ if v == FpTrim::ORIGINAL.get(slider) => "Original".to_string(),
+            0 => format!("{v}%"),
+            1 | 2 => format!("{:+.1} ft", v as f32 / 10.0),
+            _ => format!("{v:+} deg"),
+        }
+    }
+
+    /// As the shell trims the camera: (bob share, feet up, feet forward, degrees added), the four
+    /// numbers of `chase::FpAdjust` in its order.
+    pub fn adjust(&self) -> (f32, f32, f32, f32) {
+        (f32::from(self.bob) / 100.0, f32::from(self.up) / 10.0, f32::from(self.forward) / 10.0, f32::from(self.fov))
+    }
+
+    /// The four notches as `settings.txt` keeps them, bob first.
+    pub fn text(&self) -> String {
+        format!("{} {} {} {}", self.bob, self.up, self.forward, self.fov)
+    }
+
+    /// [`FpTrim::text`] back, each notch held to its slider's span; `None` unless it is four numbers.
+    pub fn parse(v: &str) -> Option<FpTrim> {
+        let n: Vec<i32> = v.split_whitespace().map(|w| w.parse::<i32>().ok()).collect::<Option<_>>()?;
+        let [bob, up, forward, fov] = n[..] else { return None };
+        let mut t = FpTrim::ORIGINAL;
+        for (i, v) in [bob, up, forward, fov].into_iter().enumerate() {
+            t.set(i, v);
+        }
+        Some(t)
+    }
+
+    /// The `fp_adjust` line's value: one set for every seat, or one a seat with the last carried on.
+    pub fn parse_seats(v: &str) -> Option<[FpTrim; SEATS_MAX]> {
+        let sets: Vec<FpTrim> = v.split(',').map(FpTrim::parse).collect::<Option<_>>()?;
+        if sets.is_empty() || sets.len() > SEATS_MAX {
+            return None;
+        }
+        Some(std::array::from_fn(|i| sets[i.min(sets.len() - 1)]))
+    }
+}
+
 
 /// The `mod.json` kind of the packs a flier comes in (P318a): the machine packs', as
 /// `online_fliers::KIND` says it, which the lobby's room offers by.
@@ -1487,6 +1601,7 @@ impl Default for Settings {
             lobby_seats: LOBBY_SEATS,
             cameras: [CameraView::DEFAULT; SEATS_MAX],
             camera_sets: Default::default(),
+            fp_adjust: [FpTrim::ORIGINAL; SEATS_MAX],
             mods: true,
             mods_off: Vec::new(),
             music_off: Vec::new(),
@@ -1848,6 +1963,7 @@ impl Settings {
                 "shadow_casters" => {}
                 "model_detail" => s.detail = video::Detail::from_word(v).unwrap_or(s.detail),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
+                "fp_adjust" => s.fp_adjust = FpTrim::parse_seats(v).unwrap_or(s.fp_adjust),
                 "camera_start" | "camera_car_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "preload_axis" => s.preload_axes = PreloadAxis::parse_seats(v).unwrap_or(s.preload_axes),
@@ -1969,6 +2085,7 @@ impl Settings {
             + &self.handling_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
+            + &self.fp_adjust_text()
             + &cameras::text(&self.camera_sets)
             + &self.markers_text()
             + &self.preload_axes_text()
@@ -2222,6 +2339,19 @@ impl Settings {
         };
         let word = |d: bool| if d { "dual" } else { "single" };
         format!("sticks = {}\n", self.dual_sticks[..n].iter().map(|d| word(*d)).collect::<Vec<_>>().join(" "))
+    }
+
+    /// The first-person trims' line (P389), only when a seat's is not the disc's, so a file from
+    /// before it is written as it was: one set a seat, as `camera`'s line.
+    fn fp_adjust_text(&self) -> String {
+        if self.fp_adjust.iter().all(|t| *t == FpTrim::ORIGINAL) {
+            return String::new();
+        }
+        let n = match self.fp_adjust.iter().rposition(|t| *t != self.fp_adjust[SEATS_MAX - 1]) {
+            Some(i) => i + 2,
+            None => 1,
+        };
+        format!("fp_adjust = {}\n", self.fp_adjust[..n].iter().map(FpTrim::text).collect::<Vec<_>>().join(", "))
     }
 
     fn cameras_text(&self) -> String {

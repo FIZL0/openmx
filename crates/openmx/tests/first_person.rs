@@ -118,6 +118,10 @@ fn the_eye_follows_the_riders_head_node() {
     assert!(close(view.position.x(), at.x(), 1e-4), "{:?}", view.position);
     assert!(close(view.position.y(), at.y() + 5.0, 1e-4) && close(view.position.z(), at.z() + 1.0, 1e-4), "{:?}", view.position);
     assert_eq!(view.fov.0, 90.0);
+    // The Camera page's sliders (P389) hand the same four numbers over in the same order; the menu's
+    // side is tests/menu.rs's `menu_sliders_set_fp_adjust_and_save_it`.
+    assert_eq!(FpAdjust::from((0.0, 0.5, 1.0, 5.0)), adjust);
+    assert_eq!(FpAdjust::from((1.0, 0.0, 0.0, 0.0)), FpAdjust::ORIGINAL);
     // Off the screen, it draws nothing.
     fp.on = false;
     assert!(fp.frame(&ride, Some(head), FpAdjust::ORIGINAL, DT, &curve, &mut Nothing).is_none());
