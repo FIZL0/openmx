@@ -704,23 +704,33 @@ fn read_png(path: &Path) -> (usize, usize, Vec<u8>) {
 }
 
 /// The shell's first frame of a ride with these arguments, or `None` with no disc.
+///
+/// K80, as K46 did for tests/hud.rs: each run has a store of its own (a `kit.toml` naming a link to
+/// the disc), so no `settings.txt`, `controls.txt` or mods beside the checkout's disc decide it, and
+/// rides `--steady-clock`, so its two pictures are two sixtieths of a second of ride however long a
+/// loaded machine took over them.
 fn first_frame(name: &str, args: &[&str]) -> Option<Vec<u8>> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
     }
-    let shot: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p121-{name}.png"));
-    let _ = std::fs::remove_file(&shot);
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let iso = game_render::disc::Disc::configured_path().expect("an opened disc has a path");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p121-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kit.toml"), "[game]\niso = \"disc.iso\"\n").unwrap();
+    std::os::unix::fs::symlink(&iso, dir.join("disc.iso")).unwrap();
+    let shot: PathBuf = dir.join("shot.png");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
-        .current_dir(&root)
-        .args(["--headless", "--size", "640x448", "--frames", "2"])
+        .current_dir(&dir)
+        .args(["--headless", "--steady-clock", "--size", "640x448", "--frames", "2"])
         .args(args)
         .arg("--shot")
         .arg(&shot)
         .output()
         .expect("the shell runs");
-    assert!(out.status.success(), "{name}: the shell failed: {}", String::from_utf8_lossy(&out.stderr));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{name}: the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
     let (w, h, rgb) = read_png(&shot);
     assert_eq!((w, h), (640, 448), "{name}");
     Some(rgb)
