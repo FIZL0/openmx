@@ -1,4 +1,4 @@
-# 1 — split plane meets shared cars (PART)
+# 1 — split plane meets shared cars (FINAL)
 
 Task F75a. 2026-11-21.
 
