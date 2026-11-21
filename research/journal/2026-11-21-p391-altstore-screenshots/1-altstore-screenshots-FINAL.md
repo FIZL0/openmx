@@ -1,4 +1,4 @@
-# 1 — altstore screenshots (PART)
+# 1 — altstore screenshots (FINAL)
 
 Task P391. 2026-11-21.
 
@@ -9,7 +9,10 @@ Task P391. 2026-11-21.
   legacy `screenshotURLs`. Sizes are read from each jpg with file(1); all are 1600x900 (landscape).
 - Same script: a version already published keeps its own date when the source is rebuilt (was: today's). Needed to
   rebuild v0.18.0's source without moving its versionDate to 11-21; the release path is unchanged (its version is a
-  draft, so not in the API list yet).
+  draft, so not in the API list yet). The review called this unasked; kept, since the task asks to republish the
+  source and without it republishing moves a release's date.
+- Review fixes: the checker refuses `..` in a shot URL (it could point outside web/), and both scripts take the first
+  size file(1) prints (the checker also reads a png's "W x H").
 - `tools/check-altstore-source.sh` accepts screenshots (optional, so older sources still pass) and fails on any URL
   not under https://openmx.dev/, any file missing from web/, or a width/height that differs from the file's. Its
   summary line lists the screenshots.

@@ -30,11 +30,13 @@ shots=$(jq -r '
   | [$n, (.imageURL // ""), (.width // "" | tostring), (.height // "" | tostring)] | @tsv' <<<"$json")
 while IFS=$'\t' read -r n url w h; do
     [ -n "$url" ] || continue
+    case $url in *..*) bad+=$'\n'"$n: screenshot $url climbs out of web/"; continue ;; esac
     case $url in https://openmx.dev/?*) ;; *) bad+=$'\n'"$n: screenshot $url is not under https://openmx.dev/"; continue ;; esac
     f=$web/${url#https://openmx.dev/}
     [ -f "$f" ] || { bad+=$'\n'"$n: screenshot $url has no file ${f#"$web/"} in web/"; continue; }
     [ -n "$w$h" ] || continue
-    wh=$(file -b "$f" | grep -o ', [0-9]*x[0-9]*,' | tr -d ' ,')
+    # file(1) says "…, 1600x900, …" for a jpg, "…, 1600 x 900, …" for a png
+    wh=$(file -b "$f" | grep -oE ', [0-9]+ ?x ?[0-9]+,' | head -1 | tr -d ' ,')
     [ "$wh" = "${w}x$h" ] || bad+=$'\n'"$n: screenshot $url is listed ${w}x$h but its file is ${wh:-of no size}"
 done <<<"$shots"
 bad=$(sed '/^$/d' <<<"$bad")

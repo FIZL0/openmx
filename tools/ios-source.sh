@@ -30,7 +30,7 @@ for s in ride-free06 air-cancan road-free09 wreck split-4p menu-main; do
     f=$web/shots/$s.jpg
     [ -f "$f" ] || { echo "no such shot: $f" >&2; exit 1; }
     # the jpg's real size, as file(1) reads it from the frame header: "…, precision 8, 1600x900, components 3"
-    wh=$(file -b "$f" | grep -o ', [0-9]*x[0-9]*,' | tr -d ' ,')
+    wh=$(file -b "$f" | grep -oE ', [0-9]+x[0-9]+,' | head -1 | tr -d ' ,')
     [ -n "$wh" ] || { echo "no size in $f" >&2; exit 1; }
     shots+="{\"imageURL\":\"https://openmx.dev/shots/$s.jpg\",\"width\":${wh%x*},\"height\":${wh#*x}},"
 done
