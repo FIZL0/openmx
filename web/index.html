@@ -1155,7 +1155,7 @@ footer a { color: var(--bone); }
   }
 
   // ---- the build ----
-  // beta.openmx.dev is every push to main (the rolling `beta` release); openmx.dev is the latest release (.github/workflows/pages.yml).
+  // beta.openmx.dev is every push to main, its builds under download/ (B43: no GitHub release); openmx.dev is the latest release (.github/workflows/pages.yml).
   // version.txt is the build tools/web.sh made; read again every minute and when the tab comes back, a different one means
   // the site has moved on, and the page offers a reload (a ride in progress is never cut short). With the game on the
   // canvas the offer is the game's (P193, opentennis's hstLatest): the newer build goes to it, and its main menu shows it
@@ -1172,10 +1172,10 @@ footer a { color: var(--bone); }
     navigator.clipboard.writeText(SOURCE).then(() => { e.target.textContent = 'Copied'; },
       () => { getSelection().selectAllChildren($('#srcurl')); e.target.textContent = 'Select and copy the URL below'; });
   };
-  for (const a of document.querySelectorAll('[data-file]')) a.href = `${RELEASES}/${BETA ? 'download/beta' : 'latest/download'}/${a.dataset.file}`;
+  for (const a of document.querySelectorAll('[data-file]')) a.href = BETA ? `download/${a.dataset.file}` : `${RELEASES}/latest/download/${a.dataset.file}`;
   // P351: the Mac app is built by tools/release.sh only, so the beta has none: the beta site offers the latest release's
   $('#macdl').href = `${RELEASES}/latest/download/openmx-macos-arm64.dmg`;
-  $('#builds').href = `${RELEASES}/${BETA ? 'tag/beta' : 'latest'}`;
+  $('#builds').href = BETA ? 'download/' : `${RELEASES}/latest`;
   const built = () =>
     fetch('version.txt', { cache: 'no-store' })
       .then(r => (r.ok ? r.text() : ''))

@@ -27,7 +27,8 @@
 # bullets); without it, RELEASE_NOTES.md (kept up to date as changes land; emptied and committed after the release),
 # and if that has no bullets either, the commit subjects since the last v* tag (required for the first release). A draft
 # unless `publish` is given: check it on GitHub and publish there. Publishing it puts its website on openmx.dev
-# (pages.yml's release run). Every push to main is a beta (pages.yml: the `beta` release and beta.openmx.dev), not made here.
+# (pages.yml's release run). Every push to main is a beta (pages.yml), not made here: it lives on https://beta.openmx.dev,
+# never as a release (B43), so this repo's only releases are these vX.Y.Z.
 # --dry-run (P308): no key, builds, commit or upload; lists the assets a release uploads and writes its notes into
 # dist/release-dry/notes.md.
 set -e
@@ -161,7 +162,7 @@ body=$out/notes.md
     echo "minisign -Vm SHA256SUMS -x SHA256SUMS.sig -P $pub && sha256sum -c --ignore-missing SHA256SUMS"
     echo '```'
     echo
-    echo "Want the newest changes before the next release? Try the [beta](https://github.com/$repo/releases/tag/beta) or [beta.openmx.dev](https://beta.openmx.dev/)."
+    echo "Want the newest changes before the next release? Try the beta at [beta.openmx.dev](https://beta.openmx.dev/) (in the browser, or [download it](https://beta.openmx.dev/download/))."
 } > "$body"
 if [ -n "$dry" ]; then
     echo "$tag would upload, from dist/release:"; printf '  %s\n' "${assets[@]}"
