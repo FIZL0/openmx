@@ -2528,8 +2528,16 @@ impl<P: sim_world::World> Game for World<P> {
             .filter(|s| !s.waiting && s.riding && s.garage.flight_flown().is_some_and(|f| f.hull(0).is_some()))
             .count()
             == 1;
+        // S499: with no lone plane and one car driven (one with a hull and a collision object) they
+        // step in its world instead, as a lone plane's (`CarRide::step_traffic`), and its pass says
+        // which went to rest.
+        let lone_car = !lone_plane
+            && (self.seats.iter())
+                .filter(|s| !s.waiting && s.riding && s.garage.car_up().is_some_and(|c| c.hull.is_some() && c.struck.is_some() && c.driven.is_some()))
+                .count()
+                == 1;
         let mut resting: Vec<bool> = match parked.as_mut() {
-            Some(cars) if lone_plane => vec![false; cars.len()],
+            Some(cars) if lone_plane || lone_car => vec![false; cars.len()],
             Some(cars) => {
                 let t = &self.seats[0].sim.tables.ride;
                 cars.iter_mut().map(|p| p.frame(&mut self.place, dt, &t.acos, &t.curve)).collect()
@@ -2743,6 +2751,12 @@ impl<P: sim_world::World> Game for World<P> {
                 },
                 None => game_sim::wreck_plane::Downed::default(),
             };
+            // S499: and a lone driven car meets them in its world (`CarRide::step_traffic`): handed to
+            // its pass in its met, and back after it. Kept: which were awake before.
+            let in_car = match (car.filter(|_| lone_car), met.as_mut(), parked.as_mut()) {
+                (Some(_), Some(m), Some(cars)) if !cars.is_empty() => Some(game_sim::car::cars_in_car(cars, m)),
+                _ => None,
+            };
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
             // F75b: the first seat's Sim walks its AI riders' bikes in its own step, so on the bike the
             // shared cars are lent to it for its pass, held outside it (`Sim::parked_cars_held`): its
@@ -2763,6 +2777,9 @@ impl<P: sim_world::World> Game for World<P> {
             }
             if me == 0 {
                 self.race_guests_out(dt);
+            }
+            if let (Some(awake), Some(m), Some(cars)) = (in_car, met.as_mut(), parked.as_mut()) {
+                resting = game_sim::car::cars_from_car(cars, m, &awake);
             }
             if let (Some((wrecked, was_awake)), Some(m), Some(cars)) = (lane, met.as_mut(), parked.as_mut()) {
                 // The cars back out of its world, its wreck bikes' step after (which leaves the cars'
@@ -3538,6 +3555,70 @@ mod split_contact {
         assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
     }
 
+    /// S499: the shell's lone driven car meets the truck the original parks in play. The disc's
+    /// monster truck is settled 25 ft up the seat's way, nose along it, and parked in the seat's Sim;
+    /// the seat takes the buggy and rolls it into the truck's tail at 30 ft/s. The buggy's rays strike
+    /// the truck's hull: it is stopped short of where it rolls on to with nothing parked, and the
+    /// truck is woken and pushed along its way.
+    #[test]
+    fn the_shells_car_wakes_and_pushes_the_parked_truck() {
+        use game_render::disc::Disc;
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let tables = game_sim::ride::Tables::build();
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let buggy = crate::vehicle::CarRide::new(crate::vehicle::Machine::Buggy, 0, None, &mut |n| machines.read_suffix(n).ok())
+            .expect("the buggy's files");
+        assert!(buggy.hull.is_some() && buggy.rays.is_some(), "machine.res has no buggy collision files");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let ride = |parked: bool| {
+            let mut sim = Sim::new(0x499);
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.sense.wrecks_enabled = false;
+            let mut world = split(vec![sim]);
+            if parked {
+                let in_play = crate::vehicle::InPlay::settled(&spots, &[false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+                assert_eq!(in_play.len(), 1, "the truck is parked");
+                world.seats[0].garage.in_play = in_play;
+            }
+            let seat = &mut world.seats[0];
+            seat.garage.cars.push(buggy.clone());
+            seat.garage.switch(Kind::Buggy, &mut seat.sim, &mut world.place).expect("the buggy is taken");
+            // Settled on its springs before it sets off.
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let rest = world.seats[0].sim.parked_cars.first().map(|p| p.machine.body.position);
+            assert_eq!(rest.is_some(), parked, "the seat's Sim holds the truck");
+            assert!(!world.seats[0].sim.parked_cars.first().is_some_and(|p| p.awake()), "the truck sleeps until struck");
+            fn car(world: &mut World<Flat>) -> &mut game_sim::car::Machine {
+                let m = world.seats[0].garage.car_up().map(|c| c.machine).expect("the buggy is out");
+                world.seats[0].garage.cars.iter_mut().find(|c| c.machine == m).and_then(|c| c.driven.as_mut()).expect("driven")
+            }
+            car(&mut world).body.velocity = Vf::new(0.0, 0.0, 30.0, 1.0);
+            let mut woken = false;
+            for _ in 0..45 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                woken |= world.seats[0].sim.parked_cars.first().is_some_and(|p| p.awake());
+            }
+            let at = car(&mut world).body.position.z();
+            let pushed = rest.map_or(0.0, |r| world.seats[0].sim.parked_cars[0].machine.body.position.z() - r.z());
+            (at, woken, pushed)
+        };
+        let ((at, woken, pushed), (through, ..)) = (ride(true), ride(false));
+        println!("the buggy at z {at}, the truck woken {woken}, pushed {pushed} ft; with nothing parked the buggy at z {through}");
+        // Idling, the buggy rolls on to z 19.2 with nothing parked; the truck's tail stops it at 15.5
+        // and the strike shoves the truck 2.35 ft on.
+        assert!(through > 17.0, "with nothing parked the buggy stopped at z {through}");
+        assert!(at < through - 2.0, "the buggy went on to z {at}, about as far as with nothing parked (z {through})");
+        assert!(woken, "the buggy's strike never woke the truck");
+        assert!(pushed > 1.0, "the truck moved {pushed} ft along the buggy's way");
+    }
+
     /// F72: split screen's seats share one parked truck, as the original has one. The disc's truck is
     /// settled 25 ft up seat 1's way and every seat is handed it; seat 0 stands 100 ft off. Seat 1's
     /// bike rolls into its tail at 30 ft/s through the multi-seat step: the bike is stopped short of
@@ -3596,6 +3677,61 @@ mod split_contact {
         assert!(bike < 25.0, "the bike went on to z {bike}, through the truck at z 25");
         assert!(woken, "the bike's strike never woke the truck");
         assert!(pushed > 0.03, "the truck moved {pushed} ft along the bike's way");
+    }
+
+    /// S499: split screen's lone driven car meets the seats' one parked truck. The disc's truck is
+    /// settled 25 ft up seat 1's way and every seat is handed it; seat 0's bike stands 100 ft off.
+    /// Seat 1 takes the buggy and rolls it into the truck's tail at 30 ft/s through the multi-seat
+    /// step: the truck is woken and pushed, and both seats' Sims hold that one truck where it went.
+    #[test]
+    fn split_seats_share_the_parked_truck_the_second_seats_car_pushes() {
+        use game_render::disc::Disc;
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let tables = game_sim::ride::Tables::build();
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let buggy = crate::vehicle::CarRide::new(crate::vehicle::Machine::Buggy, 0, None, &mut |n| machines.read_suffix(n).ok())
+            .expect("the buggy's files");
+        let spots = crate::vehicle::in_play(b"[Machines]\nNumberOfMachines = 1\n[Machine1]\nType = Monster\nPosition = 0, 5, 25\nDirection = 0, 0, 1\n");
+        let rider = |x: f32| {
+            let mut sim = Sim::new(0x499);
+            let mounts = game_sim::stock::mounts(&sim.phy);
+            sim.rider = Rider::new(&sim.phy, mounts, Vf::new(x, 1.0, 0.0, 1.0), game_sim::stock::FACING, Default::default());
+            sim.rider.sense.wrecks_enabled = false;
+            sim
+        };
+        let mut world = split(vec![rider(100.0), rider(0.0)]);
+        let in_play = crate::vehicle::InPlay::settled(&spots, &[false, false], &mut |n| machines.read_suffix(n).ok(), &mut world.place, &tables);
+        assert_eq!(in_play.len(), 1, "the truck is parked");
+        for s in &mut world.seats {
+            s.garage.in_play = in_play.fresh();
+        }
+        let seat = &mut world.seats[1];
+        seat.garage.cars.push(buggy);
+        seat.garage.switch(Kind::Buggy, &mut seat.sim, &mut world.place).expect("the buggy is taken");
+        for _ in 0..30 {
+            world.simulate(DT, Input::default(), &mut Default::default());
+        }
+        let rest = world.seats[1].sim.parked_cars.first().expect("seat 1's Sim holds the truck").machine.body.position;
+        assert!(!world.seats[1].sim.parked_cars[0].awake(), "the truck sleeps until struck");
+        let m = world.seats[1].garage.car_up().map(|c| c.machine).expect("the buggy is out");
+        let car = world.seats[1].garage.cars.iter_mut().find(|c| c.machine == m).and_then(|c| c.driven.as_mut()).expect("driven");
+        car.body.velocity = Vf::new(0.0, 0.0, 30.0, 1.0);
+        let mut woken = false;
+        for _ in 0..45 {
+            world.simulate(DT, Input::default(), &mut Default::default());
+            woken |= world.seats[1].sim.parked_cars.first().is_some_and(|p| p.awake());
+            let at = |i: usize| world.seats[i].sim.parked_cars.first().map(|p| p.machine.body.position);
+            assert_eq!(at(0), at(1), "the seats hold one truck");
+        }
+        let pushed = world.seats[0].sim.parked_cars[0].machine.body.position.z() - rest.z();
+        println!("seat 1's buggy woke the truck {woken}, pushed it {pushed} ft");
+        assert!(woken, "the buggy's strike never woke the truck");
+        // The lone seat's buggy shoves it 2.35 ft on.
+        assert!(pushed > 1.0, "the truck moved {pushed} ft along the buggy's way");
     }
 
     /// F75b: with AI riders in the first seat's Sim, split screen's seats still share one parked truck,

@@ -2823,6 +2823,11 @@ impl CarRide {
         let (noise, rng) = (&mut self.noise, &mut self.rng);
         let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
         match self.struck.as_mut() {
+            // The parked cars in its met meet it (S499).
+            Some(c) if met.as_deref().is_some_and(|m| !m.cars.is_empty()) => {
+                let met = met.expect("checked");
+                m.step_cars(&self.car, &mut Through(world), c, met, self.hull.as_deref(), dt, &tables.acos, &tables.curve, &mut sample);
+            }
             Some(c) => m.step_met(&self.car, &mut Through(world), c, met, dt, &tables.acos, &tables.curve, &mut sample),
             None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut sample),
         }
@@ -2850,7 +2855,29 @@ impl CarRide {
     /// striker), then their own step with the car's body as that striker, then the traffic's late
     /// half — as the plane's [`Plane::step_traffic`] has them. A track with no props, or a car with
     /// no collision object, is the traffic's frame and [`CarRide::step_met`].
+    ///
+    /// S499: and the Sim's parked cars (S485, [`Sim::parked_cars`]) meet it, as a flown plane's
+    /// world has them (S489): handed to its step in its met ([`game_sim::car::Machine::step_cars`]),
+    /// and back after, those that stepped to rest asleep. The Sim, not stepped while its car is up,
+    /// frames them no other way. Held outside the Sim ([`Sim::parked_cars_held`]), split screen's
+    /// shared copy is the caller's to hand.
     pub fn step_traffic(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) {
+        if sim.parked_cars_held || sim.parked_cars.is_empty() || self.struck.is_none() || self.driven.is_none() {
+            return self.traffic_among(sim, dt, world, met);
+        }
+        let mut alone = flight::Met::default();
+        let m = match met {
+            Some(m) => m,
+            None => &mut alone,
+        };
+        let awake = game_sim::car::cars_in_car(&mut sim.parked_cars, m);
+        self.traffic_among(sim, dt, world, Some(&mut *m));
+        let resting = game_sim::car::cars_from_car(&mut sim.parked_cars, m, &awake);
+        sim.parked_cars_rest(&resting);
+    }
+
+    /// [`CarRide::step_traffic`] with whatever parked cars `met` holds.
+    fn traffic_among(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) {
         if sim.traffic.props.is_empty() || self.struck.is_none() || self.driven.is_none() {
             sim.traffic.frame(dt, world);
             self.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
