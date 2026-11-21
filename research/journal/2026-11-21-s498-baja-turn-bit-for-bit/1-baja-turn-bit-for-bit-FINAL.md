@@ -8,7 +8,8 @@ Task S498. 2026-11-21.
   quat-from-axes, but the test's second put-back.
 - `tests/car_spawn.rs` `free07s_parked_baja_rolls_on_as_the_original`: before its put-back the test now
   writes the car's own nose and up copies (car +0x280/+0x290) back into the wrapper's store (W+0xa0/+0xb0),
-  so the put-back replays the load's. The quat is now asserted bit for bit (`assert_eq!` of all four words),
+  so the put-back replays the load's. It first asserts the image's store is `spawn_axes` of those copies
+  bit for bit (the load squared them once), which is what justifies the swap. The quat is now asserted bit for bit (`assert_eq!` of all four words),
   replacing the 2-ulp tolerance.
 - `car.rs` `Machine::new`: doc says its turn is the load's put-back's and how a later put-back differs.
 - No change to the port's code: `flight::spawn_turn` was already the original's.

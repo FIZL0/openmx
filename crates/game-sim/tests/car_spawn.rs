@@ -358,6 +358,10 @@ fn free07s_parked_baja_rolls_on_as_the_original() {
     // The put-back squares the store's nose and up in place, so the image's store holds the load's
     // put-back's squared pair and a second put-back squares it again (the up's last bits move).
     // Give it back the pair the load stored, the car's own copies, so this put-back is the load's.
+    let (copy_nose, copy_up) = (quad(&ee, c + car_at::FACING), quad(&ee, c + car_at::UP));
+    let (once_nose, once_up) = game_sim::flight::spawn_axes(copy_nose, copy_up);
+    let stored = (quad(&ee, w + wrapper_at::NOSE), quad(&ee, w + wrapper_at::UP));
+    assert_eq!((once_nose.to_bits(), once_up.to_bits()), (stored.0.to_bits(), stored.1.to_bits()), "the load squared the car's copies once");
     for (to, from) in [(wrapper_at::NOSE, car_at::FACING), (wrapper_at::UP, car_at::UP)] {
         for i in [0, 4, 8, 12] {
             ee.set_u32(w + to + i, ee.u32_at(c + from + i));
