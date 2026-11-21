@@ -663,6 +663,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         picture: menu::Picture::Television,
         // The frame-rate counter on (2026-10-29).
         show_fps: true,
+        // Wrecks and the race results photographed on their own (P390).
+        auto_photos: menu::AutoPhotos { wrecks: true, tricks: false, results: true },
         // The original's blended leaves (V57).
         foliage: game_render::eco::Foliage::Original,
         // Textures filtered 4x (V83).
@@ -1139,6 +1141,37 @@ fn the_show_fps_row_changes_by_pad_and_is_saved() {
     assert!(!m.settings.text().contains("show_fps"), "off writes no line");
     assert!(Settings::parse("show_fps = on\n").show_fps);
     assert!(!Settings::parse("show_fps = off\n").show_fps);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// P390: the Display tab's Auto Photos are off in a fresh file and in one from before them; the pad
+/// turns each on, `auto_photos = wrecks,results` is saved and read back, and all off writes no line.
+#[test]
+fn the_auto_photos_rows_change_by_pad_and_are_saved() {
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.auto_photos, menu::AutoPhotos::default(), "Auto Photos off unless turned on");
+    let dir = scratch("auto-photos");
+    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\nshow_fps = on\n").unwrap();
+    assert!(!menu::load(&dir).0.auto_photos.any(), "a file from before them has none on");
+
+    settings_at(&mut m, &mut r, "Display");
+    down_to(&mut m, &mut r, menu::Key::AutoPhoto(0));
+    tap(&mut m, &mut r, Control::Cross);
+    down_to(&mut m, &mut r, menu::Key::AutoPhoto(2));
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.auto_photos, menu::AutoPhotos { wrecks: true, tricks: false, results: true });
+    let text = m.settings.text();
+    assert!(text.contains("auto_photos = wrecks,results\n"), "{text}");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.auto_photos, m.settings.auto_photos, "saved and read back");
+    for k in [0, 2] {
+        down_to(&mut m, &mut r, menu::Key::AutoPhoto(k));
+        tap(&mut m, &mut r, Control::Cross);
+    }
+    assert!(!m.settings.text().contains("auto_photos"), "all off writes no line");
+    assert!(Settings::parse("auto_photos = tricks\n").auto_photos.tricks);
+    assert_eq!(Settings::parse("auto_photos = wrecks,bogus\n").auto_photos, menu::AutoPhotos::default(), "an unknown word keeps what it was");
     std::fs::remove_dir_all(dir).ok();
 }
 

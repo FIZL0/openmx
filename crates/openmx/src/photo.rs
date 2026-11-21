@@ -12,6 +12,9 @@
 //!
 //! The camera is presentation only: it reads the pad and writes a [`Camera`], and nothing in the
 //! simulation reads it back, so its flight never moves a tick, a timer or the RNG.
+//!
+//! Auto Photos (P390) take the same picture without the pause: a wreck, a landed trick or a race's
+//! results screen, each when the Display tab (or `--auto-photos`) turns it on ([`Auto`]).
 
 use game_render::mat::v3;
 use game_render::world::Camera;
@@ -198,6 +201,63 @@ impl Photo {
     }
 }
 
+/// What an auto-shot (P390) is of: a moment of the ride that takes a picture on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moment {
+    /// A rider thrown off: shot [`WRECK_DELAY`] ticks after the wreck starts, the rider in the air.
+    Wreck,
+    /// A trick landed, shot as it lands.
+    Trick,
+}
+
+/// How many ticks after a wreck starts its picture is taken: 0.4 s, the rider off the bike.
+pub const WRECK_DELAY: u64 = 12;
+/// The fewest ticks from one auto-shot to the next (2 s), so a run of landed tricks or a wreck that
+/// ends a trick fills the folder with one picture, not a burst.
+pub const AUTO_GAP: u64 = 60;
+
+/// The ride's auto-shots (P390): the moments heard, and the tick each one's picture falls due. One
+/// waits at a time; a moment heard while one waits, or within [`AUTO_GAP`] of the last picture,
+/// takes none. Presentation only, as the free camera is: it reads the ride's ticks and moments and
+/// nothing reads it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Auto {
+    /// The tick the waiting picture is due on, and its moment.
+    due: Option<(u64, Moment)>,
+    /// The tick of the last picture taken.
+    last: Option<u64>,
+}
+
+impl Auto {
+    /// `moment` heard on tick `now`.
+    pub fn heard(&mut self, moment: Moment, now: u64) {
+        self.rewound(now);
+        if self.due.is_some() || self.last.is_some_and(|t| now < t + AUTO_GAP) {
+            return;
+        }
+        let delay = if moment == Moment::Wreck { WRECK_DELAY } else { 0 };
+        self.due = Some((now + delay, moment));
+    }
+
+    /// The moment whose picture falls due on tick `now`, once.
+    pub fn due(&mut self, now: u64) -> Option<Moment> {
+        self.rewound(now);
+        let (at, moment) = self.due.filter(|(at, _)| now >= *at)?;
+        self.due = None;
+        self.last = Some(at.max(now));
+        Some(moment)
+    }
+
+    /// The ride put back to an earlier tick than it has heard (a restart, a tape rewound): nothing
+    /// waits, and the gap starts again.
+    fn rewound(&mut self, now: u64) {
+        let heard = self.last.into_iter().chain(self.due.map(|(at, _)| at.saturating_sub(WRECK_DELAY))).max();
+        if heard.is_some_and(|t| now < t) {
+            *self = Auto::default();
+        }
+    }
+}
+
 /// The name of the `n`th picture in a folder: `photo-0001.png` and on.
 pub fn file_name(n: u32) -> String {
     format!("photo-{n:04}.png")
@@ -209,6 +269,17 @@ pub fn next_path(dir: &std::path::Path) -> std::path::PathBuf {
         .map(|n| dir.join(file_name(n)))
         .find(|p| !p.exists())
         .expect("a free picture name")
+}
+
+/// A `width` by `height` frame's `rgb` written as the next picture in `dir`, made if it is not
+/// there: the line said of it, `Photo saved: …` or `Photo not saved: …` (a failed write is said,
+/// not fatal).
+pub fn save(dir: &std::path::Path, width: usize, height: usize, rgb: &[u8]) -> String {
+    let wrote = std::fs::create_dir_all(dir).map_err(|e| e.to_string()).map(|()| next_path(dir));
+    match wrote.and_then(|path| game_render::png::write_rgb(&path, width, height, rgb).map(|()| path)) {
+        Ok(path) => format!("Photo saved: {}", path.display()),
+        Err(e) => format!("Photo not saved: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +353,34 @@ mod tests {
         assert!(s.orbit && !s.fast);
         assert_eq!((s.rise, s.zoom, s.across, s.tilt), (1.0, -1.0, 0.0, 0.0));
         assert_eq!(Sticks::of(&Report::idle()), Sticks::default());
+    }
+
+    #[test]
+    fn a_landed_trick_shoots_at_once_and_a_wreck_a_moment_later() {
+        let mut a = Auto::default();
+        a.heard(Moment::Trick, 100);
+        assert_eq!(a.due(100), Some(Moment::Trick));
+        assert_eq!(a.due(101), None);
+        a.heard(Moment::Wreck, 100 + AUTO_GAP);
+        assert_eq!(a.due(100 + AUTO_GAP + WRECK_DELAY - 1), None);
+        assert_eq!(a.due(100 + AUTO_GAP + WRECK_DELAY), Some(Moment::Wreck));
+    }
+
+    #[test]
+    fn moments_close_together_take_one_picture() {
+        let mut a = Auto::default();
+        a.heard(Moment::Wreck, 10);
+        // A trick heard while the wreck's picture waits takes none.
+        a.heard(Moment::Trick, 11);
+        assert_eq!(a.due(10 + WRECK_DELAY), Some(Moment::Wreck));
+        // Nor one inside the gap after it.
+        a.heard(Moment::Trick, 10 + WRECK_DELAY + AUTO_GAP - 1);
+        assert_eq!(a.due(10 + WRECK_DELAY + AUTO_GAP - 1), None);
+        a.heard(Moment::Trick, 10 + WRECK_DELAY + AUTO_GAP);
+        assert_eq!(a.due(10 + WRECK_DELAY + AUTO_GAP), Some(Moment::Trick));
+        // A restart's ticks begin again: the gap does too.
+        a.heard(Moment::Trick, 3);
+        assert_eq!(a.due(3), Some(Moment::Trick));
     }
 
     #[test]

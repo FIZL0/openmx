@@ -3602,6 +3602,10 @@ struct Args {
     /// `--show-fps on|off` (2026-10-29): whether a ride draws its frame rate in the top right, the
     /// Settings' Show FPS. Unset, the front end's setting decides, and without one it does not.
     show_fps: Option<bool>,
+    /// `--auto-photos wrecks,tricks,results|off` (P390): the moments a ride takes a picture of on
+    /// its own, the Display tab's Auto Photos. Unset, the front end's setting decides, and without
+    /// one none.
+    auto_photos: Option<menu::AutoPhotos>,
     /// `--world-sky global|per-map` (MD9): a combined world's sky and light, one for all of it or the
     /// map under the camera's. Unset, the front end's setting decides, and without one global.
     world_sky: Option<menu::WorldSky>,
@@ -4648,6 +4652,8 @@ async fn front_end(args: Args) -> Result<(), String> {
         _ => Act::Stay,
     };
     let mut shot = args.shot.clone();
+    // P390: Auto Photos' picture of a race's results screen, asked for as the race is left.
+    let mut results_photo = false;
     let started = Instant::now();
     let mut shown = 0u32;
     // The menu last drawn and the frame size it was drawn at, while it is still on the screen.
@@ -4691,6 +4697,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
                 a.show_fps = Some(args.show_fps.unwrap_or(shell.front.menu.settings.show_fps));
+                a.auto_photos = Some(args.auto_photos.unwrap_or(shell.front.menu.settings.auto_photos));
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
@@ -4779,6 +4786,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // A race left is its results on the way back (P327).
                 if shell.front.menu.race_left() {
                     println!("race: results");
+                    results_photo = args.auto_photos.unwrap_or(shell.front.menu.settings.auto_photos).results;
                 }
             }
             shell.front.reader.reset();
@@ -4821,6 +4829,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
                 a.show_fps = Some(args.show_fps.unwrap_or(shell.front.menu.settings.show_fps));
+                a.auto_photos = Some(args.auto_photos.unwrap_or(shell.front.menu.settings.auto_photos));
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
@@ -5160,7 +5169,9 @@ async fn front_end(args: Args) -> Result<(), String> {
         }
         // On the GPU the menu is sprites over its pictures, uploaded once (V30); the CPU draws it
         // for the X window, and for a shot.
-        let shooting = shot.is_some() && shown >= args.shot_frame;
+        // Auto Photos' results picture (P390) on the results screen's first frame; gone with it.
+        results_photo &= shell.front.menu.screen() == Some(menu::Screen::Results);
+        let shooting = shot.is_some() && shown >= args.shot_frame || results_photo;
         // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
         let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
         match (garage_view::shown_flier(&shell.front.menu), garage_view::shown_pick(&shell.front.menu)) {
@@ -5243,6 +5254,12 @@ async fn front_end(args: Args) -> Result<(), String> {
             // A menu's shot is the run's whole point (K62): no `--frames` counts the menu's frames,
             // so it would otherwise run on to `--seconds`.
             break;
+        }
+        // The results picture (P390), written as photo mode's are; a failed write is said, not fatal.
+        if std::mem::take(&mut results_photo) {
+            let said = photo::save(&shell.front.dir.join("photos"), frame.width, frame.height, &frame.color);
+            println!("auto photo: results — {said} ({}x{})", frame.width, frame.height);
+            shell.front.menu.note = Some(said);
         }
         shown += 1;
         busy += top.elapsed();
@@ -8885,6 +8902,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut minimap = args.minimap.unwrap_or(true);
     let mut show_fps = args.show_fps.unwrap_or(false);
+    // P390's Auto Photos, and the moments they wait on.
+    let mut auto_photos = args.auto_photos.unwrap_or_default();
+    let mut auto_shots = photo::Auto::default();
     let mut fps_meter = ride_hud::FpsMeter::default();
     let mut world_sky = args.world_sky.unwrap_or_default();
     let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
@@ -10220,6 +10240,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 speedometer = front.menu.settings.speedometer;
                 minimap = front.menu.settings.minimap;
                 show_fps = front.menu.settings.show_fps;
+                auto_photos = front.menu.settings.auto_photos;
                 world_sky = front.menu.settings.world_sky;
                 hud_scale = front.menu.settings.hud_scale;
                 graphics = front.menu.settings.graphics;
@@ -11876,6 +11897,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if seat.said.respawned {
                 println!("{who}put back");
             }
+            // Auto Photos (P390): a local player's wreck or landed trick, its picture taken below.
+            if i < args.players {
+                if auto_photos.wrecks && seat.said.wreck.is_some() {
+                    auto_shots.heard(photo::Moment::Wreck, seat.sim.ticks);
+                }
+                if auto_photos.tricks && seat.said.landed.is_some() {
+                    auto_shots.heard(photo::Moment::Trick, seat.sim.ticks);
+                }
+            }
             // The wreck's rumble (P183), the original's on a human's pad: the bike's wreck entry, or
             // the plane's crash word going up, asks this player's pad seat; an MX vs. ATV plane's
             // every wreck entry (MD112). Online only the players at this machine have a pad here.
@@ -12633,6 +12663,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // was and flown off 1P's pad as it is, its roll the renderer's. Presentation only: nothing
         // the ride steps reads it.
         let photo_on = front.as_deref().is_some_and(|f| f.menu.photo());
+        // Auto Photos (P390): a wreck's or a landed trick's picture, due on this tick, taken as photo
+        // mode's Cross takes one: this frame's view, the HUD left off it.
+        if let Some(moment) = auto_shots.due(world.seats[0].sim.ticks).filter(|_| photo_shot.is_none() && !photo_on) {
+            println!("auto photo: {moment:?} at sim tick {}", world.seats[0].sim.ticks);
+            photo_shot = Some(photo::next_path(&markers_dir.join("photos")));
+        }
+        let view_alone = photo_on || photo_shot.is_some();
         match (photo_on, rects.first(), cameras.first_mut()) {
             (true, Some(at), Some(camera)) => {
                 let now = Instant::now();
@@ -12867,7 +12904,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 // The ride HUD (P121), with its own marker menu, trick pop-up and info text, unless
                 // `none` was asked for.
-                if overlay_mode == menu::Overlay::Hud && !photo_on {
+                if overlay_mode == menu::Overlay::Hud && !view_alone {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
@@ -12880,7 +12917,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // The Show FPS counter (2026-10-29), once over the whole frame, under the pause.
-            if show_fps && !photo_on {
+            if show_fps && !view_alone {
                 let whole = [0.0, 0.0, frame.width as f32, frame.height as f32];
                 ride_hud::fps_sprites(&mut gpu_sprites, hud_base, whole, f32::from(hud_scale) / 100.0, &fps_meter.text());
             }
@@ -13774,7 +13811,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The page's black (S85), over the world and under the HUD, as the GPU lays it.
             shade_view(target, seat.shade.alpha());
             // The ride HUD (P121), unless `none` was asked for.
-            if overlay_mode == menu::Overlay::Hud && !photo_on {
+            if overlay_mode == menu::Overlay::Hud && !view_alone {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
                 let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref(), race_laps };
@@ -13798,7 +13835,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             stages.mark(stages::Stage::Hud);
         }
         // The Show FPS counter (2026-10-29) on the software path, over every view and under the pause.
-        if show_fps && !gpu_on && !photo_on {
+        if show_fps && !gpu_on && !view_alone {
             ride_hud::fps_draw(&mut frame, f32::from(hud_scale) / 100.0, &fps_meter.text());
         }
         fps_meter.frame(Instant::now());
@@ -17589,6 +17626,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         speedometer: None,
         minimap: None,
         show_fps: None,
+        auto_photos: None,
         world_sky: None,
         hud_scale: None,
         camera: START_CAMERA.to_string(),
@@ -17917,6 +17955,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                     "off" => false,
                     word => return Err(format!("--show-fps: {word:?} is not on or off")),
                 });
+            }
+            "--auto-photos" => {
+                let word = next("wrecks, tricks and results, comma-separated, or off")?;
+                args.auto_photos = Some(menu::AutoPhotos::from_word(&word).ok_or_else(|| format!("--auto-photos: {word:?} is not a list of wrecks, tricks and results, or off"))?);
             }
             "--hud-scale" => {
                 let word = next("a HUD scale from 50 to 150 in tens")?;
@@ -18294,7 +18336,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--atv NAME] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
-                            [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
+                            [--minimap on|off] [--show-fps on|off] [--auto-photos wrecks,tricks,results|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT] [--fp-adjust BOB,UP,FORWARD,FOV]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--photo-at N] [--overview] [--vehicle bike|biplane]\n\

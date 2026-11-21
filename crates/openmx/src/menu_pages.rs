@@ -161,6 +161,8 @@ pub enum Key {
     FrameLimit,
     /// The Graphics tab's Show FPS (2026-10-29): the ride's frame rate in the top right.
     ShowFps,
+    /// The Display tab's Auto Photos switches (P390), by their place in [`super::AutoPhotos::WORDS`].
+    AutoPhoto(usize),
     /// The Graphics tab's Preset row (P223): Auto, a preset, or Custom.
     VideoPreset,
 
@@ -759,6 +761,11 @@ impl Menu {
             Row::choice(Key::AspectRatio, "Aspect Ratio", &Picture::ALL.map(Picture::label), at(&Picture::ALL, s.picture), ASPECT_HELP),
             // P281: opentennis's Button Icons, Auto by default.
             Row::choice(Key::ButtonIcons, "Button Icons", &ButtonIcons::ALL.map(ButtonIcons::label), at(&ButtonIcons::ALL, s.button_icons), super::pads::HELP),
+            // P390: photo mode's pictures taken on their own, as MXA's player shots are.
+            Row::heading("Auto Photos"),
+            Row::on_off(Key::AutoPhoto(0), "Wrecks", s.auto_photos.wrecks, "A picture of every wreck, a moment after the rider leaves the bike, saved in the photos folder without the HUD."),
+            Row::on_off(Key::AutoPhoto(1), "Landed Tricks", s.auto_photos.tricks, "A picture of every trick you land, as it lands, saved in the photos folder without the HUD."),
+            Row::on_off(Key::AutoPhoto(2), "Race Results", s.auto_photos.results, "A picture of the results screen after each race, saved in the photos folder."),
         ]
     }
 
@@ -2011,6 +2018,12 @@ impl Menu {
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::ShowFps => s.show_fps = !s.show_fps,
+            Key::AutoPhoto(k) => {
+                let a = &mut s.auto_photos;
+                if let Some(on) = [&mut a.wrecks, &mut a.tricks, &mut a.results].into_iter().nth(k) {
+                    *on = !*on;
+                }
+            }
             Key::FrameLimit => s.frame_limit = pick.and_then(|j| FrameLimit::ALL.get(j).copied()).unwrap_or_else(|| s.frame_limit.step(p.left)),
             Key::VideoPreset if pick.is_some() => {
                 let j = pick.unwrap_or(0);

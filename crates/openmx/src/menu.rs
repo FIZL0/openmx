@@ -458,6 +458,49 @@ fn disc_place(track: &str) -> Option<usize> {
     TRACKS.iter().map(|t| t.0).chain(DISC_WORLDS.iter().map(|w| w.0)).position(|id| id == track)
 }
 
+/// Which moments of a ride take a picture on their own (P390), each into the photos folder as photo
+/// mode's Cross does: a wreck, a landed trick, a race's results screen. All off unless turned on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AutoPhotos {
+    pub wrecks: bool,
+    pub tricks: bool,
+    pub results: bool,
+}
+
+impl AutoPhotos {
+    /// The words `settings.txt` and `--auto-photos` give them by, in this order.
+    pub const WORDS: [&str; 3] = ["wrecks", "tricks", "results"];
+
+    fn flags(self) -> [bool; 3] {
+        [self.wrecks, self.tricks, self.results]
+    }
+
+    /// Whether any is on.
+    pub fn any(self) -> bool {
+        self.flags().contains(&true)
+    }
+
+    /// Those on, as `wrecks,results`; `off` for none.
+    pub fn word(self) -> String {
+        let on: Vec<&str> = Self::WORDS.iter().zip(self.flags()).filter(|(_, on)| *on).map(|(w, _)| *w).collect();
+        if on.is_empty() { "off".into() } else { on.join(",") }
+    }
+
+    /// [`AutoPhotos::word`]'s list read back; `None` for a word it does not know.
+    pub fn from_word(text: &str) -> Option<AutoPhotos> {
+        let mut a = AutoPhotos::default();
+        for w in text.split(',').map(str::trim).filter(|w| !w.is_empty() && *w != "off") {
+            match w {
+                "wrecks" => a.wrecks = true,
+                "tricks" => a.tricks = true,
+                "results" => a.results = true,
+                _ => return None,
+            }
+        }
+        Some(a)
+    }
+}
+
 /// `settings.txt`: the rider and the ride.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -474,6 +517,8 @@ pub struct Settings {
     /// Graphics tab's Show FPS): [`crate::ride_hud::FpsMeter`]'s average, on either renderer. Off
     /// unless turned on.
     pub show_fps: bool,
+    /// The Display tab's Auto Photos (P390): the moments a ride takes a picture of on its own.
+    pub auto_photos: AutoPhotos,
     /// The whole HUD's size, in percent of the original's (V52): [`HUD_SCALE_MIN`] to
     /// [`HUD_SCALE_MAX`] in steps of [`HUD_SCALE_STEP`], each part about its own corner.
     pub hud_scale: u8,
@@ -1585,6 +1630,7 @@ impl Default for Settings {
             speedometer: Speedometer::default(),
             minimap: true,
             show_fps: false,
+            auto_photos: AutoPhotos::default(),
             hud_scale: HUD_SCALE_DEFAULT,
             world_sky: WorldSky::Global,
             wrecks: true,
@@ -1893,6 +1939,7 @@ impl Settings {
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "minimap" => s.minimap = v != "off",
                 "show_fps" => s.show_fps = v == "on",
+                "auto_photos" => s.auto_photos = AutoPhotos::from_word(v).unwrap_or(s.auto_photos),
                 "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
                 "world_sky" => s.world_sky = WorldSky::from_word(v).unwrap_or(s.world_sky),
                 "wrecks" => s.wrecks = v != "off",
@@ -2088,6 +2135,7 @@ impl Settings {
             + &self.vibration_text()
             + if self.store_rules { "store_rules = agreed\n" } else { "" }
             + &self.hud_text()
+            + &self.auto_photos_text()
             + &self.button_icons_text()
             + &self.original_text()
             + &self.filtering_text()
@@ -2159,6 +2207,11 @@ impl Settings {
             n => format!("hud_scale = {n}\n"),
         };
         minimap + fps + &scale
+    }
+
+    /// Auto Photos (P390), only when one is on, so a file from before it is written as it was.
+    fn auto_photos_text(&self) -> String {
+        if self.auto_photos.any() { format!("auto_photos = {}\n", self.auto_photos.word()) } else { String::new() }
     }
 
     /// Button Icons (P281), only when not Auto, so a file from before it is written as it was.
