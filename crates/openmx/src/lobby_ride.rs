@@ -102,6 +102,7 @@ pub fn meet(ask: &Ask, track: &str, name: &str, pick: Pick) -> Result<Started, S
 }
 
 /// The network's next event, before `until`.
+#[cfg(not(target_arch = "wasm32"))]
 fn next(net: &Net, until: Instant) -> Result<Event, String> {
     loop {
         let left = until.checked_duration_since(Instant::now()).ok_or(format!("lobby: nothing started in {} s", WAIT.as_secs()))?;
@@ -109,6 +110,13 @@ fn next(net: &Net, until: Instant) -> Result<Event, String> {
             return Ok(e);
         }
     }
+}
+
+/// A page can't block on the network (it has no `Net::next`), and `--lobby` is a shell flag: a headless lobby
+/// ride is native only.
+#[cfg(target_arch = "wasm32")]
+fn next(_: &Net, _: Instant) -> Result<Event, String> {
+    Err("lobby: a headless lobby ride needs the native app".to_string())
 }
 
 /// An event the lobby only says, or the end of it.
