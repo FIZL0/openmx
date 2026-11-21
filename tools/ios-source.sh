@@ -6,9 +6,13 @@
 # FIZL0's shared source (github.com/FIZL0/apps, https://fizl0.github.io/apps/source.json) merges it, and that is the one
 # web/ios.html, the README and the release notes point players at.
 # Its icon is the App Store size web/icon-1024.png (P225, tools/icons.sh), as openmx.dev serves it.
+# Its app page shows the site's own shots (P391), web/shots as openmx.dev serves them, a ride first: `screenshots`
+# (the current format: iphone [{imageURL, width, height}], landscape at each jpg's real size, read here) and the
+# legacy `screenshotURLs` for older AltStore.
 # versions[] is every published release with an IPA, newest first, so signers show the history and can roll back: the
 # GitHub API's (drafts and pre-releases such as the rolling beta left out; GH_TOKEN / GITHUB_TOKEN in CI), under
-# VERSION from the local IPA (not published yet while the release builds; it replaces the API's entry if it is). Each
+# VERSION from the local IPA (not published yet while the release builds; it replaces the API's entry if it is, keeping
+# its date, so rebuilding a published release's source, P391, leaves its versionDate alone). Each
 # entry's localizedDescription is its release's "New in" list; NOTES (Markdown bullets) gives VERSION's. A failed API
 # call fails the script, and so does a source with one version: a release must never cut the history.
 # The app also carries the legacy top-level version/versionDate/downloadURL/size fields, versions[0]'s, for older
@@ -20,6 +24,16 @@ version=${1#v} ipa=$2 out=${3:-$(dirname "$2")/altstore-source.json} notes=${4:-
 command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; }
 repo=FIZL0/openmx
 blurb="MX Unleashed (PS2, 2004) rewritten: the original's physics, tricks and timing, on today's screens"
+web=$(dirname "$0")/../web
+shots=
+for s in ride-free06 air-cancan road-free09 wreck split-4p menu-main; do
+    f=$web/shots/$s.jpg
+    [ -f "$f" ] || { echo "no such shot: $f" >&2; exit 1; }
+    # the jpg's real size, as file(1) reads it from the frame header: "…, precision 8, 1600x900, components 3"
+    wh=$(file -b "$f" | grep -oE ', [0-9]+x[0-9]+,' | head -1 | tr -d ' ,')
+    [ -n "$wh" ] || { echo "no size in $f" >&2; exit 1; }
+    shots+="{\"imageURL\":\"https://openmx.dev/shots/$s.jpg\",\"width\":${wh%x*},\"height\":${wh#*x}},"
+done
 desc=
 [ -z "$notes" ] || desc=$(sed '/^<!--/d' "$notes")
 # one compact entry per line; a failed call ends the script (set -e covers the assignment)
@@ -34,9 +48,10 @@ published=$(GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}} gh api --paginate "repos/$re
 jq -n --arg v "$version" --arg date "$(date -u +%Y-%m-%d)" \
     --arg ipa "https://github.com/$repo/releases/download/v$version/openmx-ios.ipa" \
     --argjson size "$(stat -c %s "$ipa")" --arg desc "$desc" --argjson published "[${published//$'\n'/,}]" \
+    --argjson shots "[${shots%,}]" \
     --arg src "https://github.com/$repo/releases/latest/download/altstore-source.json" --arg blurb "$blurb" '
   ([$published[] | select(.version == $v)][0] // {}) as $was
-  | [$was + { version: $v, date: $date, downloadURL: $ipa, size: $size, minOSVersion: "15.0" }
+  | [{ date: $date } + $was + { version: $v, downloadURL: $ipa, size: $size, minOSVersion: "15.0" }
           + (($desc | gsub("^\\s+|\\s+$"; "")) as $d | if $d == "" then {} else { localizedDescription: $d } end)]
     + ($published | map(select(.version != $v)) | sort_by(.at) | reverse) | map(del(.at)) as $versions
   | if ($versions | length) < 2 then error("only \($v) has an IPA: refusing a source without the older releases") else . end
@@ -48,7 +63,8 @@ jq -n --arg v "$version" --arg date "$(date -u +%Y-%m-%d)" \
              localizedDescription: ($blurb + ". Plays from your own disc image (USA, SLUS-20767), no game data included: put the ISO in Files → On My iPhone → openMX. Touch controls or a controller."),
              iconURL: "https://openmx.dev/icon-1024.png", tintColor: "#8e0f17", category: "games",
              version: $versions[0].version, versionDate: $versions[0].date, downloadURL: $versions[0].downloadURL,
-             size: $versions[0].size, versions: $versions }],
+             size: $versions[0].size, versions: $versions,
+             screenshots: { iphone: $shots }, screenshotURLs: [$shots[].imageURL] }],
     news: [] }' >"$out"
 "$(dirname "$0")/check-altstore-source.sh" "$out" >/dev/null
 echo "$out"
