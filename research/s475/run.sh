@@ -7,7 +7,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 WORKDIR=${TMPDIR:-/tmp}
 C6=$ROOT/research/journal/2026-10-20-c6-c6-recording2-capture/playback
-PID=$1 PAD=$2 STATE=$3 OUT=$4 N=$5
+PID=$1 PAD=$2 STATE=$3 OUT=$4 N=$5 POKE=${6:-}
 WORK=$(mktemp -d -p "$WORKDIR")
 python3 -I "$ROOT/research/c15/tape.py" "$ROOT/context/recordings/animandpump.p2m2" "$PAD" "$WORK/play.p2m2"
 cp "$STATE" "$WORK/play.p2m2_SaveState.p2s"
@@ -18,5 +18,5 @@ python3 -B "$C6/press.py" "$PID" 'Tools/Input Recording/Play' > "$WORK/press_pla
 python3 -B "$C6/open_only.py" "$PID" "$WORK/play.p2m2" > /dev/null
 sleep 3
 python3 -B "$C6/resume_if_paused.py" "$PID" > /dev/null
-timeout 300 python3 -B "$HERE/log.py" "$OUT" "$N"
+timeout 300 python3 -B "$HERE/log.py" "$OUT" "$N" $POKE
 python3 -B "$C6/resume_if_paused.py" "$PID" > /dev/null

@@ -18,6 +18,9 @@ GM = 0x004e1e98
 RIDER = (0x34, 0x34, 0x8, 0x8, 0x0)
 
 out, n = sys.argv[1], int(sys.argv[2])
+# POKE_AT: the first frame at or after it moves every asleep ball's body 10 ft along x (a prop off its spot
+# that nothing will move again: an asleep body is never stepped, and a never-woken one counts no ResetTime).
+poke_at = int(sys.argv[3]) if len(sys.argv) > 3 else None
 p = pine_mod.Pine(check=False, timeout=60)
 
 
@@ -36,6 +39,11 @@ with open(out, 'w') as f:
     for _ in range(n):
         v = p.next_frame(last, addr=VS)
         last = v
+        if poke_at is not None and v >= poke_at:
+            for b in BODIES:
+                if p.read32(b) == 0:
+                    p.write_f32(b + 0x60, p.read_f32(b + 0x60) + 10.0)
+            poke_at = None
         ch = chassis()
         c = struct.unpack('<3f', p.read_block(ch + 0x60, 12)) if ch else (0, 0, 0)
         row = [f'{time.time() - t0:.2f}', str(v)] + [f'{x:.3f}' for x in c]

@@ -14465,7 +14465,9 @@ toy_reset_collections       boot 0x00289e10 the .toy actor's vt+0x38 (vtable 0x0
 # "StuntCompetition" or "HitFreeride" (strings 0x00433b80 / 0x00433b98); otherwise it calls
 # 0x003a6dc0 on the player's 0x004e2778 entry (a challenge restart) and the bike stays: f68-2935 with
 # L1 then R1 on a tape put nothing back (poof2.csv). ride_reset_request 0x0027b9f0 tells the
-# 0x004e2778 manager (0x003a7f80: gate/flag marks), not the props.
+# 0x004e2778 manager (0x003a7f80: gate/flag marks), not the props. Settled props: the same run with
+# the two asleep balls (0 and 3) moved +10 ft x by PINE at 2865 (log.py's POKE_AT) keeps them there
+# through the 2882 put-back to the last row, 3056 (poke.csv).
 
 # MD251 — MX vs. ATV Untamed's (SLUS-21701) follow camera, ported as game_sim::camera::UntamedFollow and
 # proved by game-sim tests/untamed_camera.rs off MD147's spawn image (context/untamed/md147/spawn). Comment
