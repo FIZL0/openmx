@@ -793,6 +793,7 @@ pub use vehicle_anim::{AXIS_START, MIX_TAU, PHASE_TAU};
 /// Nothing here decides which state runs. The chooser is the body's own update
 /// ([`vehicle_anim::Update`], V11) and the caller hands its answer to [`Stance::frame`], the same way
 /// [`crate::vehicle::Chassis`] hands it the reading it makes off the ride.
+#[derive(Clone)]
 pub struct Stance {
     /// The clips, the skeleton they are bound to and the live pose.
     pub set: Set,

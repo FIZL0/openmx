@@ -1696,9 +1696,14 @@ impl Shown {
 /// **A body lent to its rider's step** (B43, [`rider::Poser`]): posed (Body::ride, its riding
 /// skeleton) inside the rider's tick, before the riding ragdoll's step, with the controls the bike
 /// rode. `posed` says the step reached it, and the shell then leaves that pose as the tick's.
+///
+/// The bike's chassis goes with it (S474a): posed after the body, off this tick's motion frame, so
+/// the riding step is held to this tick's drawn root and grips ([`ride_holds_of`]), as the original's
+/// request root is posed at the crossup of the tick it is filled on, and not to the last tick's.
 struct LentBody {
     body: Body,
     doll: game_render::rider::Ragdolled,
+    chassis: Option<Chassis>,
     posed: bool,
 }
 
@@ -1708,6 +1713,12 @@ impl rider::Poser for LentBody {
         if rider.ragdoll_kit.is_some() {
             rider.skeleton = Some(Arc::new(self.body.ragdoll_posed(&self.doll)));
         }
+        if let Some(chassis) = &mut self.chassis {
+            ride_chassis_under(chassis, &mut self.body, rider, dt);
+            if rider.ragdoll_kit.is_some() {
+                rider.holds = ride_holds_of(Some(chassis)).map(Arc::new);
+            }
+        }
         self.posed = true;
     }
 
@@ -1716,35 +1727,55 @@ impl rider::Poser for LentBody {
     }
 }
 
-/// Lend `body` to `rider`'s next step (B43), when the rider has a riding ragdoll to pose for.
-/// Answers whether it was lent.
-fn lend_body(body: &mut Option<Body>, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
+/// Lend `body` and `chassis` to `rider`'s next step (B43, S474a), when the rider has a riding ragdoll
+/// to pose for. Answers whether they were lent.
+fn lend_body(body: &mut Option<Body>, chassis: &mut Option<Chassis>, original_wheels: bool, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
     // With the riding ragdoll off there is no riding step to pose for.
     let (Some(doll), true, Some(_)) = (ragdolled, rider.ragdoll_kit.is_some() && riding_ragdoll_on(), body.as_ref()) else { return false };
     let body = body.take().expect("a body to lend");
-    rider.poser.0 = Some(Box::new(LentBody { body, doll: doll.clone(), posed: false }));
+    let chassis = chassis.take().map(|mut c| {
+        c.original_wheels = original_wheels;
+        c
+    });
+    rider.poser.0 = Some(Box::new(LentBody { body, doll: doll.clone(), chassis, posed: false }));
     true
 }
 
-/// [`lend_body`] for a tick on the sim thread (P382): the body goes with its rider, and a copy of it as
-/// the last tick left it stays in `body` for the pictures drawn meanwhile, which [`take_body`] puts
-/// the body itself back over when the tick lands.
-fn lend_body_kept(body: &mut Option<Body>, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
+/// [`lend_body`] for a tick on the sim thread (P382): the body and chassis go with their rider, and a
+/// copy of each as the last tick left it stays behind for the pictures drawn meanwhile, which
+/// [`take_body`] puts the lent ones back over when the tick lands.
+fn lend_body_kept(body: &mut Option<Body>, chassis: &mut Option<Chassis>, original_wheels: bool, rider: &mut Rider, ragdolled: Option<&game_render::rider::Ragdolled>) -> bool {
     // Copied only where it will be lent: a ride without the riding ragdoll lends nothing.
-    let kept = (ragdolled.is_some() && rider.ragdoll_kit.is_some()).then(|| body.clone()).flatten();
-    let lent = lend_body(body, rider, ragdolled);
+    let lends = ragdolled.is_some() && rider.ragdoll_kit.is_some();
+    let kept = lends.then(|| body.clone()).flatten();
+    let kept_chassis = lends.then(|| chassis.clone()).flatten();
+    let lent = lend_body(body, chassis, original_wheels, rider, ragdolled);
     if lent {
         *body = kept;
+        *chassis = kept_chassis;
     }
     lent
 }
 
-/// [`lend_body`]'s body back from `rider` after its step: whether the step posed it.
-fn take_body(body: &mut Option<Body>, rider: &mut Rider) -> bool {
+/// [`lend_body`]'s body and chassis back from `rider` after its step: whether the step posed them.
+fn take_body(body: &mut Option<Body>, chassis: &mut Option<Chassis>, rider: &mut Rider) -> bool {
     let lent = rider.poser.0.take().expect("the lent body is still on its rider");
     let lent = lent.into_any().downcast::<LentBody>().expect("only the shell lends a body");
     *body = Some(lent.body);
+    if lent.chassis.is_some() {
+        *chassis = lent.chassis;
+    }
     lent.posed
+}
+
+/// One frame of a ridden bike under its body (V9, S253a), as the shell poses it after the body: in
+/// the trick the body's machine chose (V64), at the rider's two axes (P29), off the rider's motion
+/// driver; then whether the drawn hands stay on the bars (MD41).
+fn ride_chassis_under(chassis: &mut Chassis, body: &mut Body, rider: &Rider, dt: F) {
+    let want = chassis.want_under(&rider.ride, &rider.tricks, rider.body.veh.want);
+    let request = chassis.riding_under(rider, want);
+    chassis.ride(dt, want, &request, rider, Drive::of(&rider.ride));
+    body.bare = chassis.bare_under(&rider.body.veh);
 }
 
 /// One frame of the race's AI riders' bodies and bikes (V128): each [`AiRig`]'s body machine and
@@ -1769,7 +1800,8 @@ fn ai_ride(rigs: &mut [AiRig], sim: &mut Sim, dt: F, ragdolled: Option<&game_ren
             }
             body.drawn = riding_bones_of(rider, ragdolled).map(|(bones, rigged)| body.ragdoll_palette(rigged, &bones, chassis_at(&rider.ride)));
         }
-        if let Some(chassis) = &mut rig.chassis {
+        // Posed inside its rider's step with the body (S474a): the tick's pose, left as it is.
+        if let Some(chassis) = rig.chassis.as_mut().filter(|_| !posed.get(k).copied().unwrap_or(false)) {
             let ride = &rider.ride;
             let want = match rig.body {
                 Some(_) => chassis.want_under(ride, &rider.tricks, rider.body.veh.want),
@@ -10870,11 +10902,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // B43 off the loop (P382): each body is lent to its rider's step and goes with the world,
             // and the pictures drawn meanwhile draw a copy of it as the last tick left it, as they
             // draw the copy of the seats. The stand-in's riders lend nothing (a lent body is not copied).
-            let lent: Vec<bool> = world.seats.iter_mut().zip(&mut rigs).map(|(s, r)| lend_body_kept(&mut r.body, &mut s.sim.rider, ragdolled.as_ref())).collect();
+            let lent: Vec<bool> = world.seats.iter_mut().zip(&mut rigs).map(|(s, r)| lend_body_kept(&mut r.body, &mut r.chassis, args.original_wheels, &mut s.sim.rider, ragdolled.as_ref())).collect();
             let lent_ai: Vec<bool> = ai_rigs
                 .iter_mut()
                 .map(|r| match world.seats[0].sim.others.get_mut(r.player.wrapping_sub(1)) {
-                    Some(p) => lend_body_kept(&mut r.body, &mut p.rider, ragdolled.as_ref()),
+                    Some(p) => lend_body_kept(&mut r.body, &mut r.chassis, args.original_wheels, &mut p.rider, ragdolled.as_ref()),
                     None => false,
                 })
                 .collect();
@@ -11353,11 +11385,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 drawn_land = Some(std::mem::replace(&mut world, ran.world).place);
                 // The bodies lent with it (P382), back over the copies the pictures drew.
-                seat_posed = world.seats.iter_mut().zip(&mut rigs).zip(&ran.lent).map(|((s, r), &l)| l && take_body(&mut r.body, &mut s.sim.rider)).collect();
+                seat_posed = world.seats.iter_mut().zip(&mut rigs).zip(&ran.lent).map(|((s, r), &l)| l && take_body(&mut r.body, &mut r.chassis, &mut s.sim.rider)).collect();
                 ai_posed = ai_rigs
                     .iter_mut()
                     .zip(&ran.lent_ai)
-                    .map(|(r, &l)| l && take_body(&mut r.body, &mut world.seats[0].sim.others[r.player - 1].rider))
+                    .map(|(r, &l)| l && take_body(&mut r.body, &mut r.chassis, &mut world.seats[0].sim.others[r.player - 1].rider))
                     .collect();
                 engine = ran.engine;
                 gauge.ticked(ran.took);
@@ -11368,20 +11400,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let at = Instant::now();
                 // B43: each body lent to its rider's step, which poses it off the tick's own band
                 // before the riding ragdoll's step; the seats' and the race's AI riders' (seat 0's Sim).
-                let lent: Vec<bool> = world.seats.iter_mut().zip(&mut rigs).map(|(s, r)| lend_body(&mut r.body, &mut s.sim.rider, ragdolled.as_ref())).collect();
+                let lent: Vec<bool> = world.seats.iter_mut().zip(&mut rigs).map(|(s, r)| lend_body(&mut r.body, &mut r.chassis, args.original_wheels, &mut s.sim.rider, ragdolled.as_ref())).collect();
                 let lent_ai: Vec<bool> = ai_rigs
                     .iter_mut()
                     .map(|r| match world.seats[0].sim.others.get_mut(r.player.wrapping_sub(1)) {
-                        Some(p) => lend_body(&mut r.body, &mut p.rider, ragdolled.as_ref()),
+                        Some(p) => lend_body(&mut r.body, &mut r.chassis, args.original_wheels, &mut p.rider, ragdolled.as_ref()),
                         None => false,
                     })
                     .collect();
                 let step = engine.step(now, engine_input(&world.seats[0].reports[0]), &mut world);
-                seat_posed = world.seats.iter_mut().zip(&mut rigs).zip(&lent).map(|((s, r), &l)| l && take_body(&mut r.body, &mut s.sim.rider)).collect();
+                seat_posed = world.seats.iter_mut().zip(&mut rigs).zip(&lent).map(|((s, r), &l)| l && take_body(&mut r.body, &mut r.chassis, &mut s.sim.rider)).collect();
                 ai_posed = ai_rigs
                     .iter_mut()
                     .zip(&lent_ai)
-                    .map(|(r, &l)| l && take_body(&mut r.body, &mut world.seats[0].sim.others[r.player - 1].rider))
+                    .map(|(r, &l)| l && take_body(&mut r.body, &mut r.chassis, &mut world.seats[0].sim.others[r.player - 1].rider))
                     .collect();
                 gauge.ticked(at.elapsed());
                 step
@@ -11864,7 +11896,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // over that pose from the ride's own numbers — the fork travel, the steering angle and the two
             // wheels' spin, which are not in any clip because no clip could have them.
             if let Some(chassis) = &mut rig.chassis {
-                if moving && bike_up {
+                // Posed inside the rider's step with the body (S474a): the tick's pose, left as it is.
+                let posed = seat_posed.get(i).copied().unwrap_or(false);
+                if moving && bike_up && !posed {
                     let ride = &seat.sim.rider.ride;
                     // In the trick the body's machine chose, so a trick started whipped does not
                     // leave the bike crossed up under it (V64), and in its backflip when the bike
@@ -11884,13 +11918,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(body) = &mut rig.body {
                         body.bare = chassis.bare_under(&seat.sim.rider.body.veh);
                     }
-                    if let Some(loaded) = assets.models.get_mut(&rig.bike_model).filter(|_| !gpu_on) {
-                        perf.time(Stage::Skinning, || chassis.skin_into(loaded));
-                    }
+                }
+                if moving && bike_up && let Some(loaded) = assets.models.get_mut(&rig.bike_model).filter(|_| !gpu_on) {
+                    perf.time(Stage::Skinning, || chassis.skin_into(loaded));
                 }
             }
             // The grips just drawn, which the rider's riding ragdoll is held to on its next frame
-            // (S110): the bones a wreck is thrown from. Offline only, like the skeleton. Drawing the
+            // (S110): the bones a wreck is thrown from. A chassis lent to the step (S474a) handed
+            // them to this tick's already. Offline only, like the skeleton. Drawing the
             // body from it is riding_ragdoll_on's (S90).
             if moving && bike_up && online.is_none() && seat.sim.rider.ragdoll_kit.is_some() {
                 seat.sim.rider.holds = ride_holds(rig).map(Arc::new);
@@ -14057,12 +14092,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And its lent bodies back (P382).
         for ((s, r), &l) in world.seats.iter_mut().zip(&mut rigs).zip(&ran.lent) {
             if l {
-                take_body(&mut r.body, &mut s.sim.rider);
+                take_body(&mut r.body, &mut r.chassis, &mut s.sim.rider);
             }
         }
         for (r, &l) in ai_rigs.iter_mut().zip(&ran.lent_ai) {
             if l {
-                take_body(&mut r.body, &mut world.seats[0].sim.others[r.player - 1].rider);
+                take_body(&mut r.body, &mut r.chassis, &mut world.seats[0].sim.others[r.player - 1].rider);
             }
         }
     }

@@ -342,6 +342,10 @@ impl Drive {
 /// what the rider is told ([`Chassis::bare_under`]), and it poses the states the motion driver has no
 /// arm for: a trick pack's extras and 360s (MD21, V64), the backflip's pack clip (MD41), and a trick
 /// the bike has no clip for (V98) ([`Chassis::stance_owns`]).
+///
+/// A copy (S474a) has its own pose and clocks and shares the bound clips, as [`crate::rider::Body`]'s
+/// does: the shell keeps one for the pictures drawn while the chassis is lent to a step on the sim thread.
+#[derive(Clone)]
 pub struct Chassis {
     /// The bike's clips, the chassis skeleton, the live pose and the machine stepping them.
     pub stance: Stance,

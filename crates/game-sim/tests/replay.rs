@@ -13836,10 +13836,11 @@ fn s466_holds(rows: &[std::collections::HashMap<String, f32>]) -> Vec<game_sim::
         .collect()
 }
 
-/// **S474: the shell's drawn bike root on the windmill's verdict tick lags the original's a tick.**
+/// **S474, S474a: the shell's drawn bike root on the windmill's verdict tick is the original's.**
 /// S466 found the original's riding request root (the bike model's "Bike" node) ~30 degrees off the
 /// chassis node on the image's row and tick 1's, and back within ~1.6 degrees on the verdict tick's.
-/// Does the port's shell hand the riding body the same snap? No: it hands it a tick late.
+/// Does the port's shell hand the riding body the same snap? S474 found it handed it a tick late;
+/// since S474a it hands it on the tick.
 ///
 /// The snap is not the wreck's. The drawn bike plays the airborne clips at the crossup the motion
 /// driver shows ([`game_sim::motion::Driver::select`]), and the crossup is 0 while the chassis'
@@ -13850,12 +13851,13 @@ fn s466_holds(rows: &[std::collections::HashMap<String, f32>]) -> Vec<game_sim::
 /// with research/r14_windmill_bones.py's `cross`).
 ///
 /// In the original each tick's request root is posed at that tick's own crossup: 31.9 degrees at the
-/// image's -0.387, 29.7 at tick 1's -0.357, 1.6 at tick 2's 0. The shell draws the chassis after a
-/// tick and hands its root to the next ([`s474_ride_drawn`], crates/openmx main.rs `ride_holds_of`), so
-/// tick `t` gets the root of tick `t - 1`'s pose: the verdict tick gets tick 1's ~29.7 degrees, the
-/// air lean S466 found 9% slow.
+/// image's -0.387, 29.7 at tick 1's -0.357, 1.6 at tick 2's 0. The shell drew the chassis after a
+/// tick and handed its root to the next, so tick `t` got the root of tick `t - 1`'s pose: the verdict
+/// tick got tick 1's ~29.7 degrees, the air lean S466 found 9% slow. S474a lends the chassis to the
+/// rider's step with the body (crates/openmx main.rs `LentBody`, [`s474_ride_drawn`]): it is posed off
+/// the tick's own motion frame before the riding step, which is held to that root.
 #[test]
-fn the_shells_drawn_root_lags_the_originals_a_tick() {
+fn the_shells_drawn_root_is_the_originals_on_the_tick() {
     let Some(req) = columns_capture("s474", "south3-cross") else { return };
     let Some(b15) = columns_capture("b15", "south3-bones") else { return };
     for (got, want) in req.iter().zip(&b15) {
@@ -13892,19 +13894,19 @@ fn the_shells_drawn_root_lags_the_originals_a_tick() {
     }
     let seen = seen.join("\n");
     println!("{seen}");
-    // Each tick's root is the clip posed at the tick before's pose: the original's root a row back.
-    // Measured: 0.000 deg on both ticks.
+    // Each tick's root is the clip posed at the tick's own pose: the original's root on its row.
+    assert_eq!(held.len(), throw, "a hold for each tick");
     for (t, h) in held.iter().enumerate().map(|(i, h)| (i + 1, h)) {
-        assert!(apart(&h.root, &root_of(&req[t])) < 0.01, "tick {t}: the shell's root is not the original's a row back:\n{seen}");
+        assert!(apart(&h.root, &root_of(&req[t + 1])) < 0.01, "tick {t}: the shell's root is not the original's:\n{seen}");
     }
-    // So the verdict tick keeps the air lean the original's has dropped.
+    // So the verdict tick drops the air lean as the original's does.
     let (verdict, original) = (&held[throw - 1].root, root_of(&req[w]));
-    assert!(turn(&original) < 2.0 && turn(verdict) > 25.0, "the verdict tick's roots:\n{seen}");
+    assert!(turn(&original) < 2.0 && turn(verdict) < 2.0, "the verdict tick's roots:\n{seen}");
 
     // What it costs: the shell's roots with the original's hands and feet leave the bones apart on the
     // verdict tick and the entry, where the original's roots keep them under 0.6 ft/s (S466).
     let original_holds = s466_holds(&req);
-    let Some((_, _, bones)) = s474_ride_drawn("b15", "south3-bones", throw + 1, 56, |t, h| game_sim::ragdoll_riding::Holds { root: h.root, ..original_holds[t - 1] }) else { return };
+    let Some((_, _, bones)) = s474_ride_drawn("b15", "south3-bones", throw + 1, 56, move |t, h| game_sim::ragdoll_riding::Holds { root: h.root, ..original_holds[t - 1] }) else { return };
     let mut gaps = Vec::new();
     for (t, b) in bones.iter().enumerate().map(|(i, b)| (i + 1, b)) {
         let row = &b15[t + 1];
@@ -13918,11 +13920,11 @@ fn the_shells_drawn_root_lags_the_originals_a_tick() {
         gaps.push(dv);
     }
     println!("the bones' mean velocity gap with the shell's roots: {gaps:?}");
-    // Measured: (+0.09, -0.02, +0.30) on tick 1, (-1.21, -1.91, -0.49) on the verdict tick and
-    // (-0.32, +0.42, +1.48) on the entry. Pinned so a fix shows here (S474a).
+    // S474 measured, with the lagged roots: (+0.09, -0.02, +0.30) on tick 1, (-1.21, -1.91, -0.49) on
+    // the verdict tick and (-0.32, +0.42, +1.48) on the entry. S474a, on the tick: (+0.10, -0.02, +0.33),
+    // (-0.05, -0.35, +0.60) and (-0.03, -0.18, +0.33), under S466's 0.6 with the original's roots.
     let worst = |dv: [f32; 3]| dv.iter().fold(0.0f32, |a, d| a.max(d.abs()));
-    assert!(worst(gaps[0]) < 0.5, "tick 1's gap: {gaps:?}");
-    assert!(worst(gaps[throw - 1]) > 1.5 && worst(gaps[throw]) > 1.0, "the shell's lagged root no longer parts the bones (S474a?): {gaps:?}");
+    assert!(gaps.iter().all(|&dv| worst(dv) < 0.6), "the bones with the shell's roots: {gaps:?}\n{seen}");
 }
 
 /// One tick of [`s474_ride_drawn`]: the crossup and the pose the motion driver shows.
@@ -13932,18 +13934,42 @@ struct S474Tick {
     pose: f32,
 }
 
+/// The chassis lent to the rider's step as the shell lends it with the body (S474a, crates/openmx
+/// main.rs `LentBody`): drawn off the tick the rider has just stepped, before the riding step, its
+/// "Bike" node and grips handed to that same step as [`game_sim::rider::Rider::holds`]. `pick` says
+/// what is handed in for tick `held.len() + 1`, and `held` keeps it.
+struct S474Lent {
+    draw: Box<dyn FnMut(&game_sim::rider::Rider) -> game_sim::ragdoll_riding::Holds + Send>,
+    pick: Box<dyn Fn(usize, game_sim::ragdoll_riding::Holds) -> game_sim::ragdoll_riding::Holds + Send>,
+    held: Arc<std::sync::Mutex<Vec<game_sim::ragdoll_riding::Holds>>>,
+}
+
+impl game_sim::rider::Poser for S474Lent {
+    fn pose(&mut self, rider: &mut Rider, _: &game_sim::ride::Controls, _: F) {
+        let mut held = self.held.lock().unwrap();
+        let h = (self.pick)(held.len() + 1, (self.draw)(rider));
+        held.push(h);
+        rider.holds = Some(Arc::new(h));
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
 /// [`r24_ride`] with the bike drawn beside it as the shell draws it (crates/openmx main.rs: the
-/// chassis posed off the ride after each tick, its "Bike" node and grips handed to the next tick as
-/// [`game_sim::rider::Rider::holds`]). The chassis is drawn once off the image before tick 1, with the
-/// motion driver on the image's airborne idle and pose (rider `+0x9e8`/`+0x9ec`), so tick 1 does not
-/// restart it. `pick` gets the tick a drawn hold is for and the drawn hold, and says what is handed
-/// in. Hands back each tick's crossup and pose, the holds handed to ticks 1.., and the bones.
+/// chassis lent to the rider's step and posed there off the tick's motion frame, its "Bike" node and
+/// grips handed to that tick's riding step as [`game_sim::rider::Rider::holds`], [`S474Lent`]). The
+/// chassis is drawn off the image before tick 1, with the motion driver on the image's airborne idle
+/// and pose (rider `+0x9e8`/`+0x9ec`), so tick 1 does not restart it. `pick` gets the tick a drawn
+/// hold is for and the drawn hold, and says what is handed in. Hands back each tick's crossup and
+/// pose, the holds handed to ticks 1.., and the bones.
 fn s474_ride_drawn(
     dir: &str,
     name: &str,
     ticks: usize,
     draws: u32,
-    pick: impl Fn(usize, game_sim::ragdoll_riding::Holds) -> game_sim::ragdoll_riding::Holds,
+    pick: impl Fn(usize, game_sim::ragdoll_riding::Holds) -> game_sim::ragdoll_riding::Holds + Send + 'static,
 ) -> Option<(Vec<S474Tick>, Vec<game_sim::ragdoll_riding::Holds>, Vec<B19Bones>)> {
     use game_render::disc::Disc;
     let mut disc = Disc::open_configured().ok()?;
@@ -13957,13 +13983,11 @@ fn s474_ride_drawn(
     let bike = disc.res(&bike).ok()?;
     let sub = bike.find_suffix(".sub")?.name.clone();
     let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
-    let chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
-    let chassis = std::cell::RefCell::new(chassis);
-    let root = chassis.borrow().nodes.root.expect("a chassis root");
+    let mut chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let root = chassis.nodes.root.expect("a chassis root");
     let dt = F(1.0 / 30.0);
-    // The shell's frame: the chassis posed off the rider, and what it hands the next tick.
-    let draw = |r: &game_sim::rider::Rider| {
-        let mut chassis = chassis.borrow_mut();
+    // The shell's pose of the chassis off the rider, and what it hands the riding step.
+    let mut draw = move |r: &game_sim::rider::Rider| {
         let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = chassis.riding_under(r, want);
         chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
@@ -13974,8 +13998,9 @@ fn s474_ride_drawn(
     let image = private_dir("capture").join(dir).join(format!("{name}-before.ram"));
     let (mut body, doll) = r24_body()?;
     let skeleton = std::cell::RefCell::new(None);
-    let held = std::cell::RefCell::new(Vec::new());
+    let held = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (mut bones, mut seen) = (Vec::new(), Vec::new());
+    let mut lent = Some((Box::new(pick) as Box<dyn Fn(usize, game_sim::ragdoll_riding::Holds) -> game_sim::ragdoll_riding::Holds + Send>, held.clone()));
     s211_ride_seeded(
         &image,
         [0.0; 3],
@@ -14006,9 +14031,9 @@ fn s474_ride_drawn(
             r.animation = game_sim::motion::Frame { blend, restart: false };
             // Twice: a chassis' first frame has no drawn pose to hand over from.
             draw(r);
-            let h = pick(1, draw(r));
-            held.borrow_mut().push(h);
-            r.holds = Some(Arc::new(h));
+            r.holds = Some(Arc::new(draw(r)));
+            let (pick, held) = lent.take().expect("seeded once");
+            r.poser.0 = Some(Box::new(S474Lent { draw: Box::new(draw), pick, held }));
         },
         |sim| {
             let r = &mut sim.rider;
@@ -14019,15 +14044,11 @@ fn s474_ride_drawn(
                 (None, None) => B19Bones { down: false, bones: Vec::new(), touch: 0 },
             });
             seen.push(S474Tick { crossup: r.ride.air.crossup.0, pose: r.motion.pose.0 });
-            if bones.len() < ticks {
-                let h = pick(bones.len() + 1, draw(r));
-                held.borrow_mut().push(h);
-                r.holds = Some(Arc::new(h));
-            }
             r.skeleton = skeleton.borrow().clone();
         },
     )?;
-    Some((seen, held.into_inner(), bones))
+    let held = held.lock().unwrap().clone();
+    Some((seen, held, bones))
 }
 
 /// **R24: the bones follow the original through the windmill's throw.** R14's south-bones, ridden as
