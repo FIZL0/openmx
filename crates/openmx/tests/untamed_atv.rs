@@ -176,4 +176,11 @@ fn the_untamed_quad_says_its_cameras_engine_and_particles_are_the_packs() {
     assert!(list.contains(" entries off untamed_atv's Part/atvparticles.dat.bpb;"), "{list}");
     let air = said.lines().filter(|l| l.starts_with("atv: particles: ") && l.ends_with(" in the air")).last().unwrap_or_else(|| panic!("no particles line:\n{said}"));
     assert!(air.contains("Tire Dust"), "{air}");
+    // MD252: its exhaust smoke rides the KTM 250 build's exhaust part, the chassis having no node for it.
+    assert_eq!(line(&said, "atv: particles: Right Exhuast rides"), "atv: particles: Right Exhuast rides 250_Exhaust_Particle01, on the build's part atv_r_250_exhaust");
+    assert!(!said.contains("which neither the chassis model nor a part has"), "an emitter left off:\n{said}");
+    // It puffs only under its 15 ft/s: 8 ticks after the switch, the quad still pulling away.
+    let Some(slow) = ride(38, &switched, &["--atv", "atv_Race250P@untamed_atv"]) else { return };
+    let air = slow.lines().filter(|l| l.starts_with("atv: particles: ") && l.ends_with(" in the air")).last().unwrap_or_else(|| panic!("no particles line:\n{slow}"));
+    assert!(air.contains("Right Exhuast "), "no exhaust smoke: {air}");
 }

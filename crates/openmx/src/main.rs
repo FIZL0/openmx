@@ -7811,7 +7811,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The quad's (MD136): its pack's own list, one manager a seat stepped off the quad while it is
     // up, off otherwise, so what it threw runs out.
     let atv_fx_list = match (&atv_files, &garage.atv) {
-        (Some(own), Some(atv)) => match load_atv_fx(&archives, &stem, own, &atv.model) {
+        (Some(own), Some(atv)) => match load_atv_fx(&archives, &stem, own, &atv.model, &atv.phy) {
             Ok((fx, nodes, sheet)) => {
                 if fx_sheet.is_none() {
                     fx_sheet = Some(sheet.clone());
@@ -15534,8 +15534,9 @@ fn atv_own(args: &Args, atv: &vehicle::AtvRide) -> Option<AtvOwn> {
 /// table is the pack's (`Part/atvparticlezones.dat`), not the track's as the fliers keep: the disc's
 /// names no descriptor, and the quad's list names `WaterRoost` and `Dust2`, which only its own turns
 /// off off the water; the track's where the pack has none. Says what it runs and what it skips: the
-/// tire tracks, which are not particles, and the entries on nodes the quad's chassis model lacks.
-fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::quad::Model) -> Result<(particles::PlaneFx, Vec<String>, game_render::pst::Texture), String> {
+/// tire tracks, which are not particles, and the entries on nodes neither the quad's chassis model
+/// nor its build's part models have ([`atv_part_hang`], MD252).
+fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::quad::Model, phy: &str) -> Result<(particles::PlaneFx, Vec<(String, AtvHang)>, game_render::pst::Texture), String> {
     let pack = &own.pack;
     let name = pack.particle_list();
     if name.is_empty() {
@@ -15554,13 +15555,21 @@ fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::qu
     let texture = game_render::pst::Texture::parse(&texture)?;
     let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
     let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
-    let mut nodes: Vec<String> = Vec::new();
+    let mut nodes: Vec<(String, AtvHang)> = Vec::new();
     for e in &fx.entries {
         let Some(node) = e.node.as_deref() else { continue };
-        match model.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(node)) {
-            true if !nodes.iter().any(|n| n.eq_ignore_ascii_case(node)) => nodes.push(node.to_string()),
-            true => {}
-            false => println!("atv: particles: {} rides {node}, which the chassis model does not have", e.name),
+        if nodes.iter().any(|(n, _)| n.eq_ignore_ascii_case(node)) {
+            continue;
+        }
+        match model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(node)) {
+            Some(i) => nodes.push((node.to_string(), AtvHang::Chassis(i))),
+            None => match atv_part_hang(pack, phy, model, node) {
+                Some((part, hang)) => {
+                    println!("atv: particles: {} rides {node}, on the build's part {part}", e.name);
+                    nodes.push((node.to_string(), hang));
+                }
+                None => println!("atv: particles: {} rides {node}, which neither the chassis model nor a part has", e.name),
+            },
         }
     }
     let (laid, skipped): (Vec<_>, Vec<_>) = fx.skipped.iter().partition(|(_, why)| why.eq_ignore_ascii_case("TireTrack"));
@@ -15569,20 +15578,48 @@ fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::qu
     Ok((fx, nodes, texture))
 }
 
+/// Where one of the quad's emitters hangs: a node of its chassis model (by its place in it), or
+/// (MD252) a node of one of its build's part models, the part hung on its placement node of the
+/// chassis, or under the quad's scene node with the chassis for a placement the chassis lacks
+/// (`bike`, every part's on the disc's quads), as the shell draws the parts.
+#[derive(Clone)]
+enum AtvHang {
+    Chassis(usize),
+    Part { at: Option<usize>, model: game_sim::quad::Model, node: usize },
+}
+
+/// MD252: the first of the build's parts (the one the quad of `phy` is drawn as, [`quad_draw::build`])
+/// whose model has `node`, by the part's model name, and where the emitter on it hangs. Untamed's
+/// KTM 250 hangs its exhaust smoke on `250_Exhaust_Particle01`, which only its exhaust part has.
+fn atv_part_hang(pack: &machine_packs::Pack, phy: &str, chassis: &game_sim::quad::Model, node: &str) -> Option<(String, AtvHang)> {
+    let build = quad_draw::build(pack, phy)?;
+    pack.vehicle(build).ok()?.parts.into_iter().find_map(|part| {
+        let bytes = pack.files.read_suffix(&format!("{}.psg", part.model)).ok()?;
+        let model = game_sim::quad::Model::parse(&bytes).ok()?;
+        let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(node))?;
+        let at = chassis.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(&part.placement));
+        Some((part.model, AtvHang::Part { at, model, node: i }))
+    })
+}
+
 /// What the quad's particles read off it this frame (MD136): its emitters' nodes where its chassis
-/// model hangs under its scene node, the throttle after its rate limit, its speed, the clutch lever,
+/// model (or a part model on it, MD252) hangs under its scene node, the throttle after its rate limit, its speed, the clutch lever,
 /// its wreck, the body's velocity, and its four wheels (front left, front right, rear left, rear
 /// right, as `AttachedToTire`'s 0 to 3 count them): ground and object contact, compression, the
 /// surface record and the tire's spin and side force. Its collision object's contacts are not fed.
-fn atv_fx_frame(atv: &vehicle::AtvRide, nodes: &[String]) -> particles::PlaneFrame {
+fn atv_fx_frame(atv: &vehicle::AtvRide, nodes: &[(String, AtvHang)]) -> particles::PlaneFrame {
     let Some(r) = atv.quad() else { return particles::PlaneFrame::default() };
-    let worlds = atv.model.worlds(&game_sim::math::Mat4(r.bike.parts.scene.nodes[0].world));
+    let root = game_sim::math::Mat4(r.bike.parts.scene.nodes[0].world);
+    let worlds = atv.model.worlds(&root);
     let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
     let placed = nodes
         .iter()
-        .filter_map(|name| {
-            let i = atv.model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
-            let m = worlds[i].0;
+        .filter_map(|(name, hang)| {
+            let m = match hang {
+                AtvHang::Chassis(i) => *worlds.get(*i)?,
+                AtvHang::Part { at, model, node } => *model.worlds(&at.and_then(|p| worlds.get(p).copied()).unwrap_or(root)).get(*node)?,
+            }
+            .0;
             Some((name.clone(), M4([row(m[0], 0.0), row(m[1], 0.0), row(m[2], 0.0), row(m[3], 1.0)])))
         })
         .collect();
