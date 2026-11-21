@@ -1275,7 +1275,7 @@ fn race_ai_lanes(grid: &[(Vf, Vf)], seats: usize) -> &[(Vf, Vf)] {
 /// V136: whether a race of `racers` with `seats` riders on this track has AI riders out, said before
 /// its grid is laid (the bodies load first): its lanes past the seats', which the AI riders take
 /// offline or online alone ([`race_ai_lanes`]). Every body of such a session takes the AI set's clip
-/// names ([`Body::load_in`]). A track with no start gate lays no grid and puts none out after all.
+/// names ([`Body::load_in`]). The caller also asks whether the track lays a grid at all.
 fn race_puts_ai_out(racers: Option<u32>, seats: usize, online: bool) -> bool {
     racers.is_some_and(|r| (!online || seats == 1) && (r as usize).min(game_sim::race::LANES) > seats)
 }
@@ -6212,8 +6212,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // `.phy` — the same `Params` the simulation's own driver runs on.
     // What the pack's clips left unbound on the first body and chassis (MD21), for the line below.
     let mut pack_missing: (Option<Vec<String>>, Option<Vec<String>>) = (None, None);
-    // V136: a race with AI riders out poses every body on the AI set's clip names.
-    let ai_out = race_puts_ai_out(args.race.as_ref().map(|r| r.riders), riders, args.online.is_some());
+    // V136: a race with AI riders out poses every body on the AI set's clip names. Its grid is laid
+    // later (P327), so whether it will be is asked here off the same two things: the race events'
+    // start calls and the scene's drop-gate prop. A track with neither lays no grid and puts none out.
+    let lays_grid = args.race.is_some()
+        && second
+            .as_ref()
+            .and_then(|m| disc.res(m).ok())
+            .and_then(|res| res.read("aud\\event.aud").ok())
+            .is_some_and(|b| !race_start::drop_times(&ini::text(&b), &args.bike).is_empty())
+        && race_start::drop_prop(&look.models, |m| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris))).is_some();
+    let ai_out = lays_grid && race_puts_ai_out(args.race.as_ref().map(|r| r.riders), riders, args.online.is_some());
     let mut body = match &rider_member {
         None => None,
         Some(member) => {
@@ -7214,6 +7223,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .collect(),
         _ => Vec::new(),
     };
+    if ai_out != !race_ai.is_empty() {
+        println!("race: the bodies took the {} clip names but {} AI riders are out (V136)", if ai_out { "AI set's" } else { "own" }, race_ai.len());
+    }
     let race_start = race_start.map(|mut s| {
         // P350: the other seats in their lanes.
         for (i, r) in others.iter().enumerate().map(|(k, r)| (k + 1, r)).filter(|_| args.online.is_none()) {
@@ -8116,8 +8128,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // the first's are opened twice — each animation set reads members as its own machine asks.
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
-    // V136: the first body's choice of clip names, for every body loaded after it.
-    let ai_out = race_puts_ai_out(args.race.as_ref().map(|r| r.riders), riders, args.online.is_some());
+    // V136: every body loaded after the first takes the AI set's clip names when AI riders are out.
+    let ai_out = race_start.as_ref().is_some_and(|s| !s.ai.is_empty());
     for i in 1..riders {
         if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
             return Ok(leave);
