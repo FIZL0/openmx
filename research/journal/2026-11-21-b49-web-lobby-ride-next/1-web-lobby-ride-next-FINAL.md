@@ -1,4 +1,4 @@
-# 1 — web lobby ride next (PART)
+# 1 — web lobby ride next (FINAL)
 
 Task B49. 2026-11-21.
 
