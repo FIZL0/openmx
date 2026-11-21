@@ -1671,6 +1671,9 @@ actor_manager_remove        boot 0x0021a9d0 Remove(actor): find in the master li
 #                                           in the list, which the next lookup reads through
 actor_manager_each_early    boot 0x0021aa80 walk the master list head->tail calling vtable +0x28 on
 #                                           each actor
+#                                           R67: not per frame: the reset of every actor, run only by
+#                                           the game manager's reset (world_reset below); its +0x28
+#                                           is each actor's reset (on +0x48's vtable)
 actor_manager_each_late     boot 0x0021aef0 the same walk calling vtable +0x58
 actor_manager_nearest       boot 0x0021aad0 (manager, point*, out_f32|0, exclude) -> actor|0: master
 #                                           list order; gates on actor+0x18 then +0x10; distance from
@@ -7244,6 +7247,34 @@ physics_object_place  boot 0x0015a1b0 vt +0xe4 (wrapper, place, look, up): side 
 #                                    look's), both rsqrt-normalised and written back through the
 #                                    pointers; pos.w = 1.0; axes_to_quat on them -> sp+128. The nose is
 #                                    kept: a slope along it is taken off the up, one across it rolls it
+# R67 — a parked car is put back at every world reset: the load's and every Restart's (journal
+#   research/journal/2026-11-21-r67-parked-car-put-back-on-restart). Each put-back squares the store
+#   again (S498), so restart N turns the car by the pair squared N+1 times.
+world_reset           boot 0x0020b780 (world = app+0x3cc) world+0x6c vt+0x74, the split-screen part
+#                                    (0x00213850/0x002138d0), game manager (world+0x30) vt+0x74, then
+#                                    per seat (event +0x114) world+0x64[i] vt+0x88. Callers: world_load
+#                                    (0x00205c40, once, the load's put-back), the pause menu's input
+#                                    (0x0028be30 rows 1 and 8, unless event +4 == 4), the results'
+#                                    Restart (0x0029cde0), 0x00292a70, 0x0029f580
+game_manager_reset    boot 0x0031a440 the level's game manager vt+0x74 (vtable 0x00459050; the base's
+#                                    0x002464a0 at 0x00454290+0x74 the same less the last call): +0x38
+#                                    vt+0x90, players (+0x30) vt+0x7c, actors (+0x34) vt+0x7c =
+#                                    actor_manager_each_early, then 0x0021be10(+0x38)
+car_actor_reset       boot 0x00398e70 a car's actor vt+0x28 (on car+0x48, vtable 0x0045cf80; also
+#                                    0x0045cc90, 0x0045ed50): car vt+0x198 = the put-back 0x00396e90
+#                                    (-> physics_object_reset on car+0x50), then 0x00399b30(+0x544, 0),
+#                                    0x00399a60(+0x544). The fliers' actor +0x28 is the base 0x00245680:
+#                                    the reset leaves a parked plane's and helicopter's store as it was
+#                                    (r52-free10-biplane, r52-free06-heli)
+pause_menu_input      boot 0x0028be30 switch on the picked row's id (+0x1d4 = +0x2c vt+0xb0): 0 Resume
+#                                    (0x00207770 unpause), 1 Restart and 8 the world reset after the
+#                                    unpause. Row names: 0x0028d410 (buf, id) id < 6 through the table
+#                                    0x004349f0: 0 RESUME, 1 RESTART, 2 PLAYEROPTIONS, 3 EVENTOPTIONS,
+#                                    4 AUDIOOPTIONS, 5 QUIT (STR_PAUSEMENU_*)
+#   Run (./kit oracle 0x0021aa80 --ints 0x007d11c0 --ram r52-free07-baja.ee.bin, and the same through
+#   world_reset 0x0020b780 --ints 0x006168c0): the baja's store up (car +0x100) 3d06e5fb 3f7e608d
+#   3ddc225a -> 3d06e5fc 3f7e608f 3ddc225d, nose kept, body +0x170 3d4d3378 3f3220f5 3cd26c82
+#   3f374c7b; one put-back per world reset. A driven car's store spot moves with it (s342, R68).
 physics_object_struck boot 0x0015ad40 like 0x0015acf0: wakes the wrapper through vt +0x124
 # The wrapper's listener (0x0015b2a0, filed at +0x50) counts its own ResetTime down the same way.
 node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): rows x parent's rigid
