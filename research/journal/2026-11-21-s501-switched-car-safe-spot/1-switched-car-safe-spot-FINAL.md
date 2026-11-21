@@ -1,4 +1,4 @@
-# 1 — switched car safe spot (PART)
+# 1 — switched car safe spot (FINAL)
 
 Task S501. 2026-11-21.
 
