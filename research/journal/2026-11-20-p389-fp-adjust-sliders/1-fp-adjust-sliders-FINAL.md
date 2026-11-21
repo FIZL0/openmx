@@ -1,4 +1,4 @@
-# 1 — fp adjust sliders (PART)
+# 1 — fp adjust sliders (FINAL)
 
 Task P389. 2026-11-20.
 
@@ -35,8 +35,9 @@ Nothing: the trim is the port's own, after MXA's onboard adjust as an idea (P384
   settings to `FirstPersonCamera::frame` is one line in main.rs and builds, but no test drives it.
 - The menu test lives in `tests/menu.rs`, not `tests/first_person.rs` as the brief named: that file does
   not mount menu.rs, and mounting it would pull in about fifteen modules.
-- The page's Reset to Default / Reset to Original rows do not touch the first-person sliders (each slider's
-  Cross does); the Original mode's Cameras departure ignores them too. Left as is: not asked.
+- Spec review fix: Reset to Default / Reset to Original and the Original tab's Cameras now put the trim back
+  to the disc's (the port's default is the disc's here), and Cameras reads Original only with every seat's
+  trim back. Tested in the same menu test.
 
 ## Next
 

@@ -2109,6 +2109,8 @@ impl Menu {
                 self.settings.cameras[seat] = to;
                 // Every preset's: the disc presets' own numbers go too (P163).
                 self.settings.camera_sets[seat].clear_disc_looks();
+                // And the first-person sliders (P389), whose default is the disc's too.
+                self.settings.fp_adjust[seat] = FpTrim::ORIGINAL;
             }
             Key::CameraPreset => {
                 match pick {

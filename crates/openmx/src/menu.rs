@@ -944,7 +944,9 @@ impl Menu {
         let (s, c) = (&self.settings, &self.controls);
         match d {
             Departure::Controls => c.layouts.iter().chain(&c.planes).all(|l| *l == Layout::Original),
-            Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL) && s.camera_sets.iter().all(cameras::Seat::is_disc),
+            Departure::Cameras => {
+                s.cameras.iter().all(|v| *v == CameraView::ORIGINAL) && s.camera_sets.iter().all(cameras::Seat::is_disc) && s.fp_adjust.iter().all(|t| *t == FpTrim::ORIGINAL)
+            }
             Departure::Fog => s.graphics == Graphics::Original,
             Departure::Foliage => s.foliage == Foliage::Original,
             Departure::Picture => s.picture == Picture::Television,
@@ -989,6 +991,8 @@ impl Menu {
                     set.clear_disc_looks();
                     set.cycle = if original { cameras::Cycle::Disc } else { cameras::Cycle::Both };
                 }
+                // The first-person trim (P389): the disc's either way, the port's default being it too.
+                s.fp_adjust = [FpTrim::ORIGINAL; SEATS_MAX];
             }
             Departure::Fog => s.graphics = if original { Graphics::Original } else { Settings::default().graphics },
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },

@@ -1313,6 +1313,17 @@ fn menu_sliders_set_fp_adjust_and_save_it() {
     assert_eq!(Settings::parse("name = Rider\n").fp_adjust, [FpTrim::ORIGINAL; menu::SEATS_MAX]);
     assert_eq!(Settings::parse("fp_adjust = 50 1 2 3\n").fp_adjust, [FpTrim { bob: 50, up: 1, forward: 2, fov: 3 }; menu::SEATS_MAX]);
     assert_eq!(Settings::parse("fp_adjust = 900 -99 99 -99\n").fp_adjust[0], FpTrim { bob: 200, up: -30, forward: 30, fov: -30 });
+    // Reset to Original puts 2P's back to the disc's camera, and nobody else's; the Original
+    // tab's Cameras puts every seat's back, and is at the original's only with them back.
+    down_to(&mut m, &mut r, Key::CameraOriginal);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.fp_adjust[1], FpTrim::ORIGINAL);
+    assert_ne!(m.settings.fp_adjust[0], FpTrim::ORIGINAL);
+    m.set_departure(menu::Departure::Cameras, true);
+    assert_eq!(m.settings.fp_adjust, [FpTrim::ORIGINAL; menu::SEATS_MAX]);
+    assert!(m.is_original(menu::Departure::Cameras));
+    m.settings.fp_adjust[3].fov = 2;
+    assert!(!m.is_original(menu::Departure::Cameras), "a trimmed first-person camera is not the original's");
     std::fs::remove_dir_all(dir).ok();
 }
 
