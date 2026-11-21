@@ -12562,7 +12562,7 @@ stream_find                 boot 0x0019a270 (name) "Aud\" + name, its extension 
 #                                           (0xc2d40000); the port takes such a scene as nothing to play.
 stream_length               boot 0x0019d8c0 (index) the stream's Duration from the index read above.
 #                                           S13d: scene 6 (UI\3rd_race, 8.514920) arms the tip at 6.46.
-race_prop_raiser           boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot +0x38 = 0x002feb40) the
+race_prop_raiser            boot 0x002fde40 ctor (0xa0, vt 0x00458550, tick slot +0x38 = 0x002feb40) the
 #                                           activity's +0x3a8, built when activity +0x3a4 != 0 and put on
 #                                           the score manager's node (pass 2) before the flashes. 0x002fe050
 #                                           gathers the scene's (app+0x3cc) props whose name (+0x144) matches

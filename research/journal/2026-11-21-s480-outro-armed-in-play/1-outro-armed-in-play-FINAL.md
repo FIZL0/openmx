@@ -16,7 +16,8 @@ Task S480. 2026-11-21.
   `aud\event.aud` from the event's res (as for the start calls) and the stream list from `appstart.res`,
   prints `race: outro scenes …`, and sets them on the start's activity.
 - `race_start::Watch::wait(dt, outro_up)`: on a race with an activity the outro's wait runs out on the
-  first tick `Race::outro_up` is true; without one, the old 7 s clock.
+  first tick `Race::outro_up` is true, or 20 s after the Over (`OUTRO_BACKSTOP`) if the popup never
+  comes (no laps, no scene); without one, the old 7 s clock.
 - A seat is a human card's rank among the human cards by player number (seat 0 is player 0, as
   `race_player` numbers them).
 
@@ -63,6 +64,8 @@ Task S480. 2026-11-21.
   only ever set by the race end, so a second race in one sitting could carry the first's.
 - `alt_outro` is always false in play (single race, activity 2); the 1/3/5 scenes are never picked.
 - Seat numbering by rank among human cards is assumed from `race_player`; not checked with two humans.
+- A stream with no (or a zero) `Duration` is taken as nothing to play (7 s); the original's stage would
+  be 0, which never arms the tip. The shell's 20 s backstop has no original counterpart.
 - A disc without `[RaceEndDitties]` would leave the original with no cue (likely a crash); the port gives
   7 s.
 - The shell's leave is the first tick the popup is up; the results hand-over after it is unchanged.

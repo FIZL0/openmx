@@ -124,8 +124,8 @@ pub fn drop_times(event_aud: &str, bike: &str) -> Vec<F> {
 /// (`aud\streams.juk`, `[Song N]` for the list's Nth). The loader names the scenes in
 /// `[RaceEndDitties]`' `Sound1`..`Sound8`; each is a stream looked up as `Aud\` and its name with
 /// its extension made `.vag`, then `.vig`, against the list ignoring case, and its length is that
-/// stream's `Duration`. A scene not on the list has nothing to play (`None`). Empty without the
-/// section.
+/// stream's `Duration`. A scene not on the list, or with no (or a zero) `Duration`, has nothing to
+/// play (`None`), so the tip comes 7 s on rather than never. Empty without the section.
 pub fn outro_lengths(event_aud: &str, streams: &str, index: &str) -> Vec<Option<F>> {
     let aud = game_render::ini::parse(event_aud);
     let Some(ditties) = aud.iter().find(|s| s.name.eq_ignore_ascii_case("RaceEndDitties")) else { return Vec::new() };
@@ -141,7 +141,7 @@ pub fn outro_lengths(event_aud: &str, streams: &str, index: &str) -> Vec<Option<
             let want = format!("{stem}{ext}");
             let k = names.iter().position(|n| n.eq_ignore_ascii_case(&want))?;
             let song = songs.iter().find(|s| s.name.eq_ignore_ascii_case(&format!("Song {}", k + 1)))?;
-            Some(F(song.number("Duration").unwrap_or(0.0)))
+            song.number("Duration").filter(|&d| d != 0.0).map(F)
         })
     };
     (1..=8).map(|k| ditties.get(&format!("Sound{k}")).and_then(length)).collect()
@@ -360,6 +360,10 @@ pub struct Watch {
 /// come up then.
 pub const OUTRO_WAIT: f32 = 7.0;
 
+/// The longest the outro's wait holds on a race with an activity, should its tip never fade in (no
+/// laps, no scene picked): past the longest outro scene's tip (12.49 s less 2.05) and its fade.
+pub const OUTRO_BACKSTOP: f32 = 20.0;
+
 impl Watch {
     /// What changed on `laps` since the last look, in the cards' list order, the Over last.
     pub fn look(&mut self, laps: &race::Laps) -> Vec<Change> {
@@ -402,13 +406,14 @@ impl Watch {
 
     /// A tick of the outro's wait: whether it ran out this tick. S480: on a race with an activity
     /// (`outro_up` is [`Race::outro_up`]) it runs out when the tip's popup has faded in over the
-    /// race, as the race's outro scene armed it; without one, [`OUTRO_WAIT`] after the Over.
+    /// race, as the race's outro scene armed it, or [`OUTRO_BACKSTOP`] after the Over if it never
+    /// does; without one, [`OUTRO_WAIT`] after the Over.
     pub fn wait(&mut self, dt: f32, outro_up: Option<bool>) -> bool {
         let Some(t) = &mut self.since_over else { return false };
         let was = *t;
         *t += dt;
         match outro_up {
-            Some(up) => up && !std::mem::replace(&mut self.outro_seen, true),
+            Some(up) => (up || *t >= OUTRO_BACKSTOP) && !std::mem::replace(&mut self.outro_seen, true),
             None => was < OUTRO_WAIT && *t >= OUTRO_WAIT,
         }
     }
@@ -844,18 +849,23 @@ mod tests {
         let ups = (0..600).map(|k| w.wait(1.0 / 30.0, Some(k >= 400))).collect::<Vec<_>>();
         assert_eq!(ups.iter().filter(|&&u| u).count(), 1);
         assert!(ups[400], "it runs out on the first tick up, past the 7 s");
+        // A popup that never comes: the backstop, once.
+        let mut w = Watch { since_over: Some(0.0), ..Watch::default() };
+        let ups = (0..900).map(|_| w.wait(1.0 / 30.0, Some(false))).collect::<Vec<_>>();
+        assert_eq!(ups.iter().filter(|&&u| u).count(), 1);
+        assert!(w.since_over.is_some_and(|t| t >= OUTRO_BACKSTOP));
     }
 
     /// S480: the outro scenes' lengths: each `[RaceEndDitties]` sound found on the stream list (a
     /// `.vag` first, then a `.vig`, ignoring case) takes its song's `Duration`; one not on the list
-    /// has nothing to play, a song with no `Duration` reads 0, and a file without the section none.
+    /// has nothing to play, nor has a song with no `Duration`, and a file without the section none.
     #[test]
     fn the_outro_lengths_are_the_ditties_streams_durations() {
         let aud = "[RaceStart50]\nSound1 = x\n[RaceEndDitties]\nSound1 = UI\\1st_game\nSound2 = ui\\1ST_RACE.wav\nSound3 = UI\\gone\nSound4 = UI\\both\nSound6 = UI\\3rd_race\nSound8 = UI\\bare\n";
         let streams = "Aud\\Music\\song.vig\r\nAud\\UI\\1st_game.vig\nAud\\UI\\1st_race.vig\nAud\\UI\\both.vig\nAud\\UI\\both.vag\nAud\\UI\\3rd_race.vig\nAud\\UI\\bare.vig\n";
         let index = "[Song 1]\nDuration = 204.081894\n[Song 2]\nDuration = 12.488254\n[Song 3]\nDuration = 9.5\n[Song 4]\nDuration = 1.0\n[Song 5]\nDuration = 2.0\n[Song 6]\nFilename = Aud\\UI\\3rd_race.vig\nDuration = 8.514920\n[Song 7]\nSize = 4\n[Songs]\nNumberOfSongs = 7\n";
         let got = outro_lengths(aud, streams, index);
-        assert_eq!(got, vec![Some(F(12.488254)), Some(F(9.5)), None, Some(F(2.0)), None, Some(F(8.514920)), None, Some(F::ZERO)]);
+        assert_eq!(got, vec![Some(F(12.488254)), Some(F(9.5)), None, Some(F(2.0)), None, Some(F(8.514920)), None, None]);
         assert!(outro_lengths("[RaceStart50]\n", streams, index).is_empty());
     }
 
