@@ -212,6 +212,7 @@ mod hud;
 // What the CPU still draws over the GPU's picture (P44), as patches.
 mod loading;
 mod lobby;
+mod lobby_ride;
 // The join screen (P38's rules), which the front end's local game seats its players through (P43).
 mod join;
 mod menu;
@@ -988,6 +989,15 @@ fn flier_machine(up: Kind) -> Option<Machine> {
         Kind::Biplane => Some(Machine::Biplane),
         Kind::Kiowa => Some(Machine::Helicopter),
         _ => None,
+    }
+}
+
+/// An `--online-script` word's player (N27): `p2=monster` is this machine's second player's
+/// (1, `monster`), a bare word its first's.
+fn script_player(word: &str) -> (usize, &str) {
+    match word.strip_prefix('p').and_then(|w| w.split_once('=')) {
+        Some((n, w)) if n.parse::<usize>().is_ok_and(|n| n >= 1) => (n.parse::<usize>().expect("checked") - 1, w),
+        _ => (0, word),
     }
 }
 
@@ -3835,6 +3845,10 @@ struct Args {
     online: Option<String>,
     peers: Vec<String>,
     seats: Option<String>,
+    /// `--lobby host|host:SEATS|join:CODE` (N27): with no front end, meet in a LAN lobby room and
+    /// ride its ride, as the front end's lobby would start it; and that ride once started.
+    lobby: Option<lobby_ride::Ask>,
+    lobby_start: Option<lobby_ride::Started>,
     /// `--set WORD` (`race250a`) or the garage's pick (P37): which of the bike archive's sixteen
     /// `.phy` names the first player rides, the freeride's `Race125P` when neither says.
     set: Option<roster::Set>,
@@ -4184,6 +4198,29 @@ pub(crate) async fn run() -> Result<(), String> {
         if let Some(picks) = menu.ride_picks(args.players) {
             apply_picks(&mut args, &picks);
         }
+    }
+    // `--lobby` (N27): the lobby's ride, met with no front end, on the room's track and wrecks as
+    // the front end's lobby hands one to the ride.
+    if let Some(ask) = &args.lobby {
+        if args.online.is_some() || args.menu {
+            return Err("--lobby rides the lobby's ride: drop --online and --menu".into());
+        }
+        let mut pick = openmx_net::Pick::new(&args.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
+        pick.preset = args.wiring.presets[0] as u8;
+        let name = Some(roster::clean_rider_name(&args.look.name)).filter(|n| !n.is_empty()).unwrap_or_else(|| "Rider".into());
+        let start = lobby_ride::meet(ask, &args.track, &name, pick)?;
+        println!("lobby: start {} on {} as {}", start.room.taken(), start.room.track, start.me);
+        args.track = start.room.track.clone();
+        args.wrecks = start.room.wrecks;
+        args.air_wrecks = start.room.air_wrecks;
+        args.backwards_bail = start.room.backwards_bail;
+        // The disc's tricks, handling and fliers, which the room (no trick or handling pack) holds
+        // every seat to, and no quad or MX vs. ATV car the pick did not name.
+        args.tricks = Some(menu::Tricks::Original);
+        args.handling = Some(game_sim::handling::Handling::Original);
+        args.fliers = Some(false);
+        (args.atv, args.mxvatv_car) = (String::new(), String::new());
+        args.lobby_start = Some(start);
     }
     ride(args, None).await.map(|_| ())
 }
@@ -5576,13 +5613,19 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
     let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room.clone());
+    // or `--lobby`'s (N27), met with no front end
+    let headless_start = args.lobby_start.as_ref().map(|s| ((s.room.clone(), s.me.clone()), false));
+    let lobby_room = lobby_room.or_else(|| headless_start.as_ref().map(|((room, _), _)| room.clone()));
     // A ride from the lobby draws every seat's rider in their own look (N16): the room's picks are
     // the shell's other seats, this machine's first, each loaded as a split screen's other players
     // are, with no view of their own. A drop-in's seats come as the host takes it on, and are
     // dressed then.
     let mut lobby_riders: Option<usize> = None;
     let mut peer_dress = peer_looks::Dressed::default();
-    if let Some(((room, me), false)) = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref().map(|start| (start, s.front.menu.lobby.drop_in)))
+    if let Some(((room, me), false)) = shell
+        .as_deref()
+        .and_then(|s| s.front.menu.lobby.start.as_ref().map(|start| (start, s.front.menu.lobby.drop_in)))
+        .or(headless_start.as_ref().map(|(start, d)| (start, *d)))
         && let Some(others) = peer_looks::lobby_others(room, me, &own_pick(&args))
     {
         for (d, pick) in others.iter().enumerate() {
@@ -9037,7 +9080,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The race zone is closed while the first player starts on a machine.
     let seek_dat = game_sim::phy::Ini::parse(&hit_dat);
     let activity = if race_start.is_some() { game_sim::ai::seek::ACTIVITY_SINGLE_RACE } else { game_sim::ai::seek::ACTIVITY_FREESTYLE };
-    let zones_progress = if args.play.is_some() || args.online.is_some() || front.as_deref().is_some_and(|f| f.menu.lobby.start.is_some()) {
+    let zones_progress = if args.play.is_some()
+        || args.online.is_some()
+        || args.lobby_start.is_some()
+        || front.as_deref().is_some_and(|f| f.menu.lobby.start.is_some())
+    {
         track_progress::fresh()
     } else {
         let dir = front.as_deref().map_or_else(|| menu::store_dir(Disc::configured_path().ok().as_deref()), |f| f.dir.clone());
@@ -9212,6 +9259,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // handshake hashed — and the session goes over the lobby's connection.
     let from_lobby = front.as_deref().and_then(|f| f.menu.lobby.start.clone().zip(f.network.net()));
     let drop_in = front.as_deref().is_some_and(|f| f.menu.lobby.drop_in);
+    // or `--lobby`'s (N27), with its own disc files
+    let from_lobby = from_lobby.or_else(|| args.lobby_start.as_ref().map(|s| ((s.room.clone(), s.me.clone()), s.net.clone())));
+    let lobby_disc = front.as_deref().map(|f| f.network.disc.clone()).or_else(|| args.lobby_start.as_ref().map(|s| s.disc.clone()));
     // Where the ride starts, for a peer that drops in on it once it is opened online (N10).
     let spawn = world.seats[0].sim.clone();
     // The lobby's seats that start in the biplane (N18), each its pick's machine.
@@ -9225,7 +9275,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if head.is_some() || world.tape.is_some() || world.seats.len() != 1 {
                 return Err("dropping in on an online ride rides one player and no tape: drop --play, --record and --players".into());
             }
-            let disc = &front.as_deref().expect("from the lobby").network.disc;
+            let disc = lobby_disc.as_ref().expect("from the lobby");
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
             // on the room's handling (N21), as the host's machine reads it
@@ -9256,7 +9306,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if args.players != 1 {
                 return Err("an online ride from the lobby has one local player: drop --players".into());
             }
-            let disc = &front.as_deref().expect("from the lobby").network.disc;
+            let disc = lobby_disc.as_ref().expect("from the lobby");
             // the room's trick packs (MD19, MD77), laid over every seat's bike as on every machine
             let packs = args.room_tricks.as_ref().map(|(dir, ids)| trick_packs::on(dir, &trick_packs::ids_of_room(ids))).transpose()?.unwrap_or_default();
             // and the room's handling (N21), every seat's bike read from its pack
@@ -9381,6 +9431,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // How many of `--online-script`'s words have gone (K29).
     let mut online_scripted = 0usize;
     let mut online_gas = false;
+    // `--online-script`'s `pN=` words (N27): this machine's second player on, their machine wanted
+    // and Cross held, by player past the first.
+    let mut online_more: Vec<(Option<Kind>, bool)> = Vec::new();
     // `--online-script`'s `dress` (T3): this machine's first seat dressed again as a peer's, looked through.
     let mut online_redress = false;
     // In the browser (P204): the last ten seconds of the ride settled here that the page's console
@@ -9525,7 +9578,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // one this schedule gives offline), whatever the picture's rate. Each pass of the loop either
     // runs one tick the wall clock owes, or — owing none — draws, blended between the last two ticks.
     // `--online`'s `--frames` counts the session's ticks, below, and not the loop's frames (K10).
-    let mut pacer = pace::Pacer::new(pace::TICK, started).most(args.frames.filter(|_| args.online.is_none())).until(args.seconds);
+    let mut pacer = pace::Pacer::new(pace::TICK, started).most(args.frames.filter(|_| args.online.is_none() && args.lobby_start.is_none())).until(args.seconds);
     // What the tick before the last one showed, for the picture to blend from: each seat's pose,
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
@@ -10775,7 +10828,31 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let due = args.online_script[online_scripted..].iter().take_while(|(f, _)| u64::from(*f) <= on.ticks() + 1).count();
             online_scripted += due;
             for (_, word) in &args.online_script[online_scripted - due..online_scripted] {
+                // another local player's (N27): their machine and their Cross
+                if let (k @ 1.., picked) = script_player(word) {
+                    if online_more.len() < k {
+                        online_more.resize(k, (None, false));
+                    }
+                    match (picked, parse_switch_word(picked)) {
+                        ("gas", _) => online_more[k - 1].1 = true,
+                        ("lift", _) => online_more[k - 1].1 = false,
+                        (_, Ok((to, _))) => {
+                            online_more[k - 1].0 = Some(to);
+                            println!("vehicle: player {} {} at the next tick every machine agrees", k + 1, to.name());
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 match (word.as_str(), parse_switch_word(word)) {
+                    // A second player sits down on this machine (N20), as one on a free pad joins
+                    // from the pause, on the next pad seat's controller preset.
+                    ("sit", _) => {
+                        let preset = pad_seats.as_ref().map_or(args.wiring.presets[0], |s| s.preset(args.pad_seat(online_mine.len().max(1))));
+                        if let Err(why) = on.sit(preset as u8) {
+                            println!("online: cannot add a player: {why}");
+                        }
+                    }
                     ("gas", _) => online_gas = true,
                     ("lift", _) => online_gas = false,
                     ("dress", _) => online_redress = true,
@@ -10805,6 +10882,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         true => Report::idle(),
                         // Cross held down by `--online-script` (S249).
                         false if k == 0 && online_gas => Report::from_buttons(0x0040),
+                        // and another local player's by its `pN=gas` (N27)
+                        false if k > 0 && online_more.get(k - 1).is_some_and(|m| m.1) => Report::from_buttons(0x0040),
                         false => world.seats[k].reports[0],
                     };
                     // The machine this player picked and their biplane scheme, which every machine
@@ -10814,7 +10893,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // every machine's step reads too.
                     pad.0[net::SWITCH] =
                         vehicle::Wanted {
-                            to: if k == 0 { online_want } else { None },
+                            to: if k == 0 { online_want } else { online_more.get(k - 1).and_then(|m| m.0) },
                             every_bank: scheme.0,
                             round_stick: scheme.1,
                             dpad_rides: !world.seats[k].markers,
@@ -13795,7 +13874,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Online, the session's ticks: the loop's frames go on the wall clock, waiting for a peer
         // still loading or stalled for its pads, so N of them were a shorter ride the busier the
         // machine (K10), and `--frames` is the same run on any machine.
-        let ridden = online.as_ref().filter(|_| args.online.is_some()).map_or(pacer.ticks(), online::Online::ticks);
+        let ridden = online.as_ref().filter(|_| args.online.is_some() || args.lobby_start.is_some()).map_or(pacer.ticks(), online::Online::ticks);
         if args.frames.is_some_and(|n| ridden >= u64::from(n)) {
             break;
         }
@@ -17477,6 +17556,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         online: None,
         peers: Vec::new(),
         seats: None,
+        lobby: None,
+        lobby_start: None,
         set: None,
         others: Vec::new(),
         look: roster::Look::default(),
@@ -17815,11 +17896,16 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
             "--online-script" => {
-                let bad = || "--online-script: FRAME:WORD,... (a machine, biplane@pack/skin, gas, lift or dress)".to_string();
+                let bad = || "--online-script: FRAME:WORD,... (a machine, biplane@pack/skin, gas, lift, dress or sit, or pN=WORD)".to_string();
                 for pair in next("frame:word pairs")?.split(',') {
                     let (f, word) = pair.split_once(':').ok_or_else(bad)?;
                     let word = word.trim();
-                    if !["gas", "lift", "dress"].contains(&word) && parse_switch_word(word).is_err() {
+                    let (k, picked) = script_player(word);
+                    let ok = match k {
+                        0 => ["gas", "lift", "dress", "sit"].contains(&picked) || parse_switch_word(picked).is_ok(),
+                        _ => ["gas", "lift"].contains(&picked) || parse_switch_word(picked).is_ok_and(|(_, pick)| pick.is_none()),
+                    };
+                    if !ok {
                         return Err(bad());
                     }
                     args.online_script.push((f.trim().parse().map_err(|_| bad())?, word.to_string()));
@@ -18023,6 +18109,10 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--online" => args.online = Some(next("this machine, like host@0.0.0.0:7000")?),
             "--peer" => args.peers.push(next("another machine, like g@192.168.1.20:7000")?),
             "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
+            "--lobby" => {
+                args.lobby = Some(lobby_ride::Ask::parse(&next("host, host:SEATS or join:CODE")?)?);
+                args.ride_flag = true;
+            }
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
             "--set" => {
                 let w = next("one of the bike sets, like race250p")?;
@@ -18223,7 +18313,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --online-script F:WORD,... online, picks a machine (bike, biplane, buggy,\n\
                      monster, baja, or biplane@pack/skin) at session tick F, or holds Cross\n\
                      (gas) or lets it go (lift), or dresses this machine's seat again as a\n\
-                     peer's (dress);\n\
+                     peer's (dress), or sits a second local player in a lobby's ride (sit);\n\
+                     pN=WORD picks or holds for this machine's Nth player (p2=monster);\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\
@@ -18261,7 +18352,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      rides with the other machines over UDP, one bike a seat (up to eight; the\n\
                      first named is the host). This machine's pad rides its first seat, and its\n\
                      other seats stand idle until there are more local pads. Online there is no\n\
-                     freeze, no swap and no tape; a desync is written under context/net."
+                     freeze, no swap and no tape; a desync is written under context/net.\n\
+                     --lobby host[:SEATS] hosts a LAN lobby room on --track and starts its ride\n\
+                     once every seat is taken and ready (it says `lobby: code CODE`); --lobby\n\
+                     join:CODE joins that room: the lobby's ride with no front end."
                 );
                 return Ok(None);
             }
