@@ -210,3 +210,17 @@ fn every_race_is_drawn_afresh_and_its_tape_keeps_the_draw() {
     let Some(pinned) = ride_for("1", &["--race", "--racers", "4", "--race-seed", &recorded]) else { return };
     assert_eq!(dressed(&pinned), dressed(&first), "--race-seed {recorded} dressed otherwise");
 }
+
+/// P382: the race's AI riders' bodies, lent to their riders' steps (B43), go to the sim thread with
+/// the world, and the ride is the same tick for tick: every tick's state hash, the thread on and off.
+#[test]
+fn a_races_ticks_with_lent_ai_bodies_on_the_sim_thread_are_the_same_ride() {
+    let race = |mode: &str| ride(&["--race", "--laps", "3", "--racers", "4", "--trace-hash", "--sim-thread", mode]);
+    let (Some(off), Some(on)) = (race("off"), race("on")) else { return };
+    let hashes = |said: &str| -> Vec<String> { said.lines().filter(|l| l.starts_with("tick ") && l.contains(" hash ")).map(str::to_string).collect() };
+    let (off_hashes, on_hashes) = (hashes(&off), hashes(&on));
+    assert!(off_hashes.len() >= 140, "{off}");
+    let there: usize = line(&on, "sim thread: ").and_then(|l| l.split_whitespace().nth(2)?.parse().ok()).unwrap_or_else(|| panic!("{on}"));
+    assert!(there + 2 >= on_hashes.len(), "{there} of {} ticks ran on the sim thread", on_hashes.len());
+    assert_eq!(off_hashes, on_hashes, "the sim thread's race parted from the loop's");
+}

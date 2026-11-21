@@ -10817,6 +10817,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             && landing.is_none()
             && online.is_none()
             && sim_worker.is_some()
+            // P382: a lent body's picture is drawn from a copy, which shares its clips. A seat off its
+            // bike has its pilot or driver posed by the picture, which binds and samples those clips
+            // (and moves their search hints) while the tick samples them; such ticks stay here.
+            && !(ragdolled.is_some()
+                && riding_ragdoll_on()
+                && world.seats.iter().zip(&rigs).any(|(s, r)| r.body.is_some() && s.sim.rider.ragdoll_kit.is_some() && s.garage.up != Kind::Bike))
             && pacer.ticks() > 0
             && !pacer.backlog(moment)
             && !args.frames.is_some_and(|n| pacer.ticks() + 1 >= u64::from(n))
