@@ -129,7 +129,6 @@ the `.res`, the PLN v7 `.trn`, the INI `.scn` and the `.col` (survey: github.com
 `notes/mxvatv.md`). openmx-mods turns their maps, and real elevation data, into track mods; these tasks are
 the port's half. The rule from AGENT.md holds: with no mods present the game is the original, and every
 replay hash is unchanged.
-- [~] **MD38** MX vs. ATV's data from its PC install as well as its PS2 disc (user, 2026-10-26): the Steam install's data/*.pak (tools/mxvatv_pak.py has the format) holds the same sim files byte for byte (research/mxvatv-pc.md). Let openmx-mods' importers (discx, import-tricks, import-mxvatv) and the port's pack loaders take either source, the PC's DirectX render formats (.dxt/.dxm/.dxg/.dx.trn) read or skipped and said so | files: tools/mxvatv_pak.py, crates/openmx/src/trick_packs.rs | test: openmx-mods' trick pack from the PC install equals the PS2 one byte for byte; tools/mxvatv_pak.py check passes on every pak | journal: mxvatv-pc-source BLOCKED: dropped (user, 2026-10-26): the port will run on mobile and in the browser, so it reads MX vs. ATV from the PS2 disc only; no second source for the PC paks. tools/mxvatv_pak.py stays as a research tool → data/*.pak · tools/mxvatv_pak.py · research/mxvatv-pc.md · .dxt/.dxm/.dxg/.dx.trn · crates/openmx/src/trick_packs.rs
 
 ### Follow-ups
 
