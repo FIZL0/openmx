@@ -1,4 +1,4 @@
-# 1 — parked car put back on restart (PART)
+# 1 — parked car put back on restart (FINAL)
 
 Task S500. 2026-11-21.
 
@@ -34,7 +34,10 @@ Task S500. 2026-11-21.
   is run twice, and `Parked::put_back` twice beside it. After each: store spot, nose, up and the body's
   position, quat, last quat, velocity and rates bit for bit (x, y, z; quat all four).
   - After one: quat 3d4d3378 3f3220f5 3cd26c82 3f374c7b, R67's bits.
-  - After two (three squarings): also bit for bit. This closes R67's "repeats past the second".
+  - After two (the third put-back, three squarings): also bit for bit. Past that was not run; each
+    put-back is the same code on the last one's store.
+  - The spot is the image's: the test checks the port's own to 1e-4 (the ground's last bits, 5e-5 ft, as
+    in S498's test) and then gives the port the image's, so the comparison is of the put-back alone.
 - The shell: `vehicle.rs` `a_restart_puts_the_parked_truck_back_from_its_store` (free09's truck on a
   flat floor): two Restarts leave the store squared twice more and the spot kept.
 
@@ -45,6 +48,9 @@ Task S500. 2026-11-21.
 - **What happens after a Restart's put-back.** The port settles the car with the load's 90 frames (the
   shell's Restart loads the ride again). Whether the original steps it before play again, or drops it
   in play, is not known. No live pause → Restart was recorded: no pad here (uinput is root-only).
+- **Restarts past the second** were not run in the interpreter (the third put-back was).
+- **The port's spot** is the ground's last bits (5e-5 ft in y) off the original's, as since S498; the
+  put-back keeps that offset.
 - **Store w lanes.** The original's stored nose and up have w = 1.0. The port's have the file nose's 0.
   The turn reads no w (S498 proved the quat).
 - **Other state the car's put-back clears** (tire state, engine words, car +0x2c0) is the port's fresh

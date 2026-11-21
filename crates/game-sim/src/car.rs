@@ -3262,8 +3262,9 @@ impl Parked {
     /// actor, which the pause menu's Restart runs). Its body is awake and where it last slept is
     /// where it now stands.
     ///
-    /// Proved in the interpreter on R52's free07 baja image (tests/car_spawn.rs): the body's place,
-    /// turn and store bit for bit after one and two of the original's world resets.
+    /// Proved in the interpreter on R52's free07 baja image (tests/car_spawn.rs): from the image's
+    /// store, the body's place, turn and the store bit for bit after one and two of the original's
+    /// world resets. The port's own spot is the ground's last bits off the original's (5e-5 ft).
     pub fn put_back(&mut self) {
         let Store { at, nose, up } = self.store;
         self.machine = Machine::new(&self.car, &self.model, at, nose, up);
