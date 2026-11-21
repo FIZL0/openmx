@@ -1,4 +1,4 @@
-# 1 — split thrown rider meets shared truck (PART)
+# 1 — split thrown rider meets shared truck (FINAL)
 
 Task F75c. 2026-11-21.
 
