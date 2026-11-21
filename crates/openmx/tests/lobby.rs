@@ -1740,3 +1740,43 @@ fn a_lobby_seat_that_picked_a_packs_plane_starts_the_ride_in_it() {
     seats[1] = "2P biplane".into();
     assert_eq!(start(false), (format!("online: fliers {}", seats.join(", ")), 0), "a pack some seat lacks: the ride's own");
 }
+
+/// P387a: the physics editor's handling mod goes in the lobby pick's packs as `handling/<id>`, after
+/// a flier's and a quad's; the flier and quad setters lay their own packs again and keep it, and none
+/// takes it out. The room's needs carry it, so the handshake holds every seat to it.
+#[test]
+fn the_lobby_pick_carries_the_handling_mod_through_the_flier_and_quad_setters() {
+    let (mut menu, _reader) = fresh("Hosty", "thq1");
+    menu.lobby.set_handling_mod(Some("phy_loose"));
+    assert_eq!(menu.lobby.pick.packs, "handling/phy_loose");
+    assert!(!menu.lobby.repick, "no room to tell");
+    let pack = openmx_net::Pack { kind: "machine".into(), id: "mxvatv_fliers".into(), hash: 7, name: "MX vs. ATV fliers 1.0.0".into(), how: String::new() };
+    let mut room = guest_room();
+    room.packs.insert(HOST.into(), vec![pack.clone()]);
+    room.packs.insert("guest-id".into(), vec![pack]);
+    menu.heard(Event::Room(room.clone()));
+    menu.set_fliers(vec![roster::Flier {
+        pack: "mxvatv_fliers".into(),
+        game: "MX vs. ATV Unleashed".into(),
+        machine: "biplane".into(),
+        skin: "biplane3".into(),
+        name: "Spitfire".into(),
+        model: 2,
+        about: String::new(),
+        why: None,
+        preview: None,
+    }]);
+    menu.lobby.set_machine("biplane");
+    menu.lobby.set_flier(Some(("mxvatv_fliers", "biplane3")));
+    assert_eq!(menu.lobby.pick.packs, "machine/mxvatv_fliers,handling/phy_loose", "the flier's pack laid, the mod kept");
+    menu.lobby.set_quad(None);
+    assert_eq!(menu.lobby.pick.packs, "machine/mxvatv_fliers,handling/phy_loose", "and the quad setter keeps it");
+    menu.lobby.repick = false;
+    menu.lobby.set_handling_mod(Some("phy_loose"));
+    assert!(!menu.lobby.repick, "the same mod is no change");
+    room.seats[0].as_mut().unwrap().pick = menu.lobby.pick.clone();
+    assert_eq!(room.needs(), vec!["machine/mxvatv_fliers".to_string(), "handling/phy_loose".to_string()]);
+    menu.lobby.set_handling_mod(None);
+    assert_eq!(menu.lobby.pick.packs, "machine/mxvatv_fliers");
+    assert!(menu.lobby.repick, "the changed pick goes out");
+}

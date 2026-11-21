@@ -295,6 +295,12 @@ impl DiscFiles {
         *self.mods.lock().unwrap() = mods;
     }
 
+    /// The mods folder the packs were hashed from ([`DiscFiles::tricks_from`]), none while the Mods
+    /// row is off: the one a lobby ride reads a seat's handling mod from (P387a).
+    pub fn mods(&self) -> Option<PathBuf> {
+        self.mods.lock().unwrap().clone()
+    }
+
     /// The player whose saved markers a ride this machine drops in on brings (P105): `profile`'s in
     /// the settings' folder `dir`. The front end's, every frame.
     pub fn bring_markers(&self, dir: &Path, profile: &str) {
