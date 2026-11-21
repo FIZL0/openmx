@@ -3847,6 +3847,9 @@ struct Args {
     /// Which rider archive to put on the bike, or `none` to ride an empty bike. Nothing on the disc
     /// names a rider — the choice is a menu's, and this shell has no menus.
     rider: String,
+    /// How many times the pause menu's Restart has loaded this ride again (S500): the parked cars
+    /// are put back once more each time ([`vehicle::InPlay::settled_after`]).
+    restarts: usize,
     /// The frame's size, from `--size`: the PS2-native 640x448 path and the tests. `None` draws at
     /// the window's own pixels — a window the size of the screen, and a frame that follows it.
     size: Option<(usize, usize)>,
@@ -4965,9 +4968,11 @@ async fn front_end(args: Args) -> Result<(), String> {
         if let Act::Ride(track) = &act {
             shell.front.reader.reset();
             let mut picked = false;
+            let mut restarts = 0;
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
+                a.restarts = restarts;
                 // A results picture not taken yet is the race's that is gone (P390).
                 results_photo = false;
                 // P327: the menu's Race, or none for its Free Ride.
@@ -5043,7 +5048,10 @@ async fn front_end(args: Args) -> Result<(), String> {
                 drop(ride_on);
                 shell.front.menu.loading = None;
                 match left {
-                    Ok(Leave::Restart) => continue,
+                    Ok(Leave::Restart) => {
+                        restarts += 1;
+                        continue;
+                    }
                     Ok(Leave::Menu) => break,
                     // A cancelled load is back on the pick (P127), which it has put on the screen.
                     Ok(Leave::Pick) => {
@@ -9516,7 +9524,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Off `machine.res` itself: the ride's cars are built without their collision files.
         let machine_res = (!lot.in_play.is_empty()).then(|| member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok())).flatten();
         let read = &mut |n: &str| machine_res.as_ref()?.read_suffix(n).ok();
-        let in_play = vehicle::InPlay::settled(&lot.in_play, &flying, read, &mut sim, &tables.ride);
+        // A Restart puts each car back from its store once more (S500).
+        let in_play = vehicle::InPlay::settled_after(&lot.in_play, &flying, read, &mut sim, &tables.ride, args.restarts);
         // And the fliers (F80, free06's helicopter, free10's plane), for the AI riders to sweep.
         let in_play = in_play.with_fliers(&lot.in_play, &lot.in_play_ground, &flying, read, &mut sim, &tables.ride);
         for k in 0..in_play.len() {
@@ -17982,6 +17991,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         bike: "125sx".to_string(),
         // The stock gear. Every other rider archive on the disc is a repaint of the same body.
         rider: "thq1".to_string(),
+        restarts: 0,
         size: None,
         scale: 1,
         seconds: None,

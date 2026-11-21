@@ -3165,6 +3165,17 @@ impl InPlay {
         spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
         tables: &game_sim::ride::Tables,
     ) -> InPlay {
+        InPlay::settled_after(spots, flying, read, world, tables, 0)
+    }
+
+    /// **The same after `restarts` pause-menu Restarts of the ride** (S500): each car put back that
+    /// many times more ([`game_sim::car::Parked::settled_after`]), so it is turned by its store
+    /// squared once more each time, as the original's world reset leaves it. The fliers' actor
+    /// reset leaves them alone (R67).
+    pub fn settled_after(
+        spots: &[(usize, Machine, Spawn)], flying: &[bool], read: &mut dyn FnMut(&str) -> Option<Vec<u8>>, world: &mut dyn World,
+        tables: &game_sim::ride::Tables, restarts: usize,
+    ) -> InPlay {
         let parked = spots
             .iter()
             .filter(|(slot, ..)| !flying.get(*slot).copied().unwrap_or(false))
@@ -3176,7 +3187,7 @@ impl InPlay {
                     return None;
                 };
                 let car = std::sync::Arc::new(c.car);
-                let p = game_sim::car::Parked::settled(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve);
+                let p = game_sim::car::Parked::settled_after(car, &c.model, rays, hull, world, spot.at, spot.facing, &tables.acos, &tables.curve, restarts);
                 Some((kind, p))
             })
             .collect();
@@ -5306,6 +5317,30 @@ mod in_play_tests {
         parked.hand_to(&mut sim, &[Kind::Buggy, Kind::Bike]);
         assert_eq!((sim.parked.len(), sim.parked_cars.len()), (1, 1), "back once nobody drives a truck");
         assert!(sim.parked_cars[0].awake(), "the truck came back as the Sim left it, woken");
+    }
+
+    /// S500: after two Restarts the truck's store is the load's squared twice more, and it is turned
+    /// by the once-more-squared pair before it settles again.
+    #[test]
+    fn a_restart_puts_the_parked_truck_back_from_its_store() {
+        use game_render::disc::Disc;
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let read = &mut |n: &str| machines.read_suffix(n).ok();
+        let tables = game_sim::ride::Tables::build();
+        let spots = in_play(FREE09.as_bytes());
+        let mut floor = game_sim::world::Flat { y: F(135.0), ..Default::default() };
+        let loaded = InPlay::settled(&spots, &[false], read, &mut floor, &tables);
+        let restarted = InPlay::settled_after(&spots, &[false], read, &mut floor, &tables, 2);
+        let (load, again) = (&loaded.parked[0].1.store, &restarted.parked[0].1.store);
+        let squared = |(n, u): (Vf, Vf)| game_sim::flight::spawn_axes(n, u);
+        let want = squared(squared((load.nose, load.up)));
+        assert_eq!((again.nose.to_bits(), again.up.to_bits()), (want.0.to_bits(), want.1.to_bits()), "the store squared twice more");
+        assert_eq!(again.at.to_bits(), load.at.to_bits(), "the spot is kept");
     }
 
     /// F80: free06's `[Machine1]` helicopter, at the file's height (`SetGroundHeight = FALSE`), settled
