@@ -1077,18 +1077,20 @@ struct PeerDress<'a> {
 /// jersey and the plates, its bike model's `.sub` — every model under names of its own (`@peer<n>`),
 /// which the GPU is handed after. Posed and drawn, with no view: its cameras are never looked through.
 fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, Vec<String>), String> {
-    dress_tagged(p, &format!("@peer{n}"), pick, None)
+    // An online peer rides a race with no AI rider out: those race only on a track ridden alone.
+    dress_tagged(p, &format!("@peer{n}"), pick, None, false)
 }
 
 /// [`dress_peer`] under model names ending `tag`, its name and number drawn in the fonts of `fonts_of`
-/// (a gear set and bike) where that is not the pick's own (P374: a race's AI rider's).
-fn dress_tagged(p: &mut PeerDress, tag: &str, pick: &roster::Pick, fonts_of: Option<(&str, &str)>) -> Result<(Rig, Vec<String>), String> {
+/// (a gear set and bike) where that is not the pick's own (P374: a race's AI rider's), its body on
+/// the AI set's clip names when `ai_out` (V136, [`Body::load_in`]).
+fn dress_tagged(p: &mut PeerDress, tag: &str, pick: &roster::Pick, fonts_of: Option<(&str, &str)>, ai_out: bool) -> Result<(Rig, Vec<String>), String> {
     let mut made = Vec::new();
     let theirs = member_ending(p.disc, &format!("{}.res", pick.rider)).ok();
     let body = match (p.rider_member, &theirs) {
         (None, _) => None,
-        (Some(_), Some(member)) => Body::load(vec![p.disc.res(member)?], &pick.rider, Sex::Male, "", p.stunts, p.motion).ok(),
-        (Some(member), None) => Body::load(vec![p.disc.res(member)?], &p.own.rider, Sex::Male, "", p.stunts, p.motion).ok(),
+        (Some(_), Some(member)) => Body::load_in(vec![p.disc.res(member)?], &pick.rider, Sex::Male, "", p.stunts, p.motion, ai_out).ok(),
+        (Some(member), None) => Body::load_in(vec![p.disc.res(member)?], &p.own.rider, Sex::Male, "", p.stunts, p.motion, ai_out).ok(),
     };
     let body = body.map(|mut b| {
         if let Some((clips, stunts)) = p.pack {
@@ -1268,6 +1270,33 @@ fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Ga
 /// seats', who take the first.
 fn race_ai_lanes(grid: &[(Vf, Vf)], seats: usize) -> &[(Vf, Vf)] {
     grid.get(seats..).unwrap_or(&[])
+}
+
+/// V136: whether a race of `racers` with `seats` riders on this track has AI riders out, said before
+/// its grid is laid (the bodies load first): its lanes past the seats', which the AI riders take
+/// offline or online alone ([`race_ai_lanes`]). Every body of such a session takes the AI set's clip
+/// names ([`Body::load_in`]). A track with no start gate lays no grid and puts none out after all.
+fn race_puts_ai_out(racers: Option<u32>, seats: usize, online: bool) -> bool {
+    racers.is_some_and(|r| (!online || seats == 1) && (r as usize).min(game_sim::race::LANES) > seats)
+}
+
+#[cfg(test)]
+mod race_ai_out {
+    use super::race_puts_ai_out;
+
+    /// A race of more racers than seats has AI riders out, offline or online alone; a free ride, a
+    /// race the seats fill, and an online race of two seats have none.
+    #[test]
+    fn a_race_with_lanes_past_the_seats_puts_ai_riders_out() {
+        assert!(race_puts_ai_out(Some(4), 1, false));
+        assert!(race_puts_ai_out(Some(4), 2, false));
+        assert!(race_puts_ai_out(Some(4), 1, true));
+        assert!(!race_puts_ai_out(None, 1, false));
+        assert!(!race_puts_ai_out(Some(1), 1, false));
+        assert!(!race_puts_ai_out(Some(2), 2, false));
+        assert!(!race_puts_ai_out(Some(4), 2, true));
+        assert!(!race_puts_ai_out(Some(20), 8, false), "eight lanes, all seats");
+    }
 }
 
 /// P350: the race player seat `seat` rides as, the race's Sim being the first seat's with `players`
@@ -6183,11 +6212,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // `.phy` — the same `Params` the simulation's own driver runs on.
     // What the pack's clips left unbound on the first body and chassis (MD21), for the line below.
     let mut pack_missing: (Option<Vec<String>>, Option<Vec<String>>) = (None, None);
+    // V136: a race with AI riders out poses every body on the AI set's clip names.
+    let ai_out = race_puts_ai_out(args.race.as_ref().map(|r| r.riders), riders, args.online.is_some());
     let mut body = match &rider_member {
         None => None,
         Some(member) => {
             let own = vec![disc.res(member)?];
-            match Body::load(own, &args.rider, Sex::Male, "", &table.stunts, phy.motion()) {
+            match Body::load_in(own, &args.rider, Sex::Male, "", &table.stunts, phy.motion(), ai_out) {
                 Ok(mut body) => {
                     pack_missing.0 = pack_clips.as_ref().map(|p| body.add_pack(p, &stunts.stunts));
                     Some(body)
@@ -8085,6 +8116,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // the first's are opened twice — each animation set reads members as its own machine asks.
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
+    // V136: the first body's choice of clip names, for every body loaded after it.
+    let ai_out = race_puts_ai_out(args.race.as_ref().map(|r| r.riders), riders, args.online.is_some());
     for i in 1..riders {
         if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
             return Ok(leave);
@@ -8095,10 +8128,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let body = match (&rider_member, own_rider) {
             (None, _) => None,
             (Some(_), Some((name, member))) => {
-                Body::load(vec![disc.res(member)?], name, Sex::Male, "", &table.stunts, motion).ok()
+                Body::load_in(vec![disc.res(member)?], name, Sex::Male, "", &table.stunts, motion, ai_out).ok()
             }
             (Some(member), None) => {
-                Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, motion).ok()
+                Body::load_in(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, motion, ai_out).ok()
             }
         };
         let body = body.map(|mut b| {
@@ -8345,7 +8378,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     car_cameras: &car_cameras,
                 };
                 let fonts_of = own.as_ref().map(|(u, b)| (u.as_str(), b.as_str()));
-                match dress_tagged(&mut dress, &format!("@ai{}", k + 1), pick, fonts_of) {
+                match dress_tagged(&mut dress, &format!("@ai{}", k + 1), pick, fonts_of, true) {
                     Ok((rig, _)) => {
                         println!("race: AI rider {} is {} {} in {} on {}", k + 2, pick.look.number, pick.look.name, pick.rider, pick.bike);
                         let Rig { body, chassis, bike_model, parts, body_model, .. } = rig;
@@ -8357,7 +8390,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             let body = match &rider_member {
                 None => None,
-                Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+                Some(member) => Body::load_in(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion(), true).ok(),
             };
             let body = body.map(|mut b| {
                 if let Some(p) = &pack_clips {
@@ -10567,7 +10600,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         garage.in_play = world.seats[0].garage.in_play.fresh();
                         garage.modify(&lot, &mods, i);
                         let body = match &rider_member {
-                            Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+                            Some(member) => Body::load_in(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion(), ai_out).ok(),
                             None => None,
                         };
                         let body = body.map(|mut b| {

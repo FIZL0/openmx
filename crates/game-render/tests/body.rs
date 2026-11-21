@@ -103,6 +103,36 @@ fn body(disc: &mut Disc, set: &Stunts24, phy: &Phy) -> Body {
     }
 }
 
+/// **V136 — the grid rows a race with AI riders binds.** The original's race-start RAM images with
+/// AI riders out (C31's and S282c's sx01, C40's sx17) hold `turn_stop_mid.mot`'s keys three times
+/// and `turn_stop_fwd.mot`'s and `turn_stop_bck.mot`'s not at all, and `turn_still_bck.mot`'s once:
+/// `airider.mcf`'s claims. S133's sx01 race with one racer, and every free-ride image, hold all
+/// three stop files and `turn_still_mid.mot` twice: the player's own `.mcf` (V121). A body loaded
+/// beside AI riders binds the first; one loaded alone, the second.
+#[test]
+fn a_body_beside_ai_riders_binds_the_ai_sets_grid_rows() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let member = |body: &Body, name: &str| {
+        let id = body.rig.set.id(name).unwrap_or_else(|| panic!("{name} is not bound"));
+        body.rig.set.get(id).expect("bound").member.to_ascii_lowercase()
+    };
+    let rows = ["turn_stop_Fwd", "turn_stop_Bck", "turn_still_Bck"];
+    for (ai_out, files) in [
+        (true, ["turn_stop_mid.mot", "turn_stop_mid.mot", "turn_still_bck.mot"]),
+        (false, ["turn_stop_fwd.mot", "turn_stop_bck.mot", "turn_still_mid.mot"]),
+    ] {
+        let body = Body::load_in(vec![rider_res(&mut disc)], A_RIDER, Sex::Male, "", &set.stunts, p.motion(), ai_out)
+            .expect("the body loads");
+        for (row, file) in rows.iter().zip(files) {
+            let got = member(&body, row);
+            assert!(got.ends_with(file), "AI riders out {ai_out}: {row} was read from {got}, the original's from {file}");
+        }
+    }
+}
+
 /// **V8.** Every gesture slot and every airborne pose of a real rider binds to a clip in the
 /// rider's own set.
 ///

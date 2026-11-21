@@ -821,11 +821,31 @@ impl Body {
         stunts: &[Stunt],
         params: Params,
     ) -> Result<Body, String> {
+        Self::load_in(archives, name, sex, prefix, stunts, params, false)
+    }
+
+    /// [`Body::load`] for a session with AI riders on the track or not (`ai_out`, V136). With them,
+    /// every body of the session — the AI riders' and the human's — takes the clip names
+    /// `airider.mcf` claimed first, as the original's one animation set has them once an AI body is
+    /// built (V14): `turn_stop_Fwd` and `turn_stop_Bck` play `turn_stop_Mid`, and `turn_still_Bck`
+    /// its own clip. Without them, the rider's own `.mcf` (V121).
+    pub fn load_in(
+        archives: Vec<Res>,
+        name: &str,
+        sex: Sex,
+        prefix: &str,
+        stunts: &[Stunt],
+        params: Params,
+        ai_out: bool,
+    ) -> Result<Body, String> {
         let rider = Rider::load(&archives, name, sex)?;
         let mut set = Set::load(archives, &rider.mcf)?;
-        // The port builds no AI rider's body, so nothing has claimed a clip name before this set
-        // reads its own `.mcf` (V121): the player's rider takes its own three grid aliases.
-        set.alone();
+        // With no AI rider out, nothing has claimed a clip name before this set reads its own `.mcf`
+        // (V121): the player's rider takes its own three grid aliases. With AI riders out the AI set
+        // was built first and its claims stand, which is the archive order `Set::load` keeps (V14).
+        if !ai_out {
+            set.alone();
+        }
         // The set's own motions first — the airborne poses, the turns and the idles are all in the
         // `.mcf` — and then the gesture slots, which are in no `.mcf` and are found by name.
         set.load_listed();
