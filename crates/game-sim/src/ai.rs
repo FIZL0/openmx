@@ -384,6 +384,10 @@ const INV_TWO_PI: f32 = 0.15915494;
 pub const CURVE_STEP: f32 = 0.0010473721;
 pub const CURVE_INV_STEP: f32 = 954.77045;
 
+/// S496: the lifted ground controller (`game_lift::bridge::controls`), which [`controls`] hands its
+/// work to once the shell sets it (`--ai`). Unset, the port runs; the two agree to the bit.
+pub static LIFTED: std::sync::OnceLock<fn(&Tables, &Situation, &Tuning) -> Controls> = std::sync::OnceLock::new();
+
 /// `a` less whole turns, then held to −π..π, with the original's tests: `<= π` first, `< −π` only if
 /// that passed.
 fn wrap_turn(a: F) -> F {
@@ -488,6 +492,9 @@ fn signed_angle(fine: &FineAcos, across: F, along: F) -> F {
 /// * Under the target speed by more than the slow tolerance the throttle is wide open; over it by
 ///   more than the fast tolerance the brake is on, fully or graded; in between it coasts or cruises.
 pub fn controls(tables: &Tables, at: &Situation, tune: &Tuning) -> Controls {
+    if let Some(lifted) = LIFTED.get() {
+        return lifted(tables, at, tune);
+    }
     let curve = &tables.curve;
     let target_speed = if at.target_speed < at.min_speed { at.min_speed } else { at.target_speed };
 

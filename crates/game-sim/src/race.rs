@@ -102,6 +102,10 @@ pub enum Crossing {
     Open = 4,
 }
 
+/// S496: the lifted crossing test (`game_lift::bridge::crossed`), which [`Gate::crossed`] hands its work
+/// to once the shell sets it (`--ai`). Unset, the port runs; the two agree to the bit.
+pub static LIFTED: std::sync::OnceLock<fn(&Gate, Vf, Vf) -> Crossing> = std::sync::OnceLock::new();
+
 /// The FPU's three-term dot product: `mula` x, `madda` y, `madd` z.
 fn dot3(a: Vf, b: Vf) -> F {
     F(fpu::madd(fpu::madda(fpu::mula(a.x(), b.x()), a.y(), b.y()), a.z(), b.z()))
@@ -125,6 +129,9 @@ impl Gate {
     /// going the gate's way — or either way with [`flags::EITHER_WAY`] — is [`Crossing::Through`], and
     /// one going the other way is [`Crossing::Not`].
     pub fn crossed(&self, from: Vf, to: Vf) -> Crossing {
+        if let Some(lifted) = LIFTED.get() {
+            return lifted(self, from, to);
+        }
         if self.flags & flags::CLOSED == 0 {
             return Crossing::Open;
         }
