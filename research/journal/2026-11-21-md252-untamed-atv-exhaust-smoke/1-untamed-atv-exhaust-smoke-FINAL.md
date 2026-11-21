@@ -37,11 +37,15 @@ not from SLUS-21701's code.
 
 ## Not verified / not 1:1
 
-- **Not seen.** No shot or PCSX2 comparison was taken. The smoke rides the same matrix the part is drawn
-  at, so it should come out of the drawn pipe, but nobody looked.
-- **How SLUS-21701 finds the node was not read.** The port takes the first part model with the name. The
-  bike's exhaust rig (`particles::sim_rig`) leaves the part's root local out; here the root is the
-  identity, so the two agree for this pack, but a part with a moved root would differ.
+- **Not picked out by eye.** One shot at tick 36 (`context/shots/md252/view.png`, software renderer)
+  shows a grey trail behind the quad, but the few puffs can't be told from the tire dust at that size. No
+  PCSX2 comparison. The smoke rides the same matrix the part is drawn at, so it should leave the drawn pipe.
+- **How SLUS-21701 finds the node was not read.** The port takes the first part model with the name, and
+  composes all of that part's nodes, its root's local included. The bike's exhaust rig
+  (`particles::sim_rig`) leaves the part root's local out instead. Here the root is the identity, so the
+  two agree for this pack; which one Untamed does was not checked.
+- **Placement `bike`** (not a chassis node) hangs the part at the quad's scene node, as the shell draws
+  the part. Not checked against SLUS-21701.
 - **The 450F build was not ridden.** Its exhaust part has the same node name, but the pack's `mod.json`
   lists only the KTM 250 build.
 - **Other seats' quads** online use this machine's hangs, as they used its chassis nodes before.
