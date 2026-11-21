@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 ps2-float = { path = "../ps2-float" }
+# Only for the bridge's types: the sim's rider in, its controls out.
+game-sim = { path = "../game-sim" }
 
 [dev-dependencies]
 # Test-only, as in game-sim: each lifted function is proved by running the original on the same bytes.

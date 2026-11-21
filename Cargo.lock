@@ -1458,6 +1458,7 @@ dependencies = [
 name = "game-lift"
 version = "0.18.0"
 dependencies = [
+ "game-sim",
  "ps2-float",
  "ps2-oracle",
 ]
@@ -3630,6 +3631,7 @@ dependencies = [
  "bincode",
  "cpal",
  "evdev",
+ "game-lift",
  "game-render",
  "game-sim",
  "ggrs",

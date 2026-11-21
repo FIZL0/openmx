@@ -14,6 +14,7 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact lift bit-exact
 
 pub mod ai;
+pub mod bridge;
 pub mod gate;
 
 use ps2_float::{F, Vf};
@@ -39,6 +40,12 @@ impl Mem {
     /// 32 MiB of zeros.
     pub fn new() -> Mem {
         Mem { bytes: vec![0; RAM] }
+    }
+
+    /// `len` bytes of zeros: a memory for a bridge, which lays out only the few objects a lifted
+    /// function reads.
+    pub fn sized(len: usize) -> Mem {
+        Mem { bytes: vec![0; len] }
     }
 
     /// A RAM image as the original left it (a save state's, or the oracle's after a call).

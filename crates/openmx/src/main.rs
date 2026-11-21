@@ -17639,6 +17639,17 @@ fn parse_args() -> Result<Option<Args>, String> {
                     r.riders = n.clamp(1, menu::race::MOST_RIDERS);
                 }
             }
+            // S496: a race on Supercross01 (a later `--track` moves it) with this many AI riders, their
+            // ground controller and the start gate's crossing test run by the lift (game-lift) in place
+            // of the ports.
+            "--ai" => {
+                let n: u32 = next("a number of AI riders")?.parse().map_err(|e| format!("{a}: {e}"))?;
+                args.race.get_or_insert_with(menu::RaceSetup::default).riders = (n + 1).clamp(1, menu::race::MOST_RIDERS);
+                args.track = "sx01".to_string();
+                args.ride_flag = true;
+                _ = game_sim::ai::LIFTED.set(game_lift::bridge::controls);
+                _ = game_sim::race::LIFTED.set(game_lift::bridge::crossed);
+            }
             "--race-bot" => args.race_bot = true,
             "--race-seed" => {
                 let n = next("a number")?;
