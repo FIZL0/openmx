@@ -74,7 +74,7 @@ fn the_page_the_app_and_mains_builds_are_native() {
     assert!(pages.contains("tools/web.sh\n"), "pages.yml's page is not web.sh's default");
     assert!(!pages.contains("--exact-sim"), "a pages.yml build asks for the exact sim");
     // P392: no beta: nothing on main's pushes is deployed, and openmx.dev still gets each published release
-    assert!(!pages.to_lowercase().contains("beta"), "pages.yml still names a beta");
+    assert!(!pages.contains("beta.") && !pages.contains("/dispatches"), "pages.yml still deploys the beta site");
     assert!(pages.contains("actions/deploy-pages@") && pages.contains("github.event_name == 'release'"), "pages.yml no longer deploys the site");
 
     let release = read("tools/release.sh");

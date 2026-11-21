@@ -1,4 +1,4 @@
-# 1 — stop the beta (PART)
+# 1 — stop the beta (FINAL)
 
 Task P392. 2026-11-21. User: 'stop deploying beta builds and remove the beta links from repo'.
 
