@@ -1,4 +1,4 @@
-# 1 — first person roll on screen (PART)
+# 1 — first person roll on screen (FINAL)
 
 Task V137. 2026-11-21.
 
@@ -11,7 +11,8 @@ Task V137. 2026-11-21.
   Camera it draws. The wreck camera and the thrill camera clear it again when they take the screen.
 - The sky's rays (software `Sky::draw` and the GPU's sky) and the sun flare's basis take the view's up
   too, so the sky tilts with the ground. Before, they always used the world's up; photo mode's roll had the
-  same gap and is fixed by the same change.
+  same gap and is fixed by the same change. The spec review called this outside the task's file list. I
+  kept it: a sky that stays level over tilted ground is not a drawn roll.
 - Every other `Camera { … }` literal got `up: None` (48 sites, no change in what they draw).
 
 ## What the original does
@@ -37,6 +38,9 @@ P384's journal has the first-person camera: its up is rolled by `ObjectRollScale
 - The drawn tilt was not compared with a PCSX2 frame of the original's first-person view. Reason: only the
   shell's own up is drawn here; P384 did not prove the up's numbers against the original either (see its
   journal).
+- No test covers the shell's own wiring in `main.rs` (first-person up into the Camera, cleared by the
+  wreck and thrill cameras). Reason: that code sits in the shell's frame loop, which tests cannot reach.
+  The by-eye shots cover it.
 - No before/after shot of the same frame on main. Reason: the test's `up: None` case is that comparison.
 - The audio listener's right (`main.rs` `listener`) still uses the world's up, so sound does not roll with
   the camera. Reason: left alone, as it is not part of the picture.
