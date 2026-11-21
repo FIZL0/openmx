@@ -1,4 +1,4 @@
-# 1 — split wreck bike meets shared truck (PART)
+# 1 — split wreck bike meets shared truck (FINAL)
 
 Task F75. 2026-11-21.
 
@@ -43,6 +43,11 @@ tick for 12 ticks from the wreck.
 - A flown plane, a driven car, AI riders and the bones still do not meet the shared cars in split
   screen (filed F75a, S499, F75b, F75c). So the test stops comparing before the bones would wake the
   truck.
+- In split screen the wreck bike meets the cars at the start of the seat's pass, before its Sim's step.
+  A lone Sim does it inside its step, after the steps that come before each player's frame there
+  (event frame, AI cards, contacts, prop strike). None of those touch the wreck bike. Only a straight
+  60 ft/s wreck with one seat downed is tested. Two seats' wreck bikes on the same car in one tick are
+  not tested.
 
 ## Next
 
