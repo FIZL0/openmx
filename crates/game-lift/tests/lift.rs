@@ -5,8 +5,8 @@
 //! Inputs are written into both memories through one helper, so a case is the same bytes on both
 //! sides by construction; nothing is translated into a port's own types and back.
 
-use game_lift::{Mem, gate};
-use ps2_oracle::{Ee, addr, game_or_skip, skip};
+use game_lift::{Mem, ai, gate};
+use ps2_oracle::{Ee, Kit, addr, game_or_skip, skip};
 
 const BUDGET: u64 = 200_000;
 
@@ -166,6 +166,136 @@ fn gate_case(b: &mut Both, p: &mut Pick) {
     };
     b.quad(p, FROM, from);
     b.quad(p, TO, to);
+}
+
+/// The free09 save-state's RAM, three AI riders on the ground controller, with gp set.
+const STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
+const RIDERS: [u32; 3] = [0x0148_3eb0, 0x00c6_4000, 0x0104_8000];
+
+fn state() -> Option<Ee> {
+    let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
+    let path = kit.ctx("states").join(STATE);
+    if !path.exists() {
+        skip(&format!("{} is not there: `./kit state ram` of recording2.p2m2_SaveState.p2s", path.display()));
+        return None;
+    }
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    Some(ee)
+}
+
+fn tables() -> ai::Tables {
+    ai::Tables {
+        curve: addr("curve_table_ptr").unwrap(),
+        curve_scale: addr("curve_table_invstep").unwrap(),
+        curve_step: addr("curve_table_step").unwrap(),
+        acos: addr("fine_acos_table").unwrap(),
+    }
+}
+
+/// The rider's floats the controller reads, and the range a case draws each from.
+const READS: [(u32, f32, f32); 23] = [
+    (0x70, -6.0, 6.0),
+    (0x74, -6.0, 6.0),
+    (0x80, 0.0, 120.0),
+    (0xc4, -20.0, 40.0),
+    (0x204, -20.0, 20.0),
+    (0x1e0, 0.0, 120.0),
+    (0x254, 0.0, 60.0),
+    (0xf4, -1.5, 1.5),
+    (0x100, -2.0, 2.0),
+    (0x104, -2.0, 2.0),
+    (0x208, -3.0, 3.0),
+    (0x21c, -3.0, 3.0),
+    (0x260, -5.0, 20.0),
+    (0x264, -5.0, 20.0),
+    (0x2b4, -2.0, 30.0),
+    (0x2d0, -3.0, 3.0),
+    (0x2d4, -3.0, 3.0),
+    (0x2d8, -0.5, 1.5),
+    (0x2ec, -8.0, 8.0),
+    (0x32c, -0.1, 0.1),
+    (0x330, -1.0, 1.0),
+    (0x334, -1.0, 1.0),
+    (0xa4, -1.0, 1.0),
+];
+
+/// The rider's quadwords the controller reads: up, forward, the direction asked for, the ground ahead.
+const QUADS: [u32; 4] = [0xa0, 0xb0, 0x1d0, 0x2c0];
+
+#[test]
+fn the_lifted_ground_controller_matches_on_the_three_riders_as_they_are() {
+    let Some(ee) = state() else { return };
+    let controls = addr("ai_controls").unwrap();
+    let t = tables();
+    let mut b = Both::new(ee);
+    for ai in RIDERS {
+        b.ee.call(controls, &[u64::from(ai)], &[], BUDGET);
+        assert_eq!(b.ee.v0(), 1);
+        assert_eq!(ai::controls(&mut b.mem, &t, ai), 1);
+        b.same(ai, ai + 0x400, &format!("rider {ai:#x}"));
+    }
+}
+
+#[test]
+fn the_lifted_ground_controller_matches_over_ten_thousand_cases() {
+    let Some(ee) = state() else { return };
+    let controls = addr("ai_controls").unwrap();
+    let t = tables();
+    let mut b = Both::new(ee);
+    let mut p = Pick(0x9e37_79b9_7f4a_7c15);
+    let saved: Vec<Vec<u32>> =
+        RIDERS.iter().map(|&ai| (0..0x100).map(|k| b.mem.u32(ai + 4 * k)).collect()).collect();
+    let mut paths = [0usize; 4];
+    for case in 0..10_000 {
+        let r = p.below(3) as usize;
+        let ai = RIDERS[r];
+        for (k, w) in saved[r].iter().enumerate() {
+            b.u32(ai + 4 * k as u32, *w);
+        }
+        // One case in five carries words no rider holds.
+        let wild = p.below(5) == 0;
+        let mut put = |b: &mut Both, p: &mut Pick, a: u32, x: f32| {
+            if wild { b.f(p, a, x) } else { b.u32(a, x.to_bits()) }
+        };
+        let flags = saved[r][0x30 / 4] & !0x3001_0020 | (p.next() as u32 & 0x3001_0020);
+        b.u32(ai + 0x30, flags);
+        for (o, lo, hi) in READS {
+            if p.below(4) != 0 {
+                let x = p.range(lo, hi);
+                put(&mut b, &mut p, ai + o, x);
+            }
+        }
+        for o in QUADS {
+            if p.below(3) != 0 {
+                let v = unit_vector(&mut p);
+                let s = if o == 0x1d0 { p.range(0.1, 50.0) } else { 1.0 };
+                for (k, x) in v.iter().enumerate() {
+                    put(&mut b, &mut p, ai + o + 4 * k as u32, x * s);
+                }
+            }
+        }
+        // Sometimes right at the landing height, where the original compares twice.
+        if p.below(10) == 0 {
+            let h = b.mem.f(ai + 0x2b4).0 + b.mem.f(ai + 0x204).0;
+            b.u32(ai + 0xc4, h.to_bits());
+        }
+        b.ee.call(controls, &[u64::from(ai)], &[], BUDGET);
+        assert_eq!(b.ee.v0(), 1, "case {case}");
+        assert_eq!(ai::controls(&mut b.mem, &t, ai), 1);
+        b.same(ai, ai + 0x400, &format!("case {case}, rider {ai:#x}"));
+        let above = b.mem.f(ai + 0xc4) - b.mem.f(ai + 0x204);
+        paths[if flags & 0x20 != 0 {
+            0
+        } else if !(above <= b.mem.f(ai + 0x2b4)) {
+            1
+        } else {
+            2 + usize::from(wild)
+        }] += 1;
+    }
+    for (path, n) in paths.iter().enumerate() {
+        assert!(*n > 200, "path {path} came up only {n} times in 10,000: {paths:?}");
+    }
 }
 
 #[test]
