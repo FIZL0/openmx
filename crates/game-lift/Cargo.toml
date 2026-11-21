@@ -1,0 +1,13 @@
+[package]
+name = "game-lift"
+description = "The S496 pilot: the original's code lifted close to line for line, over the original's own memory layout"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ps2-float = { path = "../ps2-float" }
+
+[dev-dependencies]
+# Test-only, as in game-sim: each lifted function is proved by running the original on the same bytes.
+ps2-oracle = { path = "../ps2-oracle" }

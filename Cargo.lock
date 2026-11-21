@@ -1455,6 +1455,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "game-lift"
+version = "0.18.0"
+dependencies = [
+ "ps2-float",
+ "ps2-oracle",
+]
+
+[[package]]
 name = "game-render"
 version = "0.18.0"
 dependencies = [
