@@ -12,6 +12,7 @@ use game_sim::archive::Res;
 use game_sim::car::{Car, CarModel, Kind, Machine, SETTLE_FRAMES, UNDRIVEN_TOP_WHEEL_SPEED, collision_of_model, parked_spawn, parked_up};
 use game_sim::eco::{Trees, Wooded};
 use game_sim::flight_search::Rays;
+use game_sim::phy::Ini;
 use game_sim::track::{self, Scene, Terrain};
 use game_sim::world::{Ground, Place, Props};
 use ps2_float::{F, Vf};
@@ -310,8 +311,14 @@ fn a_parked_truck_comes_to_rest_where_the_original_parks_it() {
 /// and its baja body's `x`.
 const BAJA_IMAGES: [(&str, usize, f32); 2] = [("r52-free07-baja.ee.bin", 303, 3916.3367), ("r52-free07-baja-later.ee.bin", 1711, 3941.2859)];
 
-/// free07's `[Machine1]`: its `Position` and `Direction` in `machine.txt`.
-const BAJA_SPOT: (Vf, Vf) = (Vf([3899.637, 151.1854, 2438.25, 1.0]), Vf([0.9989964, -0.03599517, 0.02666235, 0.0]));
+/// free07's `[Machine1]`: its `Position` in `machine.txt`.
+const BAJA_AT: Vf = Vf([3899.637, 151.1854, 2438.25, 1.0]);
+
+/// free07's `[Machine1]` `Direction` line in `machine.txt`, read as the game reads it: through the
+/// ini reader, which truncates where an `f32` literal rounds to nearest (the y's last bit).
+fn baja_facing() -> Vf {
+    Ini::parse("[Machine1]\nDirection = 0.9989964, -0.03599517, 0.02666235\n").section("Machine1").vector("Direction", Vf::ZERO)
+}
 
 /// **free07's parked baja rolls on as the original's, and play starts where the original's load
 /// leaves it** (B47). R52's image's baja is put back at its spawn with its own calls (its stored
@@ -361,18 +368,19 @@ fn free07s_parked_baja_rolls_on_as_the_original() {
 
     // machine.txt's spot gives the original's spawn but for the ground's last bits (5e-5 ft), its
     // nose the file's, its up the ground's normal; the put-back turns the body by them.
-    let (at, facing) = BAJA_SPOT;
+    let (at, facing) = (BAJA_AT, baja_facing());
     let spawn = parked_spawn(world, &model, at);
     assert!((spawn.y() - quad(&ee, c + car_at::SPAWN).y()).abs() < 1e-4, "spawn {spawn:?}");
-    // (The original's reader makes the file's -0.03599517 one bit under the port's.)
     let nose = quad(&ee, c + car_at::FACING);
-    assert!((0..3).all(|i| (facing.0[i] - nose.0[i]).abs() < 1e-6), "nose {nose:?}");
+    assert_eq!(bits3(facing), bits3(nose), "nose {nose:?}");
     let up = parked_up(world, at);
     assert_eq!(bits3(up), bits3(quad(&ee, c + car_at::UP)), "up {up:?}");
     let mut m = Machine::new(&car, &model, quad(&ee, c + car_at::SPAWN), nose, up);
-    // Within a bit: the put-back turns it from the store's squared nose and up.
+    // Within two bits: the put-back turns it from the store's squared nose and up (x one bit under
+    // the original's, z two; y and w bit for bit).
     let turn = quad(&ee, b + 0x170);
-    assert!((0..4).all(|i| (m.body.quat.0[i] - turn.0[i]).abs() < 1e-7), "turned {:?} want {turn:?}", m.body.quat);
+    let ulps = |a: f32, b: f32| (a.to_bits() as i32).abs_diff(b.to_bits() as i32);
+    assert!((0..4).all(|i| ulps(m.body.quat.0[i], turn.0[i]) <= 2), "turned {:?} want {turn:?}", m.body.quat);
     for (k, o) in car_at::TIRES.into_iter().enumerate() {
         m.wheels[k].mount = quad(&ee, ee.u32_at(c + o) + 0x80);
     }
