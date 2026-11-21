@@ -96,11 +96,6 @@ def _slots(argv: list[str], default: int) -> int:
 
 
 def cmd_run(argv: list[str]) -> int:
-    from ps2kit import platform_ as plat
-    if plat.WINDOWS and not {'-h', '--help'} & set(argv):
-        print('./kit run drives tmux and git worktrees; the Windows edition of the kit does this '
-              'differently. Run tasks one at a time there.', file=sys.stderr)
-        return 2
     from agent_runner import runner as R
     from agent_runner.config import cfg as ar_cfg
     os.chdir(ROOT)
