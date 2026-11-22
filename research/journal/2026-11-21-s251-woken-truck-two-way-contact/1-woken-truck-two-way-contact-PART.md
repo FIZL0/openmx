@@ -57,5 +57,5 @@ Task S251. 2026-11-21.
 
 ## Next
 
-- File the tick-51 wheel/mirror force as a follow-up: log the original's per-wheel contacts on 12070
+- S505 (filed): the tick-51 wheel/mirror force. Log the original's per-wheel contacts on 12070
   (the wheel probe's record) and compare with the port's wheel hit on the f.col.
