@@ -28,3 +28,8 @@ _Avoid_: race-end ditty
 The last place a driven car stood on level, clear ground: where a pause-menu Restart puts that car back, instead of its bay.
 _In code_: car::Store::record, InPlay::record
 _Avoid_: checkpoint, respawn point
+
+**MXA track**:
+A track file saved by MXA Track Studio (.mxatrack); dropped in mods/tracks it is made a track mod named mxa_<id> and rides as a freeride
+_Said_: .mxatrack
+_In code_: stitch::mxa, track_mods::import_mxa

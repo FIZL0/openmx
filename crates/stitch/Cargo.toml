@@ -13,3 +13,6 @@ ps2-float = { path = "../ps2-float" }
 game-render = { path = "../game-render", default-features = false }
 # The join terrains are written with trnwrite; a tile's pages are read through its MD1 view.
 trnwrite = { path = "../trnwrite" }
+# MXA's .mxatrack (MD259): a zip, its collision checked against the manifest's SHA-256.
+miniz_oxide = "0.8"
+sha2 = "0.11"

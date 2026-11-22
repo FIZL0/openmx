@@ -13,6 +13,9 @@
 //! the terrain it names are the ride's own load to read, and one that does not read is the ride's
 //! error ("Could not ride" in the front end). Nothing in here can panic on a mod's bytes.
 //!
+//! The one file either reads beyond that is an MXA Track Studio `.mxatrack` dropped in `tracks/`
+//! (MD259): [`import_mxa`] makes it a track mod folder once, and then it is listed like any other.
+//!
 //! A mod is not the disc's track: it has no second archive, so its bike, physics and follow camera
 //! are a disc freeride's ([`FREERIDE`]), and it rides as a freeride. With no `mods/` folder, or with
 //! the setting off, nothing here is called, so the pick and every ride are the disc's alone.
@@ -89,8 +92,11 @@ pub struct Listed {
 }
 
 /// Every track mod under `mods` (the `mods/` folder itself). No folder is no mods and no lines.
+/// An MXA track dropped in `tracks/` is made a mod first ([`import_mxa`]).
 pub fn scan(mods: &Path) -> Scan {
     let mut out = Scan::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    out.log.extend(import_mxa(mods));
     let dir = mods.join("tracks");
     let Ok(list) = crate::files::list(&dir) else { return out };
     let mut folders: Vec<PathBuf> = list.into_iter().filter(|l| l.dir).map(|l| l.path).collect();
@@ -106,11 +112,76 @@ pub fn scan(mods: &Path) -> Scan {
     out
 }
 
+/// MXA Track Studio's tracks (MD259): each `tracks/*.mxatrack` not made a mod yet is read
+/// ([`stitch::mxa::open`]) and written as the track mod `tracks/mxa_<id>/` beside it, its ground the
+/// package's collision heights. The mod's `mod.json` keeps the file's name, size and time, so a file
+/// already made is not read again and one saved over is made again. Two files of one track: the
+/// first made keeps the folder while its file is there. A line for each file made or left out.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn import_mxa(mods: &Path) -> Vec<String> {
+    use stitch::jsonw::{J, o, s};
+    let dir = mods.join("tracks");
+    let Ok(list) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = list.flatten().map(|e| e.path()).collect();
+    files.sort();
+    let (files, folders): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| p.is_file());
+    // The stamps of the MXA mods already made: (folder, file, bytes, modified).
+    let stamp_of = |folder: &Path| -> Option<(String, f64, f64)> {
+        let json = Json::parse(&std::fs::read_to_string(folder.join("mod.json")).ok()?).ok()?;
+        let m = json.get("mxatrack")?;
+        Some((m.get("file")?.str()?.to_string(), m.get("bytes")?.f64()?, m.get("modified")?.f64()?))
+    };
+    let mut made: Vec<(PathBuf, (String, f64, f64))> = folders
+        .into_iter()
+        .filter(|f| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("mxa_")))
+        .filter_map(|f| Some((f.clone(), stamp_of(&f)?)))
+        .collect();
+    let mut log = Vec::new();
+    for path in files {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+        if !name.to_ascii_lowercase().ends_with(".mxatrack") {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let bytes = meta.len() as f64;
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs() as f64);
+        if made.iter().any(|(_, st)| *st == (name.clone(), bytes, modified)) {
+            continue;
+        }
+        let stamp = (name.clone(), bytes, modified);
+        let made_from = |id: &str| made.iter().rev().find(|(f, _)| f.ends_with(id)).map(|(_, st)| st.0.clone());
+        let result = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| stitch::mxa::open(&b)).and_then(|t| {
+            let id = stitch::mxa::mod_id(&t)?;
+            match made_from(&id) {
+                Some(other) if other != name && dir.join(&other).is_file() => Err(format!("the same track as {other}, made {id} already")),
+                _ => {
+                    let json = o(vec![("file", s(name.clone())), ("bytes", J::N(bytes)), ("modified", J::N(modified))]);
+                    Ok(stitch::mxa::write_mod(&t, &dir, json)?)
+                }
+            }
+        });
+        log.push(match result {
+            Ok(folder) => {
+                let line = format!("mods: tracks/{name} made the track mod {}", folder.file_name().unwrap_or_default().to_string_lossy());
+                made.push((folder, stamp));
+                line
+            }
+            Err(why) => format!("mods: tracks/{name} left out: {why}"),
+        });
+    }
+    log
+}
+
 /// One track mod by its id, checked as [`scan`] checks it, and its folder for its one scene.
 pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
     let folder = mods.join("tracks").join(id);
+    #[cfg(not(target_arch = "wasm32"))]
+    let imported = if id.starts_with("mxa_") { import_mxa(mods) } else { Vec::new() };
+    #[cfg(target_arch = "wasm32")]
+    let imported: Vec<String> = Vec::new();
     if !valid_id(id) || !crate::files::is_dir(&folder) {
-        return Err(format!("no track mod {id} in {}", mods.join("tracks").display()));
+        let why: String = imported.iter().map(|l| format!("; {l}")).collect();
+        return Err(format!("no track mod {id} in {}{why}", mods.join("tracks").display()));
     }
     check(&folder)?.ok_or_else(|| format!("{}: not a track mod", folder.display()))
 }
@@ -345,6 +416,56 @@ mod tests {
         for none in ["", "[Crowd]\nInStadium=TRUE\n", "[InStadium]\nStadium=TRUE\n"].map(str::as_bytes) {
             assert!(!in_stadium(none), "{:?}", String::from_utf8_lossy(none));
         }
+    }
+
+    /// MD259: an `.mxatrack` in `tracks/` is made a listed track mod once; saved over, made again;
+    /// a second file of the same track, or a broken one, left out with a line.
+    #[test]
+    fn an_mxatrack_in_tracks_is_made_a_mod_once() {
+        let mods = std::env::temp_dir().join(format!("openmx-md259-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        std::fs::create_dir_all(mods.join("tracks")).unwrap();
+        let n = 65u32;
+        let t = stitch::mxa::Track {
+            id: "TestTrack-1".into(),
+            title: "Test Track".into(),
+            author: "".into(),
+            environment: "Outdoor".into(),
+            venue: "SX01".into(),
+            ground_texture: "".into(),
+            description: "".into(),
+            location: "".into(),
+            width: 512.0,
+            depth: 512.0,
+            resolution: n,
+            rows: n,
+            surface: 0,
+            heights: (0..n * n).map(|i| (i % n) as f32 * 0.25).collect(),
+            surfaces: None,
+            spawn: [0.0, 4.0, 0.0],
+            direction: [0.0, 0.0, 1.0],
+        };
+        std::fs::write(mods.join("tracks/one.mxatrack"), stitch::mxa::package(&t, "")).unwrap();
+        let first = scan(&mods);
+        assert_eq!(first.log, ["mods: tracks/one.mxatrack made the track mod mxa_testtrack1"]);
+        assert_eq!(first.tracks.iter().map(|l| (l.id.as_str(), l.name.as_str())).collect::<Vec<_>>(), [("mxa_testtrack1", "Test Track")]);
+        assert_eq!(find(&mods, "mxa_testtrack1").unwrap().stem, "mxa_testtrack1");
+        // Made already: nothing read, no line.
+        assert!(scan(&mods).log.is_empty());
+        std::fs::write(mods.join("tracks/two.mxatrack"), stitch::mxa::package(&t, "")).unwrap();
+        std::fs::write(mods.join("tracks/broken.MXATRACK"), b"PK not really").unwrap();
+        let log = scan(&mods).log;
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(log[0].starts_with("mods: tracks/broken.MXATRACK left out: "), "{log:?}");
+        assert_eq!(log[1], "mods: tracks/two.mxatrack left out: the same track as one.mxatrack, made mxa_testtrack1 already");
+        // Saved over (another size), it is made again.
+        let titled = stitch::mxa::Track { title: "Test Track Two".into(), ..t };
+        std::fs::remove_file(mods.join("tracks/two.mxatrack")).unwrap();
+        std::fs::write(mods.join("tracks/one.mxatrack"), stitch::mxa::package(&titled, "")).unwrap();
+        let again = scan(&mods);
+        assert!(again.log.contains(&"mods: tracks/one.mxatrack made the track mod mxa_testtrack1".to_string()), "{:?}", again.log);
+        assert_eq!(again.tracks[0].name, "Test Track Two");
+        let _ = std::fs::remove_dir_all(&mods);
     }
 
     #[test]
