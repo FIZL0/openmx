@@ -587,6 +587,9 @@ struct GpuGround {
     bind: wgpu::BindGroup,
     /// The roads and ruts a freeride scene paints into the ground (V67).
     meshes: Option<ground_mesh::GpuMeshes>,
+    /// Without [`GpuGround::meshes`], group 2's empty layout and the empty bind group set there
+    /// (P336a): WebKit counts a missing group in a pipeline layout and wants one set for it.
+    no_meshes: Option<(wgpu::BindGroupLayout, wgpu::BindGroup)>,
     /// The pieces part shown (V92): how much of each is drawn, 0 to 1, and how fast that changes a
     /// second ([`Renderer::show_ground_piece`]). A piece not here is drawn whole.
     fades: HashMap<u32, (f32, f32)>,
@@ -780,6 +783,15 @@ fn fade_level(shown: f32) -> u32 {
 }
 
 impl GpuGround {
+    /// The ground pipelines' group 2 (P336a): the roads and ruts' targets, or the empty group.
+    fn group2<'a>(meshes: &'a Option<ground_mesh::GpuMeshes>, no_meshes: &'a Option<(wgpu::BindGroupLayout, wgpu::BindGroup)>) -> &'a wgpu::BindGroupLayout {
+        match (meshes, no_meshes) {
+            (Some(m), _) => &m.layout,
+            (None, Some((layout, _))) => layout,
+            (None, None) => unreachable!("a ground has meshes or the empty group"),
+        }
+    }
+
     /// How much of piece `piece` is drawn, 0 to 1 (V92): a piece not held, none.
     fn shown(&self, piece: u32) -> f32 {
         if !self.hashes.contains_key(&piece) {
@@ -3316,10 +3328,18 @@ impl Renderer {
             paged = Some(p);
         }
         let bind = self.ground_bind(&layout, &shadow, &views);
+        // With no roads and ruts, group 2 is an empty group, not a missing one: Safari's WebGPU
+        // rejects a draw with a missing group unset ("number of bind groups set(2) is less than the
+        // pipeline uses(3)"), where Chrome's does not (P336a).
+        let no_meshes = meshes.is_none().then(|| {
+            let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("no ground meshes"), entries: &[] });
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("no ground meshes"), layout: &layout, entries: &[] });
+            (layout, bind)
+        });
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ground"),
             // The roads and ruts' targets are group 2, one bind group per view's near target (V89).
-            bind_group_layouts: &[Some(&self.view_layout), Some(&layout), meshes.as_ref().map(|m| &m.layout)],
+            bind_group_layouts: &[Some(&self.view_layout), Some(&layout), Some(GpuGround::group2(&meshes, &no_meshes))],
             immediate_size: 0,
         });
         // And the same with a share of its pixels left out, for a piece fading in or out (V92): a
@@ -3351,6 +3371,7 @@ impl Renderer {
             textures: views,
             anisotropy: self.anisotropy,
             meshes,
+            no_meshes,
             paged,
         });
         Ok(())
@@ -3631,7 +3652,7 @@ impl Renderer {
         });
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ground stand-in"),
-            bind_group_layouts: &[Some(&self.view_layout), Some(&g.layout), g.meshes.as_ref().map(|m| &m.layout), Some(&layout)],
+            bind_group_layouts: &[Some(&self.view_layout), Some(&g.layout), Some(GpuGround::group2(&g.meshes, &g.no_meshes)), Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = ground_pipeline(&self.device, &g.module, &pipeline_layout, self.format, "fs_stand_in");
@@ -4961,6 +4982,8 @@ impl Renderer {
                 pass.set_bind_group(1, &ground.bind, &[]);
                 if let Some(m) = &ground.meshes {
                     pass.set_bind_group(2, m.bind(v), &[]);
+                } else if let Some((_, empty)) = &ground.no_meshes {
+                    pass.set_bind_group(2, empty, &[]);
                 }
                 // 0 the whole ground's pipeline, 1 a fading piece's, 2 the stand-in's (V92).
                 let mut using = 0;
@@ -7242,6 +7265,41 @@ mod tests {
         assert_eq!(drawn(&mut gpu, Graphics::Original), 1, "the chunk ahead only");
         // And back: the per-view index list follows the setting.
         assert_eq!(drawn(&mut gpu, Graphics::Full), 2);
+    }
+
+    #[test]
+    fn a_ground_without_meshes_sets_an_empty_group_2() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        // sx01's ground: no roads and ruts, so group 2 is the empty group Safari wants set (P336a).
+        let chunks = [flat_chunk(8, 25.0, 0, 0), flat_chunk(8, 25.0, 0, 2)];
+        let scene = crate::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n");
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        gpu.set_ground(&chunks, None, [150.0, 118.0, 86.0]).unwrap();
+        let g = gpu.ground.as_ref().unwrap();
+        assert!(g.meshes.is_none() && g.no_meshes.is_some(), "the empty group 2 stands in for the meshes");
+        // And a frame drawn with it passes wgpu's own validation, the ground drawn.
+        let camera = on_the_near_edge();
+        let (w, h) = (160u32, 90u32);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+        let watch = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let d = gpu.render(
+            &Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 },
+            &Assets::default(),
+            &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light },
+        );
+        assert!(d.ground_levels.iter().sum::<usize>() > 0, "the ground is drawn");
+        let error = pollster::block_on(watch.pop());
+        assert!(error.is_none(), "{error:?}");
     }
 
     #[test]
