@@ -1086,3 +1086,140 @@ fn a_wreck_bike_into_a_riders_bike_replays_bit_exact() {
     assert!(struck >= 3 && mirrored >= 3, "the wreck bike never met P1's bike: {struck} ticks, {mirrored} mirrors");
     assert_eq!(alone_parted, Some(SPLIT_WRECK.0 + 1), "the wreck bike replays without the riders' bikes");
 }
+
+/// The side wreck's state's collision node, whose update (`0x0026_f800`) is the wreck bike's tick
+/// (its objects: one more, an AI rider's record, the wreck bike's, two more riders'), and the race
+/// gate whose sphere the wreck bike lies 15 ft off.
+const SIDE_NODE: u32 = 0x00e1_7ef0;
+const SIDE_GATE: u32 = 0x016a_f9c0;
+
+/// The race gate's collision file, out of the first of free09's archives that holds it.
+fn race_gate_file(disc: &mut Disc) -> track::Hierarchy {
+    for n in ["Tracks\\free09.res", "Tracks\\free09_2.res", "Tracks\\free09_ss_2.res"] {
+        if disc.psr.find(n).is_none() {
+            continue;
+        }
+        let bytes = disc.member(n);
+        let res = Res::parse(&bytes).expect("a track archive");
+        if let Some(e) = res.find("col\\machineracegate.col") {
+            return track::Hierarchy::parse(&res.read(&bytes, e).expect("the member")).expect("machineracegate.col");
+        }
+    }
+    panic!("no free09 archive holds machineracegate.col")
+}
+
+/// A gate collidable's parts as the image stands them (`+0x200` count, `+0x204` switches, `+0x214`
+/// list; each part's owner at `+0x78`, its transform at `+0x120`), their meshes the file's in file
+/// order. A gate has no skeleton, so its parts are bound to no bone.
+fn gate_parts<'m>(ee: &Ee, g: u32, file: &'m track::Hierarchy) -> Vec<flight_search::GatePart<'m>> {
+    let (n, on, list) = (ee.u32_at(g + 0x200), ee.u32_at(g + 0x204), ee.u32_at(g + 0x214));
+    assert_eq!(n as usize, file.parts.len(), "{g:#x}: the gate's parts against the file's");
+    (0..n)
+        .map(|j| {
+            let p = ee.u32_at(list + 4 * j);
+            let part = &file.parts[j as usize];
+            assert_eq!(ee.u32_at(p + 0x78), g, "{g:#x}: part {j}'s owner");
+            flight_search::GatePart { mesh: &part.mesh, transform: matrix(ee, p + 0x120), enabled: ee.u32_at(on + 4 * j) != 0 }
+        })
+        .collect()
+}
+
+/// A gate collidable as the image holds it: its sphere, its box in its frame, its `+0x31` bit.
+fn gate_at<'a>(ee: &Ee, g: u32, parts: &'a [flight_search::GatePart<'a>]) -> flight_search::Gate<'a> {
+    flight_search::Gate {
+        centre: quad(ee, g + 0x40),
+        radius: F(ee.f32_at(g + 0x60)),
+        box_centre: quad(ee, g + 0x120),
+        half: quad(ee, g + 0x130),
+        frame: matrix(ee, g + 0x1a0),
+        parts,
+        nearby: ee.u8_at(g + 0x31) & 1 != 0,
+    }
+}
+
+/// S503: **the wreck bike among the toys, the riders' bikes and the race gates replays bit-exact.**
+/// The side wreck's state, its bike thrown at 60 ft/s at the gate beside it, is run by the original's
+/// node update; the port's bike, seeded from it and ticked by [`WreckBike::tick_gated`] with free09's
+/// props, the three AI riders' bikes and the twelve gates of its nearby list all handed in, is the
+/// original's body to the bit every tick to the wreck's end. As the original holds them, the gates'
+/// nearby bit is clear and the bike flies through; with the bit set on both sides the bike strikes the
+/// gate, still bit-exact, and parts from the first ride.
+#[test]
+fn a_wreck_bike_meeting_a_gate_replays_bit_exact() {
+    let (name, frame, last) = WRECKS[1];
+    let Some(cap) = Capture::load(name) else { return };
+    let Some(mut disc) = Disc::open() else { return };
+    let (part, _) = wreck_files(&mut disc);
+    let props = free09_props(&mut disc);
+    let mesh = track::Mesh::parse(&inside(&disc.member("Tracks\\free09_ss_2.res"), flight_search::BIKE_COLLISION)).expect("bikef.col");
+    let file = race_gate_file(&mut disc);
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let field = ground.field();
+    let mut rides = Vec::new();
+    for nearby in [false, true] {
+        let Some(mut ee) = state(name, frame) else { return };
+        let (b, c) = bike_in(&ee);
+        let objects = ee.u32_at(SIDE_NODE + 0x38);
+        assert_eq!(ee.u32_at(objects + 8), c, "the node's third object is the wreck bike's");
+        // Thrown at the gate's near post: its box's centre, out along the frame's first row to a foot
+        // inside the box's side.
+        let (at, centre) = (quad(&ee, b + body_at::POSITION), quad(&ee, SIDE_GATE + 0x140));
+        let (side, reach) = (quad(&ee, SIDE_GATE + 0x1a0), ee.f32_at(SIDE_GATE + 0x130) - 1.0);
+        let sign = if (0..3).map(|k| (at[k] - centre[k]) * side[k]).sum::<f32>() < 0.0 { -1.0 } else { 1.0 };
+        let to = [0, 1, 2].map(|k| centre[k] + sign * reach * side[k] - at[k]);
+        let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+        for k in 0..3 {
+            ee.set_f32(b + body_at::VELOCITY + 4 * k as u32, to[k] / len * 60.0);
+        }
+        if nearby {
+            ee.set_u32(SIDE_GATE + 0x30, ee.u32_at(SIDE_GATE + 0x30) | 0x100);
+        }
+        let search = ee.u32_at(c + rec::NEARBY);
+        let listed: Vec<u32> = (0..ee.u32_at(search + 4)).map(|k| ee.u32_at(ee.u32_at(search) + 8 * k)).collect();
+        let gate_ids: Vec<u32> = listed.iter().copied().filter(|&o| ee.u32_at(o + 0x84) == flight_search::GATE).collect();
+        assert!(gate_ids.contains(&SIDE_GATE) && gate_ids.len() == 12, "the list's gates: {gate_ids:x?}");
+        let node: Vec<u32> = (0..ee.u32_at(SIDE_NODE + 0x30)).map(|k| ee.u32_at(objects + 4 * k)).collect();
+        let records: Vec<u32> = listed
+            .iter()
+            .filter(|&&o| ee.u32_at(o + 0x84) == 0x0009_a048)
+            .map(|&o| *node.iter().find(|&&r| ee.u32_at(r + rec::COLLIDABLE) == o).expect("each listed bike's record is in the node"))
+            .collect();
+        assert_eq!(records.len(), 3, "the AI riders' bikes in the list");
+        let parts: Vec<Vec<flight_search::GatePart>> = gate_ids.iter().map(|&g| gate_parts(&ee, g, &file)).collect();
+        let gates: Vec<flight_search::Gate> = gate_ids.iter().zip(&parts).map(|(&g, p)| gate_at(&ee, g, p)).collect();
+        assert_eq!(gates.iter().filter(|g| g.nearby).count(), usize::from(nearby), "the gates' nearby bits");
+        let mut bike = bike_at(&ee, &part, b, c);
+        let mut ride = Vec::new();
+        let mut on_object = 0;
+        for f in frame + 1..=last {
+            let bikes: Vec<flight_search::Bike> = records
+                .iter()
+                .map(|&r| {
+                    let c = ee.u32_at(r + rec::COLLIDABLE);
+                    flight_search::Bike { transform: matrix(&ee, c + 0x120), in_world: ee.u8_at(c + 0x116) & game_sim::world_search::flags::ENABLED != 0 }
+                })
+                .collect();
+            let mut chassis: Vec<Vehicle> = records.iter().map(|&r| vehicle_at(&ee, r)).collect();
+            let mut colliders: Vec<Collider> = records.iter().map(|&r| collider_of(&ee, r)).collect();
+            let (before, kept) = (chassis.clone(), colliders.clone());
+            let dt = cap.get(f, "dt");
+            ee.call(0x0026_f800, &[u64::from(SIDE_NODE)], &[dt], 2_000_000_000);
+            let riders = Riders { bikes: Bikes { mesh: &mesh, bikes: &bikes }, chassis: &mut chassis, colliders: &mut colliders };
+            bike.tick_gated(F(dt), Some(&field), Some(&props), None, riders, &gates);
+            let differ = bodies_differ(&bike.body, &ee_body(&ee, b));
+            assert!(differ.is_empty(), "nearby {nearby}, tick {f}: the wreck bike among the toys, bikes and gates differs in {differ:?}");
+            assert_eq!(chassis, before, "tick {f}: the wreck bike's resolve moved a rider's chassis");
+            assert_eq!(colliders, kept, "tick {f}: the wreck bike's resolve changed a rider's collision object");
+            on_object += u32::from(bike.record.on_object);
+            ride.push(bike.body.position.0.map(f32::to_bits));
+        }
+        eprintln!("gates' nearby bit {nearby}: ticks on an object {on_object}");
+        rides.push((ride, on_object));
+    }
+    let parted = rides[0].0.iter().zip(&rides[1].0).position(|(a, b)| a != b);
+    eprintln!("with the gate's bit set the ride parts at tick {:?}", parted.map(|t| frame + 1 + t as u32));
+    assert_eq!(rides[0].1, 0, "the bike touched an object with every gate's bit clear");
+    assert!(rides[1].1 > 0 && parted.is_some(), "the thrown bike never met the gate");
+}
