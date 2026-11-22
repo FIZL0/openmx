@@ -2559,8 +2559,8 @@ fn apart(a: Vf, b: Vf) -> f32 {
 }
 
 /// **P2's wreck bike rolls at the parked truck as the original's** (S506, R53): seeded off the wreck's
-/// entry, the Sim's wreck body (place and velocity) is the capture's bit for bit on every row
-/// 350..=357, 22.8 ft/s at the truck slowing to 16.9 as it tumbles; the truck asleep on both, its
+/// entry (row 349, the image's own: 25 ft/s at the truck), the Sim's wreck body (place and velocity)
+/// is the capture's bit for bit on every row 350..=357, 22.8 ft/s slowing to 16.9 as it tumbles; the truck asleep on both, its
 /// body the image's to the bit, and the plane 391 ft off.
 #[test]
 fn r53_the_wreck_bike_rolls_at_the_truck_as_the_original() {
@@ -2568,6 +2568,11 @@ fn r53_the_wreck_bike_rolls_at_the_truck_as_the_original() {
     let Some(ticks) = r53_ride(R53_WAKE - 1) else { return };
     let at = |f: u32| &ticks[(f - R53_FROM - 1) as usize];
     let bits = |v: Vf| three(v);
+    // Row 349 is the image's own wreck body (a late read): the poke's 25 ft/s at the truck.
+    let Some(ee) = r53_image() else { return };
+    let body =ee.u32_at(ee.u32_at(R53_P2 + 0x7a8) + 0x110);
+    assert_eq!(bits(quad(&ee, body + 0x70)), bits(r53_row(&cap, R53_FROM + 1, "wreck_vel")), "row 349 is the image's wreck body");
+    assert!(cap.f(R53_FROM + 1, "wreck_vel.z") > 24.9, "the wreck bike starts at 25 ft/s at the truck");
     for f in R53_FROM + 1..R53_WAKE {
         let t = at(f);
         assert!(!t.awake && cap.u(f, "truck_awake") == 0, "row {f}: the truck asleep on both");
@@ -2585,8 +2590,9 @@ fn r53_the_wreck_bike_rolls_at_the_truck_as_the_original() {
 
 /// **The wreck bike wakes the truck on the original's row** (S506, R53): row 358 has the truck awake
 /// on both, the original's with one own contact (kind 0) whose other object is the wreck body's
-/// collision object (the body's `+0x1040`), the wreck body 10.6 ft from the truck's (the Sim's within
-/// 0.1) and the plane 391 ft off; the wreck bike bounces back off it (its `z` speed below zero on
+/// collision object (the body's `+0x1040`; in the Sim nothing else is in reach), the Sim's wreck body
+/// within 0.1 ft of the original's last good gap to the truck's (10.6 ft, row 357's: row 358's wreck
+/// columns repeat it, the truck has not moved) and the plane 391 ft off; the wreck bike bounces back off it (its `z` speed below zero on
 /// row 359 on both). Replaces S486a's wreck bike set 8 ft beside the truck on C16's image (reason 7).
 #[test]
 fn r53_the_wreck_bike_wakes_the_truck_on_the_originals_row() {
@@ -2599,10 +2605,10 @@ fn r53_the_wreck_bike_wakes_the_truck_on_the_originals_row() {
     assert_eq!(woke, R53_WAKE, "the truck wakes on the original's row");
     assert_eq!((cap.u(R53_WAKE, "truck_contacts"), cap.u(R53_WAKE, "truck_contact0_kind")), (1, 0), "the original's one own contact");
     assert_eq!(cap.u(R53_WAKE, "truck_contact0_other"), cap.u(R53_WAKE, "wreck_object") + 0x1040, "the contact's other object is the wreck body's");
-    // Row 358's wreck columns repeat 357's (torn); the truck's are the tick's.
-    let gap = apart(r53_row(&cap, R53_WAKE, "wreck_pos"), r53_row(&cap, R53_WAKE, "truck_pos"));
+    // Row 358's wreck columns repeat 357's (torn), so the original's gap is row 357's.
+    let gap = apart(r53_row(&cap, R53_WAKE - 1, "wreck_pos"), r53_row(&cap, R53_WAKE - 1, "truck_pos"));
     let t = at(R53_WAKE);
-    assert!((gap - 10.6).abs() < 0.01, "the original's wreck body {gap} ft from the truck's");
+    assert!((gap - 10.6).abs() < 0.01, "the original's wreck body {gap} ft from the truck's on row 357");
     assert!((apart(t.wreck, t.truck) - gap).abs() < 0.1, "the Sim's wreck body {} ft from the truck's", apart(t.wreck, t.truck));
     assert!(apart(t.plane, t.truck) > 390.0 && apart(r53_row(&cap, R53_WAKE, "plane_pos"), r53_row(&cap, R53_WAKE, "truck_pos")) > 390.0, "the plane far off");
     assert!(at(R53_WAKE + 1).wreck_vel.z() < 0.0 && cap.f(R53_WAKE + 1, "wreck_vel.z") < 0.0, "the wreck bike bounces back on both");

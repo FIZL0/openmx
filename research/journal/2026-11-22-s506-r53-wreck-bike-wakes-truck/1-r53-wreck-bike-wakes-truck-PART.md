@@ -50,8 +50,10 @@ tests really run by moving `R53_PARTS` to 360 (failed: got 359).
   update replayed on R53's image (as R48's was) to find what the plane lane's wreck-bike/parked-car
   resolve and sleep miss. Filed as S510.
 - Row 358's wreck columns are torn (they repeat 357's), so the Sim's wreck body on the wake tick is
-  held only by its distance to the truck (within 0.1 ft of 10.6), not bit for bit.
-- Row 349 (a late read) and row 348 (before the load) are not compared.
+  held only by its distance to the truck (within 0.1 ft of row 357's 10.6), not bit for bit.
+- Row 349 (a late read) is compared only with the image's own wreck velocity (25 ft/s, bit for bit),
+  not with the Sim; row 348 (before the load) is not compared.
+- The brief's "25 -> 16.9 ft/s" is held as 25 on row 349 (the image) and 22.8 -> 16.9 on 350-357.
 - The wreck's rider (the ragdoll point, `holding`, `landed`) is not in the capture; it is seeded from
   the clock (holding while under the throw's hold time, not landed), not read from the image. The
   wreck body matching bit for bit to 357 says it does not touch the bike there.
