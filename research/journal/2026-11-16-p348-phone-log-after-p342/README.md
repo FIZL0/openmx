@@ -2,5 +2,10 @@
 
 2026-11-16. Task: `./kit plan P348`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+Ride world_mxu on the iPhone with a build that has P342 and name what the slow frames spend their time
+on. Done on 2026-11-21 by driving the phone from omarchy-desktop (build 5260, ~6 minutes, 38 joins, two
+trips away). While riding no frame went over 40 ms, all led by wait (missed refreshes). Every present-led
+frame over 50 ms sits at going away or coming back, ~105 ms each: the away rest (up to 100 ms, `AWAY_REST`)
+runs inside the draw and is billed to present. Coming back uploaded 28 models at about 1 ms a frame, well
+inside the 4 ms budget. The marker jump could not be done by touch (no d-pad). Details in
+`2-phone-ride-build-5260-FINAL.md`.
