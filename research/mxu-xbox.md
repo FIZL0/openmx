@@ -27,7 +27,7 @@ Header `u32 2, u32 format`, then per format:
 
 | format | what | layout after the format word |
 |---|---|---|
-| 0x37, 0x38 | 8-bit palette (0x38 keeps alpha) | u32 256, 256 × BGRA, then u32 mips, u32 W, u32 H, mips |
+| 0x37, 0x38 | 8-bit palette, both with real alpha (P383a: 0x37's matches the PS2 picture's) | u32 256, 256 × BGRA, then u32 mips, u32 W, u32 H, mips |
 | 0x26 | DXT1 | u32 0, u32 mips, W, H, mips |
 | 0x36 | DXT5 (the 512×512 shadow maps among others) | as 0x26 |
 

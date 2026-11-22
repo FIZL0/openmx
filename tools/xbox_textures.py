@@ -81,9 +81,9 @@ def dxt_size(b):                                  # (w, h) of the mip dxt() deco
 
 def dxt(b):
     fmt = u32(b, 4)
-    if fmt in (0x37, 0x38):                       # 8-bit palette, BGRA entries
+    if fmt in (0x37, 0x38):                       # 8-bit palette, BGRA entries; 0x37's alpha is real too (P383a:
+        # 1,061 of 1,067 same-size pairs match the PS2 picture's alpha within 4, the other 6 within 14)
         npal = u32(b, 8); pal = np.frombuffer(b, np.uint8, npal * 4, 12).reshape(-1, 4)[:, [2, 1, 0, 3]].copy()
-        if fmt == 0x37: pal[:, 3] = 255
         o = 12 + npal * 4
     elif fmt in (0x26, 0x32, 0x36):               # DXT1, DXT3, DXT5
         o = 8 + 4
@@ -189,8 +189,144 @@ def pack(src, xd, out, keep=()):
     print(f"{len(rows)} pairs, {kept} Xbox pictures kept, {alone} PS2 textures with no Xbox twin")
     return kept
 
+# ---- P383a: which same-size pairs look different, as a page to pick from ----
+def pairs(src, xd):
+    """(rel, PS2 key, PS2 png path, Xbox .dxt path) of every PS2 dump PNG under `src` with an Xbox twin
+    under `xd`, matched as `pack` matches them."""
+    xbox = {}
+    for root, _, fs in os.walk(xd):
+        for f in fs:
+            if f.lower().endswith(".dxt"):
+                p = os.path.join(root, f)
+                xbox[os.path.relpath(p, xd)[:-4].replace(os.sep, "/").lower()] = p
+    for root, _, fs in os.walk(src):
+        for f in sorted(fs):
+            stem, _, k = f[:-4].rpartition("-")
+            if not f.lower().endswith(".png") or len(k) != 16 or not all(c in "0123456789abcdef" for c in k):
+                continue
+            rel = os.path.relpath(os.path.join(root, stem), src).replace(os.sep, "/")
+            if rel.lower() in xbox: yield rel, k, os.path.join(root, f), xbox[rel.lower()]
+
+def look_apart(a, b):
+    """How different two same-size RGBA pictures look, 0-255: each laid on grey by its alpha and averaged
+    over 4x4 cells (so DXT's block noise and palette dither count little), the mean colour distance plus
+    the alpha's, taken as the worst of the picture's 16 regions (a changed corner counts)."""
+    def flat(p):
+        p = p.astype(np.float32); al = p[..., 3:] / 255
+        c = np.concatenate([p[..., :3] * al + 128 * (1 - al), p[..., 3:]], -1)
+        h, w = (c.shape[0] // 4) * 4 or c.shape[0], (c.shape[1] // 4) * 4 or c.shape[1]
+        c = c[:h, :w]
+        if h >= 4 and w >= 4: c = c.reshape(h // 4, 4, w // 4, 4, 4).mean((1, 3))
+        return c
+    d = np.abs(flat(a) - flat(b)); d = d[..., :3].mean(-1) + d[..., 3] / 2
+    return float(max(r.mean() for band in np.array_split(d, min(4, d.shape[0]), 0)
+                     for r in np.array_split(band, min(4, d.shape[1]), 1)))
+
+PAGE = """<title>Xbox Texture Picks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root{--bg:#f6f6f4;--fg:#1d1d1b;--mute:#6b6b66;--card:#fff;--line:#ddd;--on:#2f7d32;--chk:#e8e8e4}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ececea;--mute:#9a9a94;--card:#222220;--line:#3a3a37;--on:#6cc070;--chk:#30302d;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#161615;--fg:#ececea;--mute:#9a9a94;--card:#222220;--line:#3a3a37;--on:#6cc070;--chk:#30302d;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:12px 90px}
+h1{font-size:1.3em;margin:.2em 0}p{color:var(--mute);max-width:46em}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,330px),1fr));gap:12px}
+.card{background:var(--card);border:2px solid var(--line);border-radius:8px;padding:8px;cursor:pointer;min-width:0}
+.card.on{border-color:var(--on)}
+.pics{display:flex;gap:6px}.pics figure{margin:0;flex:1;min-width:0;text-align:center}
+.pics img{width:100%;aspect-ratio:1;object-fit:contain;image-rendering:pixelated;background:repeating-conic-gradient(var(--chk) 0 25%,transparent 0 50%) 0 0/16px 16px;border-radius:4px}
+figcaption{font-size:.8em;color:var(--mute)}
+.name{font-weight:600;overflow-wrap:anywhere}.meta{font-size:.8em;color:var(--mute);overflow-wrap:anywhere}
+.pick{display:flex;align-items:center;gap:6px;margin-top:4px}
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px max(16px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+button.main{background:var(--on);color:#fff;border-color:var(--on)}
+#out{font-family:monospace;font-size:.8em;overflow-wrap:anywhere;user-select:all;flex-basis:100%}
+</style>
+<h1>Xbox texture picks</h1>
+<p>__N__ textures where the Xbox picture is the PS2's size but looks different. Tick the ones where the Xbox
+picture (right) looks better; the texture pack then uses it. Most different first. Shown at up to 256 px;
+the checkerboard shows through where a picture's alpha is low, which on models is often a shine mask, not a
+hole. Button pictures on the Xbox show its own buttons.</p>
+<div class="grid" id="g"></div>
+<div class="bar"><button class="main" id="send">Send picks</button><span id="said">0 picked</span><div id="out" hidden></div></div>
+<script>
+const TID="P383a", ROWS=__ROWS__;
+const pick=new Set();
+const g=document.getElementById('g'), said=document.getElementById('said');
+ROWS.forEach(r=>{
+  const c=document.createElement('div'); c.className='card';
+  c.innerHTML=`<div class="pics"><figure><img loading="lazy" src="img/${r.f}.ps2.png" alt=""><figcaption>PS2</figcaption></figure>`+
+    `<figure><img loading="lazy" src="img/${r.f}.xbox.png" alt=""><figcaption>Xbox</figcaption></figure></div>`+
+    `<div class="pick"><input type="checkbox"><span class="name"></span></div><div class="meta"></div>`;
+  c.querySelector('.name').textContent=r.stem;
+  c.querySelector('.meta').textContent=`${r.size} · ${r.rel}${r.n>1?` · and ${r.n-1} more`:''} · apart ${r.d}`;
+  const box=c.querySelector('input');
+  const set=on=>{box.checked=on;c.classList.toggle('on',on);on?pick.add(r.stem):pick.delete(r.stem);said.textContent=pick.size+' picked'};
+  c.onclick=e=>{if(e.target!==box)set(!box.checked);else set(box.checked)};
+  g.appendChild(c);
+});
+async function store(txt){
+  try{
+    const db=window.claude&&window.claude.use?await window.claude.use('db'):null;
+    if(!db)return false;
+    await db.doc('picks/'+TID).set({id:TID,picks:txt,at:new Date().toISOString()});
+    return true;
+  }catch(e){return false}
+}
+document.getElementById('send').onclick=async()=>{
+  const txt=pick.size?TID+' picks: keep '+[...pick].join(' '):TID+' picks: none';
+  const out=document.getElementById('out'); out.textContent=txt; out.hidden=false;
+  said.textContent='Sending…';
+  if(await store(txt)){said.textContent='Sent: saved on this page. Say "sent" in the chat with the run.'}
+  else{const done=ok=>{said.textContent=(ok?'Copied. ':'Copy this line. ')+'Paste it in the chat with the run.'};
+    try{navigator.clipboard.writeText(txt).then(()=>done(true),()=>done(false))}catch(e){done(false)}}
+};
+</script>
+"""
+
+def differ(src, xd, out, least=12.0):             # 12: below it the pairs looked the same by eye (P383a)
+    """Score every same-size pair (`look_apart`) into `out/differ.tsv`, most apart first; the stems whose
+    worst pair is at least `least` apart go on `out/index.html`, a page to tick the Xbox pictures to keep
+    (pictures in `out/img/`, at most 256 px). One card a stem, as `KEEP` names them. How many on the page."""
+    import json
+    from PIL import Image
+    best = {}
+    for rel, k, pp, xp in pairs(src, xd):
+        try:
+            xb = open(xp, "rb").read()
+            if dxt_size(xb) != png_size(pp): continue
+            a = np.asarray(Image.open(pp).convert("RGBA")); b = dxt(xb)
+        except Exception as e:
+            print("skip", rel, e); continue
+        d = look_apart(a, b); stem = rel.rpartition("/")[2].lower()
+        n = best[stem][4] + 1 if stem in best else 1
+        if stem not in best or d > best[stem][0]: best[stem] = (d, rel, k, (pp, b), n)
+        else: best[stem] = best[stem][:4] + (n,)
+    rows = sorted(best.items(), key=lambda kv: -kv[1][0])
+    os.makedirs(os.path.join(out, "img"), exist_ok=True)
+    open(os.path.join(out, "differ.tsv"), "w").write("".join(
+        f"{d:.1f}\t{s}\t{rel}\t{k}\t{n}\n" for s, (d, rel, k, _, n) in rows))
+    page = []
+    for s, (d, rel, k, (pp, b), n) in rows:
+        if d < least: break
+        f = f"{len(page):04d}"; A = Image.open(pp).convert("RGBA"); B = Image.fromarray(np.ascontiguousarray(b), "RGBA")
+        size = f"{A.width}x{A.height}"
+        for im, side in ((A, "ps2"), (B, "xbox")):
+            if max(im.size) > 256: im = im.resize((max(im.width * 256 // max(im.size), 1), max(im.height * 256 // max(im.size), 1)), Image.LANCZOS)
+            im.save(os.path.join(out, "img", f"{f}.{side}.png"), optimize=True)
+        page.append({"f": f, "stem": s, "rel": rel, "size": size, "n": n, "d": round(d, 1)})
+    open(os.path.join(out, "index.html"), "w").write(
+        PAGE.replace("__N__", str(len(page))).replace("__ROWS__", json.dumps(page)))
+    print(f"{len(rows)} same-size textures, {len(page)} at least {least} apart")
+    return len(page)
+
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["pack"]:
+    if sys.argv[1:2] == ["differ"]:
+        # xbox_textures.py differ TEXTURES_SRC XBOX_DIR OUT [--least D]  (needs PIL: uv run --with pillow,numpy)
+        a = sys.argv[2:]; least = float(a[a.index("--least") + 1]) if "--least" in a else 12.0
+        differ(*a[:3], least=least)
+    elif sys.argv[1:2] == ["pack"]:
         # xbox_textures.py pack TEXTURES_SRC XBOX_DIR OUT [--keep NAME ...]  (OUT: mods/xbox-textures)
         a = sys.argv[2:]; ks = a[a.index("--keep") + 1:] if "--keep" in a else []
         pack(*a[:3], keep=ks)
