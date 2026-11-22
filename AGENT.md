@@ -14,6 +14,7 @@ maintainable code. `./kit` is the entry point for everything.
 - **No retail addresses or decompiler names in shipped code** (no `FUN_…`, `DAT_…`, bare hex addresses).
   Describe what a function does, not where it lived. Addresses go in `research/oracle.txt` and journals only.
   `./kit audit` checks; `./kit done` gates on it.
+  In `crates/game-lift` only, the original's struct offsets (`ai + 0x1e0`) are allowed; addresses and decompiler names are not.
 - **Match the original exactly, where it matters.** Simulation (physics, AI, state machines, scoring, timing)
   is ported, not approximated, and proved. No placeholders, no "close enough", no TODO passed off as done.
 - **Say what you did not verify.** Every journal entry ends with `## Not verified / not 1:1`: each thing you
