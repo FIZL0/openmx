@@ -17,7 +17,7 @@
 #                                MacOSX.sdk and rcodesign), ad-hoc signed, not notarized (its row says how to open it). No
 #                                updater asset: swapping the binary would break the bundle's signature, so a Mac's update
 #                                notice opens the release page. Built here only: pages.yml has no macOS job (its runners
-#                                were dropped 11-03), so the beta has no Mac app
+#                                were dropped 11-03)
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
 #                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
 #                                (web/ios.html), which a published release rebuilds at once (`gh workflow run source -R FIZL0/apps`)
@@ -27,8 +27,7 @@
 # bullets); without it, RELEASE_NOTES.md (kept up to date as changes land; emptied and committed after the release),
 # and if that has no bullets either, the commit subjects since the last v* tag (required for the first release). A draft
 # unless `publish` is given: check it on GitHub and publish there. Publishing it puts its website on openmx.dev
-# (pages.yml's release run). Every push to main is a beta (pages.yml), not made here: it lives on https://beta.openmx.dev,
-# never as a release (B43), so this repo's only releases are these vX.Y.Z.
+# (pages.yml's release run). This repo's only releases are these vX.Y.Z (P392: there is no beta).
 # --dry-run (P308): no key, builds, commit or upload; lists the assets a release uploads and writes its notes into
 # dist/release-dry/notes.md.
 set -e
@@ -161,8 +160,6 @@ body=$out/notes.md
     echo '```'
     echo "minisign -Vm SHA256SUMS -x SHA256SUMS.sig -P $pub && sha256sum -c --ignore-missing SHA256SUMS"
     echo '```'
-    echo
-    echo "Want the newest changes before the next release? Try the beta at [beta.openmx.dev](https://beta.openmx.dev/) (in the browser, or [download it](https://beta.openmx.dev/download/))."
 } > "$body"
 if [ -n "$dry" ]; then
     echo "$tag would upload, from dist/release:"; printf '  %s\n' "${assets[@]}"

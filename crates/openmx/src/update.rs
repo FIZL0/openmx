@@ -2,13 +2,11 @@
 //! the main menu under the corner (`menu.rs`'s [`crate::menu::Updater`], which this fills at start),
 //! with Square to Update.
 //!
-//! A beta build (pages.yml builds the beta in GitHub Actions, whose `GITHUB_SHA` it is built with)
-//! asks beta.openmx.dev which commit its downloads are at ([`BETA_API`], B43: the beta is no GitHub
-//! release); a release build
-//! (`tools/release.sh` builds it with `OPENMX_VERSION=v1.2.3`, which `build.rs` passes on as
-//! `OPENMX_TAG`) asks for the latest `v*` release instead. Both ask at start (the first time the main
-//! menu is up) and every half hour by the wall clock, unless Settings → Updates is Never or
-//! `--no-update-check` was given; a local build never asks. No network, a rate limit or bad JSON say
+//! A release build (`tools/release.sh` builds it with `OPENMX_VERSION=v1.2.3`, which `build.rs`
+//! passes on as `OPENMX_TAG`) asks for the latest `v*` release, and nothing else (P392: there is no
+//! beta to ask about; a GitHub Actions build is no different from any other). It asks at start (the
+//! first time the main menu is up) and every half hour by the wall clock, unless Settings → Updates is
+//! Never or `--no-update-check` was given; a build without a tag never asks. No network, a rate limit or bad JSON say
 //! nothing. `OPENMX_LATEST=<build>` fakes a newer one anywhere (`menu.rs`'s `newer_build`);
 //! `OPENMX_UPDATE_API=<url>` asks another releases/latest JSON (a local test server).
 //!
@@ -18,29 +16,22 @@
 //! plan/HUMAN.md), takes the game file's place (Linux renames it over the running one; Windows, which
 //! can't, moves the old aside as `.old`, removed at the next start) and starts with the same
 //! arguments. A game whose folder it can't write (installed system-wide, a Flatpak, Steam's library),
-//! a release without this platform's files, and the beta (which has no signed sums) get the release
-//! page instead. Updates on Always installs what it finds from the main menu by itself.
+//! and a release without this platform's files get the release page instead. Updates on Always installs what it finds from the main menu by itself.
 
 use crate::menu::Updates;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-/// The beta's downloads page, which Download opens when there is no release to install.
-pub const RELEASES: &str = "https://beta.openmx.dev/download/";
+/// The latest release's page, which Download opens when there is no release to install.
+pub const RELEASES: &str = "https://github.com/FIZL0/openmx/releases/latest";
 
 /// The releases/latest JSON a release build asks, unless `OPENMX_UPDATE_API` names another.
 const LATEST_API: &str = "https://api.github.com/repos/FIZL0/openmx/releases/latest";
 
-/// The full commit the beta's downloads were built from (`tools/beta-bundle.sh` writes it).
-const BETA_API: &str = "https://beta.openmx.dev/download/commit.txt";
-
 /// This build's release tag (`v0.1.0`, `v1.1.0-rc.1`): only builds made by `tools/release.sh` have
 /// one, and only they check for and install newer releases. A debug build never does.
 const VERSION: Option<&str> = if cfg!(debug_assertions) { None } else { option_env!("OPENMX_TAG") };
-
-/// The full commit a GitHub Actions build (the beta's) was made from.
-const BETA_COMMIT: Option<&str> = if cfg!(debug_assertions) { None } else { option_env!("GITHUB_SHA") };
 
 /// The minisign key `tools/release.sh` signs each release's `SHA256SUMS` with (its secret half stays
 /// with the maintainer, `~/.config/openmx/release.key`; release.sh reads this line to refuse a release
@@ -72,8 +63,6 @@ pub fn updater() -> crate::menu::Updater {
 /// What the checks found and what an install is doing.
 #[derive(Default)]
 struct State {
-    /// The beta's newer commit (short).
-    commit: Option<String>,
     /// A newer release.
     found: Option<Found>,
     /// The install's words, while it runs or after it failed.
@@ -81,7 +70,7 @@ struct State {
     busy: bool,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { commit: None, found: None, job: None, busy: false });
+static STATE: Mutex<State> = Mutex::new(State { found: None, job: None, busy: false });
 
 /// A newer release: its tag, page and the files an install needs.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -92,38 +81,27 @@ struct Found {
     files: Option<[String; 3]>,
 }
 
-/// The newer release's tag or the beta's newer commit, if one is out; the first call starts the
-/// checks (none under Never or `--no-update-check`, none in a local build).
+/// The newer release's tag, if one is out; the first call starts the checks (none under Never or
+/// `--no-update-check`, none in a build without a tag).
 fn latest(mode: Updates) -> Option<String> {
     static START: std::sync::Once = std::sync::Once::new();
     if mode == Updates::Never || NO_CHECK.load(Relaxed) {
         return None;
     }
     START.call_once(|| {
-        // a release build asks for releases; else its full commit, only in an Actions build
-        let ours = match (VERSION, BETA_COMMIT) {
-            (Some(v), _) => Ok(v),
-            (None, Some(sha)) => Err(sha),
-            (None, None) => return,
-        };
+        // only a release build asks, and only for releases
+        let Some(v) = VERSION else { return };
         std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             let api = std::env::var("OPENMX_UPDATE_API").unwrap_or_else(|_| LATEST_API.into());
             loop {
                 let asked = std::time::SystemTime::now();
-                match ours {
-                    Ok(v) => match rt.block_on(check(&api, v, ASSET)) {
-                        Ok(f) => {
-                            println!("update check: {}", f.as_ref().map_or(format!("{v} is the latest"), |f| format!("{} is out", f.tag)));
-                            STATE.lock().unwrap().found = f;
-                        }
-                        Err(e) => println!("update check: {e}"),
-                    },
-                    Err(ours) => match rt.block_on(beta()) {
-                        Ok(sha) if sha != ours => STATE.lock().unwrap().commit = Some(sha[..7].to_string()),
-                        Ok(_) => {}
-                        Err(e) => println!("update check: {e}"),
-                    },
+                match rt.block_on(check(&api, v, ASSET)) {
+                    Ok(f) => {
+                        println!("update check: {}", f.as_ref().map_or(format!("{v} is the latest"), |f| format!("{} is out", f.tag)));
+                        STATE.lock().unwrap().found = f;
+                    }
+                    Err(e) => println!("update check: {e}"),
                 }
                 // half an hour by the wall clock, not one 30-minute sleep: a suspended machine's sleep
                 // stops counting
@@ -133,24 +111,13 @@ fn latest(mode: Updates) -> Option<String> {
             }
         });
     });
-    let s = STATE.lock().unwrap();
-    s.found.as_ref().map(|f| f.tag.clone()).or_else(|| s.commit.clone())
+    STATE.lock().unwrap().found.as_ref().map(|f| f.tag.clone())
 }
 
 /// Whether the next check is due: half an hour after the last one `asked`, by the wall clock (a clock
 /// set back to before it counts as due).
 fn due(asked: std::time::SystemTime, now: std::time::SystemTime) -> bool {
     now.duration_since(asked).map_or(true, |d| d >= std::time::Duration::from_secs(30 * 60))
-}
-
-/// The commit the beta's downloads were built from.
-async fn beta() -> Result<String, String> {
-    beta_commit(&fetch(BETA_API, 256).await?)
-}
-
-/// `commit.txt`'s full commit (40 hex digits and a newline).
-fn beta_commit(body: &[u8]) -> Result<String, String> {
-    std::str::from_utf8(body).ok().map(str::trim).filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string).ok_or_else(|| "no commit".into())
 }
 
 /// `url`'s JSON.
@@ -301,7 +268,7 @@ fn target(f: &Found) -> Option<PathBuf> {
 }
 
 /// Square on the notice: a newer release installs and the game restarts into it; else the release
-/// page (or the beta's) opens.
+/// page opens.
 fn act() {
     let mut s = STATE.lock().unwrap();
     if s.busy {
@@ -690,14 +657,6 @@ Hs5KaCqvNkJ1Vjp/bntiFqm0CkKzxeGJhK9L+76A3G/wL+xeLy8au+kcLCnYzhku/rp99xxUM9X1p8bb
         assert!(steams(Path::new("/home/deck/.local/share/Steam/steamapps/common/openMX/openmx")));
         assert!(steams(Path::new("D:/SteamLibrary/SteamApps/common/openMX/openmx.exe")));
         assert!(!steams(Path::new("/home/deck/Games/openmx/openmx")));
-    }
-
-    #[test]
-    fn the_beta_commit_is_a_full_hash() {
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(beta_commit(format!("{sha}\n").as_bytes()).as_deref(), Ok(sha));
-        assert!(beta_commit(b"0123456\n").is_err());
-        assert!(beta_commit(b"<html>404</html>").is_err());
     }
 
     #[test]

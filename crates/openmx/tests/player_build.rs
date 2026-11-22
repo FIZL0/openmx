@@ -1,7 +1,7 @@
 //! P262: the builds players download run the native sim (openmx's `native-sim`, F15), and the gate's do not.
 //! Player builds come out of tools/build.sh (Linux, the Steam Deck's, Windows), tools/web.sh (the page),
-//! tools/ios-ipa.sh (the iPhone app, the release's alone), tools/apk.sh (the Android app, P308), tools/macos-app.sh (the Mac app, the release's alone, P351), and .github/workflows/pages.yml (the beta, which builds
-//! Linux without build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
+//! tools/ios-ipa.sh (the iPhone app, the release's alone), tools/apk.sh (the Android app, P308), tools/macos-app.sh (the Mac app, the release's alone, P351), and .github/workflows/pages.yml (main's check builds, deployed
+//! nowhere since P392, which build Linux without build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
 //! ci.yml and `tools/web.sh --check` (the tests' page) stay exact.
 
 use std::path::{Path, PathBuf};
@@ -40,10 +40,10 @@ fn the_default_player_build_is_native_and_exact_sim_is_not() {
     assert!(build.contains("--target $t $features"), "the windows build drops the features");
 }
 
-/// The other player builds: the page, the iPhone app and the beta's Linux job, which builds without
-/// tools/build.sh. The beta's Windows job and the release go through build.sh with no --exact-sim.
+/// The other player builds: the page, the iPhone app and pages.yml's Linux job, which builds without
+/// tools/build.sh. pages.yml's Windows job and the release go through build.sh with no --exact-sim.
 #[test]
-fn the_page_the_app_and_the_beta_are_native() {
+fn the_page_the_app_and_mains_builds_are_native() {
     let web = read("tools/web.sh");
     assert!(web.contains("features=\"--features ship,native-sim\""), "tools/web.sh's release page is not native, or not ship");
     assert!(web.contains("--check) check=1 features= ;;"), "tools/web.sh --check (the tests' page) must stay exact");
@@ -69,10 +69,13 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(read("tools/build.sh").contains("openmx-macos-arm64.dmg ${exact:+--exact-sim} ;;"), "build.sh macos drops --exact-sim");
 
     let pages = read(".github/workflows/pages.yml");
-    assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
-    assert!(pages.contains("tools/build.sh windows\n"), "the beta's Windows build is not build.sh's default");
-    assert!(pages.contains("tools/web.sh\n"), "the beta's page is not web.sh's default");
-    assert!(!pages.contains("--exact-sim"), "a beta build asks for the exact sim");
+    assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "pages.yml's Linux build is not build.sh's");
+    assert!(pages.contains("tools/build.sh windows\n"), "pages.yml's Windows build is not build.sh's default");
+    assert!(pages.contains("tools/web.sh\n"), "pages.yml's page is not web.sh's default");
+    assert!(!pages.contains("--exact-sim"), "a pages.yml build asks for the exact sim");
+    // P392: no beta: nothing on main's pushes is deployed, and openmx.dev still gets each published release
+    assert!(!pages.contains("beta.") && !pages.contains("/dispatches"), "pages.yml still deploys the beta site");
+    assert!(pages.contains("actions/deploy-pages@") && pages.contains("github.event_name == 'release'"), "pages.yml no longer deploys the site");
 
     let release = read("tools/release.sh");
     assert!(release.contains("tools/build.sh all\n") && release.contains("tools/web.sh\n"), "the release does not take the default builds");

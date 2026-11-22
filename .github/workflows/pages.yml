@@ -1,13 +1,8 @@
-# The beta and the website, as opentennis's pages.yml (no game data anywhere: players pick their own ISO).
-# - Every push to main is a beta once ci passes: https://beta.openmx.dev gets that commit's website, and its Linux and
-#   Windows builds under /download/ (tools/beta-bundle.sh). B43 (opentennis's B745): the beta is no GitHub release
-#   (Quiver Launcher took a rolling `beta` pre-release for the newest version and offered no real ones); this repo's
-#   only releases are tools/release.sh's vX.Y.Z. The beta job leaves the bundle as a draft release of
-#   FIZL0/openmx-beta (drafts are hidden) and asks that repo (one workflow, tools/beta-site.yml) to put it on its
-#   Pages. Both need the secret BETA_DISPATCH_TOKEN (a fine-grained token with Contents read/write on
-#   FIZL0/openmx-beta); without it the beta job fails and the beta isn't updated. No iPhone app: GitHub's macOS runners were often
-#   not acquired, which fails the run (and mails) whatever continue-on-error says; a release's .ipa is built locally
-#   by tools/release.sh (2026-11-03).
+# The website, as opentennis's pages.yml (no game data anywhere: players pick their own ISO).
+# - Every push to main runs ci and builds the website and the Linux and Windows builds, as checks that they still
+#   build: nothing is deployed from them (P392, user 2026-11-21: no more pre-release builds deployed; this repo's only releases are
+#   tools/release.sh's vX.Y.Z). No iPhone app: GitHub's macOS runners were often not acquired, which fails the run
+#   (and mails) whatever continue-on-error says; a release's .ipa is built locally by tools/release.sh (2026-11-03).
 # - A published release (tools/release.sh) goes on https://openmx.dev, this repo's own Pages: its web.tar.gz as
 #   built by the release script, deployed without building (~1 min).
 name: pages
@@ -19,9 +14,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# a running beta always finishes; GitHub keeps only the newest queued one. Releases have their own group.
+# a running check always finishes; GitHub keeps only the newest queued one. Releases have their own group.
 concurrency:
-  group: pages-${{ github.event_name == 'release' && 'release' || 'beta' }}
+  group: pages-${{ github.event_name == 'release' && 'release' || 'main' }}
   cancel-in-progress: false
 jobs:
   ci:
@@ -56,8 +51,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       # tools/build.sh's linux build and packaging, without its docker step; the commit from Actions (the container's
-      # checkout may have no usable git). GITHUB_SHA in the build's environment makes it a beta to the updater (P191,
-      # crates/openmx/src/update.rs): its main menu asks which commit beta.openmx.dev's downloads are at
+      # checkout may have no usable git)
       - run: |
           export OPENMX_COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
           # the player build's sim (P262: native), as tools/build.sh linux builds it
@@ -88,56 +82,10 @@ jobs:
         with:
           name: windows
           path: openmx-windows-x86_64.zip
-  beta:
-    needs: [ci, web, linux, windows]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with:
-          sparse-checkout: tools/beta-bundle.sh
-          sparse-checkout-cone-mode: false
-          path: src
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
-        with:
-          merge-multiple: true
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          DISPATCH: ${{ secrets.BETA_DISPATCH_TOKEN }}
-          BETA: FIZL0/openmx-beta
-        run: |
-          [ -n "$DISPATCH" ] || { echo "::error::no BETA_DISPATCH_TOKEN secret: beta.openmx.dev can't be updated"; exit 1; }
-          # a stale run still publishes, unless the beta site already shows a newer commit
-          cur=$(curl -sSfL https://beta.openmx.dev/download/commit.txt 2>/dev/null | tr -cd 0-9a-f || true)
-          if [ -n "$cur" ] && [ "$(gh api "repos/$GH_REPO/compare/$cur...$GITHUB_SHA" -q .status 2>/dev/null)" = behind ]; then
-            echo "beta already at newer ${cur::7}, skipping"; exit 0
-          fi
-          # B50: an expired or revoked token answers 401 to everything; say so, not that deploy.yml is old
-          err=$(GH_TOKEN=$DISPATCH gh api "repos/$BETA" -q .full_name 2>&1 >/dev/null) \
-            || { echo "::error::BETA_DISPATCH_TOKEN can't read $BETA ($err): on HTTP 401 it expired or was revoked, make a new one (plan/HUMAN.md's beta dispatch token)"; exit 1; }
-          # the beta repo's workflow must be tools/beta-site.yml's B43 one (it takes the bundle from a draft there);
-          # an older one still reads this repo's `beta` release, so that stays until the workflow is updated
-          GH_TOKEN=$DISPATCH gh api "repos/$BETA/contents/.github/workflows/deploy.yml" -q .content | base64 -d | grep -q beta-site.tar.gz \
-            || { echo "::error::$BETA's deploy.yml is older than tools/beta-site.yml: copy it there"; exit 1; }
-          bash src/tools/beta-bundle.sh web.tar.gz beta-site.tar.gz "$GITHUB_SHA" openmx-windows-x86_64.zip openmx-linux-x86_64.tar.gz
-          # one draft at a time over there: an older run's (its deploy, if still waiting, fails and this one's follows)
-          for id in $(GH_TOKEN=$DISPATCH gh api "repos/$BETA/releases" -q '.[] | select(.draft) | .id'); do
-            GH_TOKEN=$DISPATCH gh api -X DELETE "repos/$BETA/releases/$id"
-          done
-          id=$(GH_TOKEN=$DISPATCH gh api "repos/$BETA/releases" -f tag_name=beta-site -f name="Beta site ${GITHUB_SHA::7}" -F draft=true -q .id)
-          GH_TOKEN=$DISPATCH gh api -X POST "https://uploads.github.com/repos/$BETA/releases/$id/assets?name=beta-site.tar.gz" \
-            -H 'Content-Type: application/gzip' --input beta-site.tar.gz -q .size
-          GH_TOKEN=$DISPATCH gh api "repos/$BETA/dispatches" -f event_type=beta -F "client_payload[release]=$id"
-          # the rolling release from before B43: gone for good (a no-op once it is)
-          gh release view beta >/dev/null 2>&1 && gh release delete beta --cleanup-tag -y
-          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/beta" 2>/dev/null || true
   # openmx.dev: the published release's own website. Only a normal release (tools/release.sh VERSION without a
-  # suffix): the beta and pre-releases (1.1.0-rc.1) never go on it. The github-pages environment allows main and v*
-  # tags; beta.openmx.dev is FIZL0/openmx-beta's Pages, never this repo's.
+  # suffix): pre-releases (1.1.0-rc.1) never go on it. The github-pages environment allows main and v* tags.
   site:
-    if: ${{ github.event_name == 'release' && !github.event.release.prerelease && github.event.release.tag_name != 'beta' }}
+    if: ${{ github.event_name == 'release' && !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     permissions:
       pages: write
