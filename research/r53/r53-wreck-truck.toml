@@ -1,0 +1,168 @@
+# r53-wreck-truck.toml — P2's wreck bike rolled into free09's parked monster truck (R53), a row a tick.
+#
+# research/r53/boot.py boots free09 for two players with [Biplane1] and [Monster2] parked (plane 0x604740
+# ~390 ft south of the truck, asleep, nobody in it); tele_p2.py stands P2 18 ft south of the truck facing
+# it, wreck_p2.py gives P2's bike 25 ft/s at the truck and trips the original's wreck test (reason 4).
+# research/r53/index.md has the steps.
+#   ./kit record research/r53/r53-wreck-truck.toml --state 13 --frames 150 --out context/capture/r53/wreck-truck.csv
+
+[watch]
+name        = "r53-wreck-truck"
+description = "R53: P2's wreck bike rolled into free09's parked truck, the plane parked far off, a row a tick"
+every       = 1
+frames      = 150
+
+[setup]
+warmup = 0
+settle_ms = 0                     # the default 300 ms lets ~9 ticks past the state before the first row
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+# --- the plane, parked (MXBiplane, the list's first entry) --------------------------------------------
+
+[[field]]
+name = "plane_pos"
+addr = "0x604740 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "plane_vel"
+addr = "0x604740 + 0x160 -> 0x70"
+type = "f32x4"
+
+# --- the truck's body (car +0x160): +0 awake; its collision object (car +0x170) ------------------------
+
+[[field]]
+name = "truck_awake"
+addr = "0x1339fd0 + 0x160 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "truck_pos"
+addr = "0x1339fd0 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "truck_vel"
+addr = "0x1339fd0 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "truck_quat"
+addr = "0x1339fd0 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "truck_rate"
+addr = "0x1339fd0 + 0x160 -> 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "truck_object"
+addr = "0x1339fd0 + 0x170"
+type = "u32"
+
+[[field]]
+name = "truck_contacts"           # the object's contact count (S489: +0x100, entries at +0x108)
+addr = "0x1339fd0 + 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "truck_contact_list"
+addr = "0x1339fd0 + 0x170 -> 0x108"
+type = "u32"
+
+[[field]]
+name = "truck_contact0_kind"      # the list's 0x80-byte entries: +0 kind (0 own, 1 mirror), +0x74 the other object
+addr = "0x1339fd0 + 0x170 -> 0x108 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "truck_contact0_other"
+addr = "0x1339fd0 + 0x170 -> 0x108 -> 0x74"
+type = "u32"
+
+[[field]]
+name = "truck_contact1_kind"
+addr = "0x1339fd0 + 0x170 -> 0x108 -> 0x80"
+type = "u32"
+
+[[field]]
+name = "truck_contact1_other"
+addr = "0x1339fd0 + 0x170 -> 0x108 -> 0xf4"
+type = "u32"
+
+# --- P2 (rider 0x911c90, type 4): wreck words, the chassis, the wreck body ----------------------------
+
+[[field]]
+name = "p2_reason"
+addr = "0x911c90 + 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_wrecked"
+addr = "0x911c90 + 0xb7c"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_clock"
+addr = "0x911c90 + 0x794"
+type = "f32"
+
+[[field]]
+name = "p2_chassis_pos"
+addr = "0x911c90 + 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "p2_chassis_vel"
+addr = "0x911c90 + 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "wreck_object"
+addr = "0x911c90 + 0x7a8 -> 0x110"
+type = "u32"
+
+[[field]]
+name = "wreck_pos"
+addr = "0x911c90 + 0x7a8 -> 0x110 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "wreck_vel"
+addr = "0x911c90 + 0x7a8 -> 0x110 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "wreck_quat"
+addr = "0x911c90 + 0x7a8 -> 0x110 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "wreck_rate"
+addr = "0x911c90 + 0x7a8 -> 0x110 -> 0x1b0"
+type = "f32x4"

@@ -3,7 +3,7 @@
 #   bash research/r53/start.sh SLOT [PLAYERS]
 set -e
 cd "$(dirname "$0")/../.."
-export KIT_PCSX2=2 WAYLAND_DISPLAY=wayland-1 XDG_SESSION_TYPE=wayland
+export KIT_PCSX2=${KIT_PCSX2:-2} WAYLAND_DISPLAY=wayland-1 XDG_SESSION_TYPE=wayland
 export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1
 ./kit pcsx2 stop || true
 ./kit pcsx2 start
