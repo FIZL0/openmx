@@ -6,6 +6,5 @@ The only phone log from a build with P212a's line (10-30, build 2366) never show
 rider for a whole launch. Its three `(no rider drawn in N of M frames)` lines were the put-back tick on
 which the original still draws the body where the ragdoll lay (S74). That frame is no longer counted. The
 real 10-28 bug did not come back: on 11-21 an agent rode the iPhone itself (0.18.0, about 45 minutes over
-two launches, six put-backs, two tracks) and neither log has the line, so there was no cause to fix (2).
-Details in the numbered files; the
+two launches, six put-backs, two tracks) and neither log has the line, so there was no cause to fix (2). Details in the numbered files; the
 newest one's suffix says whose move it is (FINAL · PART · READY).

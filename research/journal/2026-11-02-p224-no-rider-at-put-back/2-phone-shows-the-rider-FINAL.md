@@ -8,8 +8,9 @@ The iPhone 15 Pro is on omarchy-desktop's USB, so no person was needed (user, 11
 with iFizBox's `tools/ui-15.sh` under lock `P224`, given back at the end. Logs pulled with
 `ios fsync … pull --srcPath=/Documents/openmx-log.txt` (and `openmx-log-previous.txt`).
 
-The phone runs openMX 0.18.0 build 5260 (bd79f93). It has P212a's line, P212's `gpu error:` lines and
-part 1's skip of the thrown body (736dd67 is an ancestor of bd79f93). So no new build was needed.
+The phone runs openMX 0.18.0 build 5260. Its log's first line names bd79f93 ("Release v0.18.0"); the
+task's note named 4fce2110e. Both have part 1's skip of the thrown body (736dd67 is an ancestor of each),
+P212a's line and P212's `gpu error:` lines. So no new build was needed.
 
 Two touches at once (Gas held, the stick swung) went through WDA's `/actions` with two pointers; a
 one-off script in the scratchpad, not committed.
