@@ -2,5 +2,6 @@
 
 2026-11-21. Task: `./kit plan K86`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+The browser build broke on lobby_ride.rs calling Net::next, which wasm lacks. B49 had already fixed it with a
+native-only `next` and a wasm stand-in. The person picked A (keep that fix and close); `tools/web.sh --check` is
+green on main (324941bbd), so no code changed.
