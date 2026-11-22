@@ -24,7 +24,8 @@ Task P336a. 2026-11-21. Follows `research/journal/2026-11-15-p336a-webkit-stage-
 - Fix (`crates/game-render/src/gpu.rs`): a ground without meshes keeps `no_meshes`, an empty bind group layout
   and an empty bind group. Both ground pipeline layouts take it as group 2 (`GpuGround::group2`), and
   `draw_views` sets the empty bind group at 2 when there are no meshes. No other pipeline layout in
-  game-render has a missing group (checked every `bind_group_layouts`).
+  game-render has a missing group (checked every `bind_group_layouts`), and every draw with a ground
+  pipeline (whole, fading, stand-in) is in that one loop of `draw_views`, after group 2 is set.
 - Test `a_ground_without_meshes_sets_an_empty_group_2`: a meshless ground holds the empty group, and a frame
   drawn with it passes wgpu's validation with the ground drawn (it ran, not skipped).
 
@@ -35,7 +36,9 @@ Not applicable: rendering on the web.
 ## How it was proved
 
 The failing call is named by the phone's own log (committed above). The fix is proved only on this machine:
-the new test, under wgpu native. Not yet on the phone (below).
+the new test, under wgpu native. Not yet on the phone (below). The test cannot see Safari's rule: wgpu
+native accepts a missing group, so before the fix only its `no_meshes` check would have failed; its frame
+proves only that the empty group breaks nothing.
 
 ## Not verified / not 1:1
 
@@ -50,5 +53,5 @@ the new test, under wgpu native. Not yet on the phone (below).
 
 ## Next
 
-None for P336a. After the deploy, ride sx01 on beta in Safari (WebGPU, `?fps`) by the same recipe and read
+P396 (filed, low, after P336a): after the deploy, ride sx01 on beta in Safari (WebGPU, `?fps`) by the same recipe and read
 the log for any `gpu: validation error` line (the filed follow-up).
