@@ -17,13 +17,15 @@
 
 use game_sim::archive::{Psr, Res};
 use game_sim::biplane::Body;
-use game_sim::contact::{Collider, Node, Response};
+use game_sim::contact::{Collider, Node, Response, Vehicle};
 use game_sim::contact_search::Heightfield;
+use game_sim::flight_search::{self, Bikes};
+use game_sim::math::Mat4;
 use game_sim::phy::Part;
 use game_sim::ride::WRECK_INERTIA;
-use game_sim::track::{Rays, Scene, Terrain};
+use game_sim::track::{self, Rays, Scene, Terrain};
 use game_sim::world::{Ground, Props};
-use game_sim::wreck_bike::{self, NoObjects, WreckBike};
+use game_sim::wreck_bike::{self, NoObjects, Riders, WreckBike};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
 use std::collections::HashMap;
@@ -879,4 +881,208 @@ fn the_ragdolls_sphere_zone_is_its_own_ground_querys() {
     }
     eprintln!("{asked} sphere rows asked, {touching} touching; the ground's own surface differs on {by_ground_at}");
     assert!(asked > 1500 && touching > 400, "{asked} asked, {touching} touching");
+}
+
+// --- S134: a wreck bike into another rider's bike ---------------------------------------------------
+
+/// libpad's pad buffers: port 0's two halves (+0x80 the second, each half's stamp at +0x58), +0x400
+/// port 1's.
+const PAD_BUFFERS: u32 = 0x0047_a980;
+const PAD_COLUMNS: [(&str, &str); 4] = [("pad0_a", "stamp0_a"), ("pad0_b", "stamp0_b"), ("pad1_a", "stamp1_a"), ("pad1_b", "stamp1_b")];
+/// `sceSifSetDma`, `sceSifDmaStat` and the data cache's write-back over a range.
+const SIF_SET_DMA: u32 = 0x003f_c3a0;
+const SIF_DMA_STAT: u32 = 0x003f_c380;
+const DCACHE_RANGE: u32 = 0x003f_c8d8;
+/// The `lui $r, 0x1000` instructions that form Timer 0's register address, and its stand-in.
+const TIMER_READS: [u32; 2] = [0x0016_7dc0, 0x0013_21fc];
+const TIMER_COUNT: u32 = 0;
+const IOP_RPC_SEND_LEN: u32 = 344;
+
+/// Run the hooked function from inside its hook, the registers and stack put back so the hook returns
+/// to its caller as the call would have.
+fn through(ee: &mut Ee) {
+    let (pc, ra, sp, steps, stack) = (ee.pc, ee.r(31), ee.r(29), ee.steps, ee.stack);
+    let args: Vec<u64> = (4..12).map(|k| ee.r(k)).collect();
+    ee.stack = (sp as u32 - 0x800) & !0xf;
+    ee.call(pc, &args, &[], 2_000_000_000);
+    ee.set(31, ra);
+    ee.set(29, sp);
+    (ee.steps, ee.stack, ee.pc) = (steps, stack, pc);
+}
+
+/// Frame `f` of a split capture, whole, as tests/ragdoll_wrecks.rs's S176 runs a 2p one: row `f − 1`'s
+/// pads laid in, row `f`'s dt, the device update, the markers and the scene root's simulate.
+fn whole_frame(ee: &mut Ee, cap: &Capture, f: u32, clock: &mut f64) {
+    let dt = cap.get(f, "dt");
+    for (k, (pad, stamp)) in PAD_COLUMNS.into_iter().enumerate() {
+        let at = PAD_BUFFERS + [0u32, 0x80, 0x400, 0x480][k];
+        for (i, b) in cap.bytes(f - 1, pad).into_iter().enumerate() {
+            ee.ram[((at & 0x01ff_ffff) as usize) + i] = b;
+        }
+        ee.set_u32(at + 0x58, cap.text(f - 1, stamp).parse().expect("a stamp"));
+    }
+    let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE, addr("sceSifCheckStatRpc").unwrap()];
+    ee.hooks.insert(stubs[0], Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(stubs[1], Box::new(|_: &mut Ee| {}));
+    ee.hooks.insert(SIF_SET_DMA, Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(SIF_DMA_STAT, Box::new(|ee: &mut Ee| ee.set(2, u64::MAX)));
+    ee.hooks.insert(DCACHE_RANGE, Box::new(|_: &mut Ee| {}));
+    let (check, send) = (addr("sceSifCheckStatRpc").unwrap(), addr("iop_rpc_send").unwrap());
+    let send_end = send + IOP_RPC_SEND_LEN;
+    ee.hooks.insert(
+        check,
+        Box::new(move |ee: &mut Ee| {
+            let ra = ee.r(31) as u32;
+            if (send..send_end).contains(&ra) { ee.set(2, 0) } else { through(ee) }
+        }),
+    );
+    for at in TIMER_READS {
+        let word = ee.u32_at(at);
+        assert!(word & 0xffe0_ffff == 0x3c00_1000 || word & 0xffe0_ffff == 0x3c00_0000, "{at:#x} is not a `lui $r, 0x1000`: a different build");
+        ee.set_u32(at, word & 0xffff_0000);
+    }
+    *clock += f64::from(dt) * 1000.0;
+    let wall = (*clock / 100.0).floor();
+    ee.set_u32(addr("wall_ticks").unwrap(), wall as u32);
+    ee.set_u32(TIMER_COUNT, ((*clock - wall * 100.0) * 576.0) as u32);
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let virt = |ee: &Ee, obj: u32, table: u32, slot: u32| ee.u32_at(ee.u32_at(obj + table) + slot);
+    let dev = ee.u32_at(app + 0x104);
+    ee.call(virt(ee, dev, 0x65c, 0x10), &[u64::from(dev), 1], &[dt], 4_000_000_000);
+    let marker = virt(ee, app, 0x3c4, 0x80);
+    ee.call(marker, &[u64::from(app), 1], &[], 4_000_000_000);
+    ee.set_u32(app + 0x32c, 2);
+    ee.set_f32(app + 0x344, dt);
+    ee.set_f32(app + 0x348, ps2_float::fpu::div(1.0, dt));
+    ee.set_u32(app + 0x374, ee.u32_at(app + 0x374) + 1);
+    assert_eq!(ee.u32_at(app + 0x374), f, "the image's frame counter is not the frame before {f}");
+    let root = ee.u32_at(app + 0x378);
+    ee.call(virt(ee, root, 0x8, 0x38), &[u64::from(root)], &[dt], 4_000_000_000);
+    assert_ne!(ee.v0(), 0, "frame {f}: the simulation asked to stop");
+    ee.set_u32(app + 0x32c, 0);
+    ee.call(marker, &[u64::from(app), 2], &[], 4_000_000_000);
+    for at in stubs {
+        ee.hooks.remove(&at);
+    }
+}
+
+/// Rider `p`'s ridden vehicle: the game manager's actor list, the riders' vehicles its third and fourth.
+fn rider(ee: &Ee, p: u32) -> u32 {
+    let mut node = ee.u32_at(ee.u32_at(ee.u32_at(addr("game_manager").unwrap()) + 0x34) + 0x34);
+    for _ in 0..2 + p {
+        node = ee.u32_at(node + 8);
+    }
+    ee.u32_at(node)
+}
+
+/// S93's short split-screen ride (`splitscreen2_shortcolision.p2m2`): P2 T-bones P1 and wrecks at
+/// 5998; its wreck bike tumbles on into P1's bike, its rays on P1's on 5999 to 6001. The frame the
+/// port's bike is seeded from, P2's wreck bike's collision object in the image, the last tick
+/// compared.
+const SPLIT_WRECK: (u32, u32, u32) = (5998, 0x012a_4b30, 6040);
+
+fn matrix(ee: &Ee, at: u32) -> Mat4 {
+    Mat4([0, 1, 2, 3].map(|r| quad(ee, at + 16 * r)))
+}
+
+/// A rider's chassis as the other side of a contact, through its collision record (`+0xf0` the
+/// chassis, `+0xf8` its transform).
+fn vehicle_at(ee: &Ee, r: u32) -> Vehicle {
+    let v = ee.u32_at(r + 0xf0);
+    Vehicle {
+        node: node_of(ee, ee.u32_at(r + 0xf8)),
+        cofg: quad(ee, v + 0x190),
+        mass: F(ee.f32_at(v + 0x210)),
+        inv_mass: F(ee.f32_at(v + 0x214)),
+        inv_inertia: [0xf0, 0x104, 0x118].map(|at| F(ee.f32_at(v + at))),
+        velocity: quad(ee, v + 0x260),
+        rates: quad(ee, v + 0x290),
+        shock: quad(ee, v + 0x170),
+        twist: quad(ee, v + 0x180),
+    }
+}
+
+/// S134: **a wreck bike into another rider's bike replays bit-exact.** The original runs S93's
+/// short ride whole from its image (every rider's chassis the capture's, every frame); P2's wreck
+/// bike, seeded from it the frame it wrecks and ticked by [`WreckBike::tick_ridden`] with both
+/// riders' bikes handed in, is the original's body to the bit every tick: its entries name P1's
+/// record where the original's do, P1's record takes the mirrors the original filed, and P1's chassis
+/// is left as it was. Ticked by [`WreckBike::tick_among`], without the bikes, it parts on the first.
+#[test]
+fn a_wreck_bike_into_a_riders_bike_replays_bit_exact() {
+    let Some(path) = ctx("states/s93/s93-short-5997.ram") else { return };
+    let Some(cap) = Capture::read("capture/split/splitscreen2.csv") else { return };
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    let Some(mut disc) = Disc::open() else { return };
+    let (part, _) = wreck_files(&mut disc);
+    let props = free09_props(&mut disc);
+    let mesh = track::Mesh::parse(&inside(&disc.member("Tracks\\free09_ss_2.res"), flight_search::BIKE_COLLISION)).expect("bikef.col");
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let field = ground.field();
+    let records = [0, 1].map(|p| ee.u32_at(rider(&ee, p) + 0x7d0));
+    whole_frame(&mut ee, &cap, SPLIT_WRECK.0, &mut clock);
+    let body = ee.u32_at(SPLIT_WRECK.1 + 0xf4);
+    let seed = bike_at(&ee, &part, body, SPLIT_WRECK.1);
+    let (mut ridden, mut alone) = (seed.clone(), seed);
+    let mut alone_parted = None;
+    let (mut struck, mut mirrored) = (0, 0);
+    for f in SPLIT_WRECK.0 + 1..=SPLIT_WRECK.2 {
+        // The riders as the frame before left them: the wreck bike's world steps first.
+        let bikes: Vec<flight_search::Bike> = records
+            .map(|r| {
+                let c = ee.u32_at(r + rec::COLLIDABLE);
+                flight_search::Bike { transform: matrix(&ee, c + 0x120), in_world: ee.u8_at(c + 0x116) & game_sim::world_search::flags::ENABLED != 0 }
+            })
+            .to_vec();
+        let mut chassis = records.map(|r| vehicle_at(&ee, r));
+        let mut colliders = records.map(|r| collider_of(&ee, r));
+        let before = chassis;
+        whole_frame(&mut ee, &cap, f, &mut clock);
+        for p in 0..2 {
+            let ch = ee.u32_at(rider(&ee, p) + 0x7a4);
+            let col = |a: &str| cap.get(f, &format!("p{}_ch_centre.{a}", p + 1)).to_bits();
+            assert_eq!([0, 4, 8].map(|k| ee.u32_at(ch + 0x60 + k)), ["x", "y", "z"].map(col), "{f}: the interpreter's rider {p} is not the capture's");
+        }
+        let dt = F(cap.get(f, "dt"));
+        let riders = Riders { bikes: Bikes { mesh: &mesh, bikes: &bikes }, chassis: &mut chassis, colliders: &mut colliders };
+        assert!(ridden.struck.struck.is_empty(), "tick {f}: a prop struck the wreck bike; the riders are not first among its others");
+        let mirrors = ridden.tick_ridden(dt, Some(&field), Some(&props), None, riders);
+        let want = ee_body(&ee, body);
+        let differ = bodies_differ(&ridden.body, &want);
+        assert!(differ.is_empty(), "tick {f}: the wreck bike among the riders' bikes differs in {differ:?}");
+        assert_eq!(chassis, before, "tick {f}: the wreck bike's resolve moved a rider's chassis; the original's does not");
+        // Its list names the riders' records where the original's does, and the mirrors are the ones the
+        // original filed on them.
+        let list = ee.u32_at(SPLIT_WRECK.1 + 0x108);
+        let named: Vec<Option<u32>> = (0..ee.u32_at(SPLIT_WRECK.1 + 0x100))
+            .map(|k| ee.u32_at(list + 0x80 * k + 0x74))
+            .map(|o| (o != 0).then(|| records.iter().position(|&r| r == o).expect("a rider's record") as u32))
+            .collect();
+        let got: Vec<Option<u32>> = ridden.record.contacts.iter().map(|e| e.other.map(|k| k as u32)).collect();
+        assert_eq!(got, named, "tick {f}: the riders its entries name");
+        for (p, m) in mirrors.iter().enumerate() {
+            let r = records[p];
+            let at = ee.u32_at(r + 0x108);
+            let theirs: Vec<[[u32; 4]; 2]> = (0..ee.u32_at(r + 0x100))
+                .map(|k| at + 0x80 * k)
+                .filter(|&e| ee.u32_at(e) == 1 && ee.u32_at(e + 0x74) == SPLIT_WRECK.1)
+                .map(|e| [quad(&ee, e + 0x30).to_bits(), quad(&ee, e + 0x40).to_bits()])
+                .collect();
+            let ours: Vec<[[u32; 4]; 2]> = m.iter().map(|e| [e.normal.to_bits(), e.point.to_bits()]).collect();
+            assert_eq!(ours, theirs, "tick {f}: the mirrors (normal, point) on rider {p}'s record");
+            mirrored += m.len();
+        }
+        struck += usize::from(got.iter().any(Option::is_some));
+        alone.tick_among(dt, Some(&field), Some(&props), None);
+        if alone_parted.is_none() && !bodies_differ(&alone.body, &want).is_empty() {
+            alone_parted = Some(f);
+        }
+    }
+    eprintln!("ticks striking a rider's bike: {struck}, mirrors filed: {mirrored}; without the bikes it parts at {alone_parted:?}");
+    assert!(struck >= 3 && mirrored >= 3, "the wreck bike never met P1's bike: {struck} ticks, {mirrored} mirrors");
+    assert_eq!(alone_parted, Some(SPLIT_WRECK.0 + 1), "the wreck bike replays without the riders' bikes");
 }

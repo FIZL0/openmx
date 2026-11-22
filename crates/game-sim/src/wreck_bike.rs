@@ -30,8 +30,9 @@
 //! ([`WreckBike::tick_among`]): its probes are the plane's (category, mask, flags, an empty category
 //! list on the ray probe), and what they leave out — the bike's own collidable, each other, the riding
 //! bike and the rider, and on the sweep the categories 0x8 and 0x800 — is none of the scenery's. The
-//! path cars are the world's toys, in its moving list, as the plane's world holds them (S171). A
-//! world with neither gets [`NoObjects`].
+//! path cars are the world's toys, in its moving list, as the plane's world holds them (S171). The
+//! other riders' bikes are in its nearby list too, and [`WreckBike::tick_ridden`] hands them in
+//! (S134). A world with neither gets [`NoObjects`].
 
 #![deny(clippy::float_arithmetic)]
 
@@ -46,6 +47,14 @@ use crate::hash::{State, Walk};
 use crate::math::quat_to_mat4;
 use crate::phy::Part;
 use ps2_float::{F, Vf, vu};
+
+/// The riders' bikes as [`WreckBike::tick_ridden`] meets them: the bikes in player order, and each
+/// rider's chassis and its collision record's object, the other side of a contact on its bike.
+pub struct Riders<'r> {
+    pub bikes: flight_search::Bikes<'r>,
+    pub chassis: &'r mut [contact::Vehicle],
+    pub colliders: &'r mut [Collider],
+}
 
 /// The world's two numbers: one constraint pass (it has no constraints) and 115 substeps a second.
 pub const WORLD: biplane::World = biplane::World { iterations: 1, rate: F(115.0) };
@@ -424,6 +433,58 @@ impl WreckBike {
         let mut nearby = flight_search::search();
         let mut scene = Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut nearby);
         self.tick(dt, ground, &mut scene);
+    }
+
+    /// [`WreckBike::tick_among`] with the riders' bikes in its world (S134): the original's nearby
+    /// list holds the other bikes (their collidables' category, [`flight_search::BIKE`]) beside the
+    /// scenery, and the wreck bike's rays strike a riding bike as the plane's do — the bike's collidable
+    /// owned by its rider's collision record, which takes the mirror. Each rider `k` is its bike, its
+    /// chassis as the other side of a contact and its record's collision object, as the frame before
+    /// left them: the wreck bike's world steps before the riders' does, and nothing of the riders moves
+    /// under its substeps. The wrecked rider's own bike may be among them: it has left the world
+    /// ([`flight_search::Bike::in_world`] off), so the search skips it. The answer is the mirrors each
+    /// rider's record took, in the riders' order.
+    pub fn tick_ridden(&mut self, dt: F, ground: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>, riders: Riders<'_>) -> Vec<Vec<contact::Contact>> {
+        let Riders { bikes, chassis, colliders } = riders;
+        let rays = ray_tree();
+        let bounds = ground.map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let velocities: Vec<Vf> = chassis.iter().map(|c| c.velocity).collect();
+        let mut nearby = flight_search::search();
+        let mut scene = Scene::flown(props, trees, Some(bikes), bounds, &rays, &self.record.node, &mut nearby).owned(&velocities);
+        contact_search::clear(&mut self.record, Some(&mut self.body));
+        let mut records = vec![std::mem::take(&mut self.record)];
+        records.extend(velocities.iter().map(|_| Record { capacity: crate::rider_contact::CAPACITY, ..Record::default() }));
+        contact_search::collide(&mut records, 0, Some(&mut self.body), ground, &mut scene, dt);
+        let movers = scene.movers();
+        let mut records = records.into_iter();
+        self.record = records.next().unwrap_or_default();
+        let mirrors = records.map(|r| r.contacts).collect();
+        // The props' strikes after the bike's own entries, as `tick_struck` files them; the riders'
+        // sides after the struck props' among the others.
+        let mut struck = std::mem::take(&mut self.struck);
+        let first = struck.struck.len();
+        for e in &mut self.record.contacts {
+            e.other = e.other.and_then(|k| k.checked_sub(1)).map(|k| first + k);
+        }
+        let r = &mut self.record;
+        for e in struck.entries.iter().chain(&struck.mirrors) {
+            r.touching = true;
+            r.on_object = true;
+            r.touching_other = true;
+            if r.contacts.len() < r.capacity {
+                r.contacts.push(*e);
+            }
+        }
+        let mut bodies: Vec<_> = struck.struck.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
+        let mut others: Vec<contact::Other<'_>> =
+            bodies.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }).collect();
+        others.extend(colliders.iter_mut().zip(chassis.iter_mut()).map(|(collider, v)| contact::Other { collider, side: contact::Side::Vehicle(v) }));
+        WORLD.step(dt, &mut Lists(self, &movers, &mut others));
+        self.struck.struck = struck.struck;
+        mirrors
     }
 
     /// The model's origin: the transform's translation.
