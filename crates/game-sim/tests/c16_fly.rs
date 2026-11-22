@@ -2365,8 +2365,7 @@ const R48_PUSH_THROUGH: u32 = 1604;
 /// 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to row 1640, and the truck driven past
 /// z 3870 by row 1628 (the original's 3877). Since S489 the truck's own strikes on the plane's hull
 /// keep its brakes off as well, and the truck follows the original's replay within 0.008 ft/s (each
-tick's first substep) through row 1587. Not
-/// held: at row 1587 the plane's wing ray (its tip at `x` 7.5) meets the truck 0.0015 ft short of its
+/// tick's first substep) through row 1587. Not held: at row 1587 the plane's wing ray (its tip at `x` 7.5) meets the truck 0.0015 ft short of its
 /// tip in the original and just misses it in the Sim; from there the push parts, the truck 1.7 ft/s
 /// slow by row 1605.
 #[test]
