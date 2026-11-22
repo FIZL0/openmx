@@ -48,6 +48,7 @@ pub mod link;
 pub mod recover;
 pub mod resync;
 pub mod rides;
+pub mod riding;
 pub mod rollback;
 pub mod udp;
 

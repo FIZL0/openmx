@@ -40,3 +40,9 @@ _Said_: the movable props need to reset when the player poofs or goes past the s
 _On screen_: --props-put-back
 _In code_: prop_set::PropSet::put_back_with_rider, prop_set::PropSet::put_back_all
 _Avoid_: prop reset
+
+**Drawn riding ragdoll**:
+An online seat's riding ragdoll that the shell steps for the picture only, beside the online ride, so the rider on the bike is drawn as springy as offline; the ride itself never sees it.
+_Said_: draw-only shadow
+_In code_: net::riding::DrawnRiding
+_Avoid_: shadow
