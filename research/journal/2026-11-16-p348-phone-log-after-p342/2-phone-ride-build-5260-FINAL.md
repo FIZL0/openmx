@@ -4,8 +4,9 @@ Task P348. 2026-11-21.
 
 ## What I did
 
-- The iPhone 15 Pro on omarchy-desktop already had openMX 0.18.0 build 5260 (bd79f93, 2026-11-18). That
-  build has P342 (`ecd76633f` is its ancestor), so I installed nothing.
+- The iPhone 15 Pro on omarchy-desktop already had openMX 0.18.0 build 5260. The log's first line names
+  `bd79f93` (`Release v0.18.0`, 2026-11-18 16:58); the brief named `4fce2110e` (the same day, 15:43). Both
+  have P342 (`ecd76633f` is an ancestor of each), so I installed nothing.
 - Drove it under `tools/ui-15.sh lock P348` (lock given back after). Killed the app for a fresh log,
   then title → Free Ride → MX Unleashed: WORLD (world_mxu, last ridden) → ride.
 - Rode it with two fingers at once: GAS held and the touch stick steered now and then, in one WebDriverAgent
@@ -47,7 +48,7 @@ Task P348. 2026-11-21.
   that ended when the app came back, then that frame's draw). The 15 s and 8.8 s frames are the same wait
   with the app suspended by iOS. None of them is the 576 ms frame P342 saw; that kind of frame did not
   happen in this log.
-- **Back from the app switcher stays near the upload budget.** The first second back uploaded
+- **Back from away: the uploads are small, but the first frame's is bounded, not read.** The first second back uploaded
   `28 models uploaded in the draw` both times, at `upload 1.03` and `1.28` ms a frame on average. In the
   first frame back, upload is not one of the two leading stages, so it took under 7.69 ms (1st trip) and
   under 1.14 ms (2nd trip). The largest per-second upload anywhere in the log is 3.11 ms a frame. The
@@ -72,8 +73,14 @@ Not applicable: frame times of the phone app, not the original's behaviour.
   fine ground over coarse) is not shown on the phone; this log has no `world ground: waited` line, but no
   jump was made either. Filed as P398 (a touch control for the markers).
 - **The away trips were Home and back, not the app switcher itself.** Both send WillResignActive and then
-  DidEnterBackground, and the app gave back models and ground the same way P342's switcher logs did. A
-  switcher peek that never reaches the background (only WillResignActive) was not tried.
+  DidEnterBackground, and the app gave back models and ground the same way P342's switcher logs did. I tried
+  the switcher too: a WebDriverAgent touch swiped up from the home indicator and held (twice, since the app
+  defers the bottom edge). It never opened; the ride just went on. A switcher peek that never reaches the
+  background (only WillResignActive) is therefore not in this log.
+- **The first frame back is over the 4 ms budget on trip 1, possibly.** Its upload is only known to be under
+  7.69 ms (the second leading stage); trip 2's is under 1.14 ms. The budget is checked before each model, so
+  one model's upload past 4 ms is allowed by design. Reading the exact figure needs the per-frame upload in
+  the worst frame's line, which the log does not give.
 - **The rest's share of each 105 ms frame is inferred, not measured.** The per-second line has no stage for
   it, so `present` holds rest plus the frame's real encoding. Splitting it out needs a change in `ios_gpu.rs`
   and a new signed build on the phone; filed as P397 rather than shipped unseen (iOS-only code is not
