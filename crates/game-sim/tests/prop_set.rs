@@ -323,3 +323,57 @@ fn a_woken_prop_ticks_with_the_ride_and_rolls_back() {
     let mut bare = Sim::new(7);
     assert!(snapshot::decode(&mut bare, &bytes).is_err(), "props in the state, none here");
 }
+
+/// S475 — the Props Put Back switch, the port's own ([`PropSet::put_back_with_rider`]): on, the L1+R1
+/// poof puts a knocked prop back on its spot, asleep, in the same tick; off, the poof leaves it where
+/// it swings, as the original does. A tick marked due (a human through the lap line, or a poof) does
+/// nothing with the switch off.
+#[test]
+fn a_poof_puts_knocked_props_back_with_the_switch_on() {
+    let dt = F(1.0 / 30.0);
+    let poof = game_sim::ride::Controls { respawn: true, ..Default::default() };
+    let knocked = |on: bool| {
+        let mut sim = Sim::new(7);
+        let mut world = Flat::default();
+        sim.traffic.props = sign();
+        sim.traffic.props.put_back_with_rider = on;
+        let made = sim.traffic.props.collections[0].clone();
+        sim.traffic.props.wake(0, 0);
+        sim.traffic.props.collections[0].bones[0].body.rates = Vf::new(2.5, 0.0, -3.0, 1.0);
+        for _ in 0..10 {
+            sim.step(dt, &Default::default(), &mut world);
+        }
+        assert_ne!(sim.traffic.props.collections[0].objects[0].node, made.objects[0].node, "the sign swung");
+        let frame = sim.step(dt, &poof, &mut world);
+        assert!(frame.respawned, "the chord poofed the rider");
+        assert!(!sim.traffic.props.put_back_due, "the props' step used the mark up");
+        (sim, made)
+    };
+
+    let (mut sim, made) = knocked(true);
+    let c = &sim.traffic.props.collections[0];
+    assert_eq!(c.objects[0].node, made.objects[0].node, "the poof put the sign back on its spot");
+    // The substep's step is kept, as the timed put-back keeps it.
+    let body = game_sim::biplane::Body { step: made.bones[0].body.step, ..c.bones[0].body };
+    assert_eq!(body, made.bones[0].body, "asleep and still, as it was made");
+    assert!(!c.active && c.listeners.is_empty() && sim.traffic.props.listeners.is_empty(), "nothing left ticking");
+    assert!(!c.objects[0].filed && c.objects[0].countdown < F::ZERO, "unfiled, no countdown");
+    // And it stays there.
+    let mut world = Flat::default();
+    for _ in 0..30 {
+        sim.step(dt, &Default::default(), &mut world);
+    }
+    assert_eq!(sim.traffic.props.collections[0].objects[0].node, made.objects[0].node, "the sign stays put");
+
+    let (sim, made) = knocked(false);
+    let c = &sim.traffic.props.collections[0];
+    assert_ne!(c.objects[0].node, made.objects[0].node, "off, the poof leaves the sign where it swings");
+    assert!(c.active, "and still ticking");
+
+    // A tick marked due with the switch off puts nothing back and clears the mark.
+    let mut sim = sim;
+    sim.traffic.props.put_back_due = true;
+    sim.step(dt, &Default::default(), &mut world);
+    assert!(!sim.traffic.props.put_back_due, "the step clears the mark");
+    assert_ne!(sim.traffic.props.collections[0].objects[0].node, made.objects[0].node, "off, a due tick puts nothing back");
+}

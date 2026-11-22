@@ -4370,6 +4370,10 @@ struct Args {
     /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
     /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
     backwards_bail: bool,
+    /// Whether every knockable prop is put back where it was placed when a rider poofs or goes
+    /// through the lap line ([`game_sim::prop_set::PropSet::put_back_with_rider`], S475): the port's
+    /// own, which `--props-put-back` turns on. Off by default, the original's.
+    props_put_back: bool,
     /// MX vs. ATV's quad (MD37d), an addition: `--atv NAME`, the handling file (`atv_Race250P`; MD144's
     /// `atv_Race250P@untamed_atv` names the pack too) the installed quad pack rides it on, which the
     /// pause's switch row then offers; under the front end the Garage's Quad row. Empty, the default, for none: the ride is the original's.
@@ -7617,6 +7621,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 said.iter().for_each(|why| println!("  {why}"));
             }
             cars.props = props;
+            // S475: `--props-put-back` puts every prop back on a poof and at the lap line, the port's
+            // own; off online, where both machines must step the props alike.
+            cars.props.put_back_with_rider = args.props_put_back && args.online.is_none();
             // The bikes' frame box, which the props' probes are heard striking (F27a2).
             cars.props.bike_frame = bike_box.clone().map(Arc::new);
             // The struck `HasPhysics` cars' rigid bodies (S186), put back past the terrain's edge.
@@ -18477,6 +18484,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         wrecks: true,
         air_wrecks: true,
         backwards_bail: false,
+        props_put_back: false,
         atv: String::new(),
         mxvatv_car: String::new(),
         vibration: true,
@@ -18851,6 +18859,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
+            "--props-put-back" => args.props_put_back = true,
             "--atv" => args.atv = next("a quad's handling file, like atv_Race250P (atv_Race250P@untamed_atv for a pack's)")?,
             "--mxvatv-car" => args.mxvatv_car = next("an MX vs. ATV car: buggy, monstertruck, baja, golfcart or sandrail")?,
             "--no-vibration" => args.vibration = false,
@@ -19174,7 +19183,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--atv NAME] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--props-put-back] [--atv NAME] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--auto-photos wrecks,tricks,results|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT] [--fp-adjust BOB,UP,FORWARD,FOV]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -19286,7 +19295,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the rider on whatever the bike's attitude in the air (a landing is still\n\
                      judged); --backwards-bail throws the rider off a landing\n\
                      with the bike facing back against its way, which the original rides\n\
-                     out (off by default); --atv atv_Race250P offers MX vs. ATV's\n\
+                     out (off by default); --props-put-back puts every knocked prop\n\
+                     back on its spot when you poof or go through the lap line, which\n\
+                     the original does not (off by default, offline only); --atv atv_Race250P offers MX vs. ATV's\n\
                      quad on that handling file in the pause's switch row, off its\n\
                      installed machine pack (offline only; none by default);\n\
                      --mxvatv-car buggy (or monstertruck, baja, golfcart, sandrail) offers\n\

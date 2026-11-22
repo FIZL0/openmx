@@ -91,9 +91,30 @@ pub struct PropSet {
     /// props' rays meet them, but they cast no rays of their own on the props' node. Not state: set
     /// and put back around one pass.
     pub parked: usize,
+    /// **Props Put Back switch** (S475, the port's own, off by default): on, every prop is put back
+    /// where it was placed when a human rider poofs or goes through the race's lap line
+    /// ([`PropSet::put_back_all`]). The original has no such call (its props come back only on each
+    /// body's own `ResetTime`), so off is the original. A constant of the ride, set by the shell: not
+    /// hashed or sent, and a resync keeps this machine's.
+    pub put_back_with_rider: bool,
+    /// A human rider poofed or went through the lap line this tick (S475), heard where the frames
+    /// end; the props' step puts every prop back first when [`PropSet::put_back_with_rider`] is on.
+    /// Not state: set and used up inside one tick.
+    pub put_back_due: bool,
 }
 
 impl PropSet {
+    /// **Every prop put back where it was placed** (S475, [`PropSet::put_back_with_rider`]): each
+    /// collection as the loader left it, every body asleep on its spot
+    /// ([`Collection::put_back_all`]), and the world node's listeners off.
+    pub fn put_back_all(&mut self) {
+        for c in &mut self.collections {
+            c.put_back_all();
+        }
+        self.listeners.clear();
+        self.put_back_due = false;
+    }
+
     /// **The ridden bikes the props' probes hear in the next collide pass** (F27a2): each player's
     /// chassis, by player, where the pass finds it ([`crate::material_hit::Ridden`]). Sound only.
     pub fn hear_ridden(&mut self, bikes: &[flight_search::Bike]) {
@@ -234,6 +255,8 @@ impl PropSet {
             across: Vec::new(),
             seams: None,
             parked: 0,
+            put_back_with_rider: false,
+            put_back_due: false,
         };
         (set, said)
     }
@@ -456,6 +479,10 @@ impl PropSet {
 
     /// [`PropSet::step`] with each collection's movers its own search's ([`PropSet::search_in`]).
     pub fn step_with(&mut self, dt: F, movers: &PropMovers, strikers: &mut [Other<'_>]) {
+        // S475: a human's poof or lap this tick puts every prop back first, with the switch on.
+        if std::mem::take(&mut self.put_back_due) && self.put_back_with_rider {
+            self.put_back_all();
+        }
         let Some(tables) = &self.tables else { return };
         let tables = Arc::clone(tables);
         for k in 0..self.collections.len() {
@@ -472,6 +499,10 @@ impl PropSet {
     /// contacts' `movers` the search's, and `strikers` the riding bikes a struck body's mirrored
     /// contacts name (S197: by player, [`crate::prop_contact`]).
     pub fn step(&mut self, dt: F, movers: &[Mover], strikers: &mut [Other<'_>]) {
+        // S475, as in [`PropSet::step_with`].
+        if std::mem::take(&mut self.put_back_due) && self.put_back_with_rider {
+            self.put_back_all();
+        }
         let Some(tables) = &self.tables else { return };
         let tables = Arc::clone(tables);
         for k in 0..self.collections.len() {

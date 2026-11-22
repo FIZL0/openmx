@@ -1259,6 +1259,7 @@ impl Sim {
             self.traffic.props.pushed(&b.props);
         }
         self.wreck_pushed_back(0);
+        self.props_put_back_on(0, said.respawned);
         // The race manager walks after the bike (S291).
         self.race_frame(dt, world);
         // Shared, the set goes back out before the props' step, which is the set's.

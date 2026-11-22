@@ -33,3 +33,10 @@ _Avoid_: checkpoint, respawn point
 A track file saved by MXA Track Studio (.mxatrack); dropped in mods/tracks it is made a track mod named mxa_<id> and rides as a freeride
 _Said_: .mxatrack
 _In code_: stitch::mxa, track_mods::import_mxa
+
+**Props Put Back**:
+The port's own switch, off by default: every knocked prop goes back to its spot when a human rider poofs or goes through the lap line; the original leaves them where they lie
+_Said_: the movable props need to reset when the player poofs or goes past the start
+_On screen_: --props-put-back
+_In code_: prop_set::PropSet::put_back_with_rider, prop_set::PropSet::put_back_all
+_Avoid_: prop reset

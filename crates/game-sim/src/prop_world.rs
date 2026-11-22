@@ -980,6 +980,28 @@ impl Collection {
         self.place(k);
     }
 
+    /// **Every body put back at once** (S475, the port's own: the original has no such call, see
+    /// [`crate::prop_set::PropSet::put_back_all`]): each body asleep, its countdown stopped, back
+    /// where it was made and unfiled with every category, as the object listener's timed put-back
+    /// leaves one; the collection asleep, with no listeners, lists or countdown, as the loader leaves
+    /// it.
+    pub fn put_back_all(&mut self) {
+        for k in 0..self.objects.len() {
+            self.disable(k);
+            self.objects[k].countdown = F(-1.0);
+            self.objects[k].fresh = false;
+            self.reset(k);
+            self.unfile(k);
+            if self.objects[k].detect_when_disabled {
+                self.objects[k].every_category();
+            }
+        }
+        self.preforce.clear();
+        self.listeners.clear();
+        self.active = false;
+        self.countdown = F(-1.0);
+    }
+
     /// The placement: the look and up squared to each other and normalised (written back), the
     /// body's start place and turn set off them and the body reset to its starts, and the node set to
     /// the body's origin and the axes.

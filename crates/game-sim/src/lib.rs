@@ -624,6 +624,7 @@ impl Sim {
             self.traffic.props.pushed(&bump.props);
             said
         };
+        self.props_put_back_on(0, said.respawned);
         self.race_bike(0, controls.clutch);
         // The bike's particle emitters, after the bike (S328c).
         self.dust_frame(0, dt);
@@ -742,6 +743,11 @@ impl Sim {
         let mut riders: Vec<race::CardFeed> = (0..players).map(|i| race::CardFeed::of(self.rider_of(i), world, laps)).collect();
         riders.extend(guests.iter().copied());
         let frame = self.race.as_mut().expect("a race").tick(dt, &riders);
+        // S475: a human through the lap line puts every prop back, with the switch on.
+        let lap = |n: &race::RaceNotice| matches!(n, race::RaceNotice::Line(race::LineNotice::Lap | race::LineNotice::Started));
+        if frame.laps.cards.iter().any(|(i, n)| *i < players && lap(n) && self.levers_of(*i).is_none()) {
+            self.traffic.props.put_back_due = true;
+        }
         let mut all: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
         for &(i, hit) in frame.caught.iter().filter(|(i, _)| *i < players) {
             race::push(&mut all[i].ride.chassis, hit.push);
@@ -808,6 +814,15 @@ impl Sim {
         let b = race::BikeCounts { preload_timer: r.ride.air.preload_timer, clutch, wreck_entries: r.state.entries };
         if let Some(laps) = self.race.as_mut().and_then(|r| r.laps.as_mut()) {
             laps.bike(i, b);
+        }
+    }
+
+    /// Player `i`'s frame put the rider back on the bike (`respawned`, a poof): a human's puts every
+    /// prop back in the props' step when the Props Put Back switch is on (S475,
+    /// [`prop_set::PropSet::put_back_with_rider`]). An AI rider's poof does not.
+    pub fn props_put_back_on(&mut self, i: usize, respawned: bool) {
+        if respawned && self.levers_of(i).is_none() {
+            self.traffic.props.put_back_due = true;
         }
     }
 
@@ -1012,6 +1027,7 @@ impl Sim {
                 self.parked_pushed(b);
             }
             self.wreck_pushed_back(i);
+            self.props_put_back_on(i, frame.respawned);
             frames.push(frame);
         }
         frames.reverse();
@@ -1118,8 +1134,9 @@ impl Sim {
             self.race_ride(i, dt);
             let kept = self.lend_rng(i);
             let p = &mut self.others[i - 1];
-            p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());
+            let frame = p.rider.frame_bumped(&p.phy, &self.tables, &c, dt, world, &rivals, bump.as_mut());
             self.rng_back(i, kept);
+            self.props_put_back_on(i, frame.respawned);
             self.props_back(i);
             self.parked_back(i);
             self.think(i, dt, world);
