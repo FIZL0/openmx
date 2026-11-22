@@ -1,4 +1,4 @@
-# 1 — wreck bike gates (PART)
+# 1 — wreck bike gates (FINAL)
 
 Task S503. 2026-11-22.
 
@@ -56,6 +56,12 @@ Task S503. 2026-11-22.
   resolves before the wreck bike in the same node, so its bike has moved by then. It did not matter here
   (the riders are 170+ ft away); a wreck into a moving AI bike is S134's case, not re-proved here.
 - The AI riders' bikes are assumed to use the player's bike mesh (`bikef.col`); their sphere radii match.
+- No captured wreck meets a gate: the spec's "captured wreck bike meeting a gate" is met only as the
+  interpreter's run on a captured state, poked (above). A real capture would show the bike flying through.
+- Toys, bikes and gates are handed in together, but in these runs only the gate is struck. Toys alone (S76)
+  and bikes alone (S134) are proved by their own tests; a tick striking two kinds at once is not.
+- The list's 0x20a and 0x52058 entries (between the toys and the bikes) are not handed in by this task.
+  Neither is near the side wreck (1840 and 336 ft), so they leave the run alone.
 - The part meshes are compared to the image only by count and owner; the bit-exact strike is the evidence
   they are the same.
 

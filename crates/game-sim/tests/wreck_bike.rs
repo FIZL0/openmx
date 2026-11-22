@@ -1203,7 +1203,7 @@ fn a_wreck_bike_meeting_a_gate_replays_bit_exact() {
                 .collect();
             let mut chassis: Vec<Vehicle> = records.iter().map(|&r| vehicle_at(&ee, r)).collect();
             let mut colliders: Vec<Collider> = records.iter().map(|&r| collider_of(&ee, r)).collect();
-            let before = chassis.clone();
+            let (before, kept) = (chassis.clone(), colliders.clone());
             let dt = cap.get(f, "dt");
             ee.call(0x0026_f800, &[u64::from(SIDE_NODE)], &[dt], 2_000_000_000);
             let riders = Riders { bikes: Bikes { mesh: &mesh, bikes: &bikes }, chassis: &mut chassis, colliders: &mut colliders };
@@ -1211,6 +1211,7 @@ fn a_wreck_bike_meeting_a_gate_replays_bit_exact() {
             let differ = bodies_differ(&bike.body, &ee_body(&ee, b));
             assert!(differ.is_empty(), "nearby {nearby}, tick {f}: the wreck bike among the toys, bikes and gates differs in {differ:?}");
             assert_eq!(chassis, before, "tick {f}: the wreck bike's resolve moved a rider's chassis");
+            assert_eq!(colliders, kept, "tick {f}: the wreck bike's resolve changed a rider's collision object");
             on_object += u32::from(bike.record.on_object);
             ride.push(bike.body.position.0.map(f32::to_bits));
         }
