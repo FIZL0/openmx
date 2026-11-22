@@ -14,7 +14,9 @@ Task R53. 2026-11-21.
   - P2's forward limit (rider +0x758, 22.0) set to -1e30.
   - The original's wreck test (`./kit fn 0x2522c0`, first clause `+0x758 < +0x558`) then enters the
     wreck itself on the next tick, reason 4, through vt +0xfc. The limit is put back after.
-- Recorded research/r53/r53-wreck-truck.toml twice from the wreck state and once from the poked state.
+- Recorded research/r53/r53-wreck-truck.toml from the wreck state and from the poked state. The
+  wreck-state capture was recorded twice and kept once. The second recording added the contact
+  columns and overwrote the first; both gave the same wake on row 358.
 - Nobody rides the plane: it stays parked where the boot put it, 391 ft south of the truck.
 
 ## What the original does
@@ -58,8 +60,15 @@ Task R53. 2026-11-21.
     wreck-entry against 1. Use rows 350-357 and 359+.
 - `p2_wrecked` (rider +0xb7c) stays 0 through the wreck. The oracle notes say +0xb7c = 1 for the
   vehicle, so this offset is not that flag on the rider object. Not looked into.
-- Contact entry layout (+0 kind, +0x74 other object) is taken from S489's notes. Here only the first
-  entries were read.
+- wreck-entry.csv runs its whole length with the limit still poked. The wreck test's clauses only run
+  while the reason is 0 (`./kit fn 0x2522c0`: the clauses follow `+0x748 != 0 → skip`). The capture ends at 426,
+  before P2's respawn at 445, so the poke cannot fire again inside it. The match with wreck-truck.csv
+  from row 350 agrees with this.
+- Contact entry layout (+0 kind, +0x74 other object) is taken from S489's notes. The second entry is
+  read at +0x80, assuming the entries sit back to back. That is unchecked, so the truck_contact1
+  columns, and the contact count on torn row 358, are not trusted.
+- The 10.6 ft gap is body origin to body origin. Whether the Sim's wreck-bike origin is the same point
+  as the original's wreck body origin is not checked. S506 must compare like with like.
 - The c16_fly test was not run against this capture. R53 is research: no test changed. It is a
   different scene from the test's (C16 image, truck put beside the wreck). At the wake the
   original's gap is 10.6 ft (body to body), past the test's `< 10.0`. The test measures from the
