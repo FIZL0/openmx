@@ -22,6 +22,7 @@
 pub mod build;
 pub mod check;
 pub mod jsonw;
+pub mod mxa;
 pub mod openmx;
 pub mod json;
 
