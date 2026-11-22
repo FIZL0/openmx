@@ -137,6 +137,8 @@ Per substep, the oracle's truck (hooked after its tire step 0x397f40) beside the
      +0x84 & [0x468f68] (0x40), it calls vt+0x124, the enable.
   - Fix: in the plane's frame (`Flight`, the parked cars), a car whose own search struck the hull
     calls `InPlane::struck` too, before its controls step.
+  - S507: a driven car's world (S499, `Machine::cars_met`) does the same for a parked car's rays on
+    the driven car's hull. Not yet checked against a drivers' capture (S499 has none).
   - Now: rows 1569-1587 within 0.008 ft/s on the first substep, brakes 0 on both. The push holds
     to the capture through row 1604 (`R48_PUSH_THROUGH`, was 1587); row 1605 fails (truck 1.7 ft/s slow).
 - **Where it parts: the plane's wing ray at row 1587.** The ray from (0, 4.47, -4.66) to
