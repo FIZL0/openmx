@@ -214,3 +214,56 @@ fn the_quads_untamed_step_arms_on_r1_with_other_buttons() {
     }
     assert!(differ[0] > 5 && differ[1] > 5, "R1 with another button changed too few states: 360 {}, flip {}", differ[0], differ[1]);
 }
+
+/// MD261: the untamed_atv pack's race quad loaded as Untamed loads it ([`quad::Load::read_untamed_model`],
+/// the box [`quad::Model::untamed_half_box`]) at Rocksbury's start spot (`SX_A.scn`'s `[SceneInfo]`)
+/// has MD147's spawn record's inverse inertia (`+0x70`) bit for bit; SLUS-21104's box
+/// ([`quad::Load::read_model`]) does not.
+#[test]
+fn the_untamed_quads_record_inertia_is_its_spawn_images() {
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let pack = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/untamed_atv/Veh");
+    let scn = kit.ctx("untamed/sx_a").join("env/sx_a/SX_A.scn.bpb");
+    let image = kit.ctx("untamed/md147").join(format!("spawn{}", ".ee.bin"));
+    let read = |p: &std::path::Path| std::fs::read(p).ok();
+    let (Some(phy), Some(psg), Some(riding), Some(wreck), Some(scn)) = (
+        read(&pack.join("atv_Race250P.phy.bpb")),
+        read(&pack.join("Anim/250r_atv_chasis.psg")),
+        read(&pack.join("Col/ATV_R_ChasisM.col")),
+        read(&pack.join(format!("Col/{}", quad::WRECK_FILE))),
+        read(&scn),
+    ) else {
+        skip(&format!("{} or {} is not there (the untamed_atv pack; SX_A.res extracted, MD168b)", pack.display(), scn.display()));
+        return;
+    };
+    if !image.exists() {
+        skip(&format!("{} is not there: eeMemory.bin of MD147's spawn.p2s (research/md147)", image.display()));
+        return;
+    }
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    let ini = game_sim::bpb::ini(&phy).expect("atv_Race250P.phy.bpb");
+    let model = quad::Model::parse(&psg).unwrap_or_else(|e| panic!("250r_atv_chasis.psg: {e}"));
+    let rays = |b: &[u8], what: &str| game_sim::track::Rays::parse(b).unwrap_or_else(|e| panic!("{what}: {e}"));
+    let (riding, wreck) = (rays(&riding, "ATV_R_ChasisM.col"), rays(&wreck, quad::WRECK_FILE));
+    let scene = game_sim::bpb::ini(&scn).unwrap_or_else(|e| panic!("SX_A.scn: {e}"));
+    let three = |key: &str| {
+        let (_, _, value) = scene.entries().find(|&(s, k, _)| s == "SceneInfo" && k == key).unwrap_or_else(|| panic!("SX_A.scn has no {key}"));
+        let w: Vec<f32> = value.split(',').map(|x| x.trim().parse().unwrap_or_else(|e| panic!("{key}: {e}"))).collect();
+        Vf::new(w[0], w[1], w[2], 1.0)
+    };
+    let (start, facing) = (three("DefaultStartPosition"), three("DefaultStartDirection"));
+    let curve = game_sim::camera::CurveTable::build();
+    let inertia = |load: &quad::Load| {
+        let mut r = quad::Ride::spawn(load, &model, start, facing, None, Vec::<Call>::new());
+        r.rig(load, &riding, &wreck);
+        r.untamed();
+        let i = r.recorded.as_ref().expect("the quad's record").held.record.collider.inv_inertia;
+        [i.x(), i.y(), i.z()].map(f32::to_bits)
+    };
+    let rec = ee.u32_at(QUAD + 0xf8);
+    let want = [0, 4, 8].map(|k| ee.u32_at(rec + 0x70 + k));
+    let untamed = quad::Load::read_untamed_model(&ini, &model, start, facing, &curve).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(inertia(&untamed), want, "Untamed's box: the record's inverse inertia is not the image's");
+    let slus = quad::Load::read_model(&ini, &model, start, facing, &curve).unwrap_or_else(|e| panic!("{e}"));
+    assert_ne!(inertia(&slus), want, "SLUS-21104's box gave the image's inverse inertia too: the test proves nothing");
+}

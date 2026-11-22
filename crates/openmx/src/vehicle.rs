@@ -4428,7 +4428,9 @@ impl AtvRide {
     /// tail and wreck.
     fn made(&self, at: Vf, heading: Vf, bounds: Option<(Vf, Vf)>) -> Result<Quad, String> {
         let curve = game_sim::camera::CurveTable::build();
-        let mut load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
+        // MD261: an Untamed quad's part reader box is Untamed's.
+        let read = if self.untamed { game_sim::quad::Load::read_untamed_model } else { game_sim::quad::Load::read_model };
+        let mut load = read(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
         self.mods.atv(self.seat, &mut load);
         let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
         ride.rig(&load, &self.riding, &self.wreck);
