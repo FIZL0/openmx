@@ -7,7 +7,8 @@ Task P301b. 2026-11-21.
 The iPhone 15 Pro is on omarchy-desktop's USB now, so I drove it myself instead of waiting for a log.
 I used iFizBox's `tools/ui-15.sh` under the lock `P301b` and gave the lock back at the end.
 
-- The phone had openMX 0.18.0 build 5260 (bd79f93, 2026-11-18). That build has P301 and P301a.
+- The phone had openMX 0.18.0 build 5260, built 2026-11-18. Its log names bd79f93; the brief names
+  4fce2110e. P224's journal says both commits carry the same build. That build has P301 and P301a.
   Its `world paint:` lines say `pages 128x128`, so the lean ground was on.
 - First I pulled the log the phone already had: the P224 session, world_mxu_free and Cleveland.
 - The phone had only world_mxu_free installed. I installed world_ultra (1018 MB) and world_mxvatv
@@ -20,7 +21,7 @@ I used iFizBox's `tools/ui-15.sh` under the lock `P301b` and gave the lock back 
   `mxu.txt`).
 
 **Nothing to cut.** "Memory" here is the app's footprint as iOS counts it. Every ride stayed between
-0.7 and 1.3 GB, with 5.3 GB or more left before iOS closes the app.
+0.7 and 1.32 GB, with 5.3 GB or more left before iOS closes the app.
 
 | world (phone log) | ride | load peak (GPU) | highest a second (its GPU) | GPU highest |
 |---|---|---|---|---|
