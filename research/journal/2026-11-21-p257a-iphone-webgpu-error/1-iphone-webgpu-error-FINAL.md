@@ -23,6 +23,12 @@ Task P257a. 2026-11-21.
   `gpu: apple (BrowserWebGpu) into a Bgra8Unorm canvas (webgpu)`, `renderer: gpu, webgpu`, and **no
   `gpu: validation error` line** at all: not in the splash, the menus, the track list, the load or the ride.
   No `page loaded again` line, so the page never fell back to `?webgl2`.
+- Why the page log is as good as the worker's console here: web_gpu.rs `report()` writes every validation error
+  through `web_host::say`, the same path as the `gpu: adapter limits` line that did arrive, and worker.js forwards
+  each such line to the page's log (P257b's headless test proves a worker line reaches it).
+- The log has no line of its own for the ride starting: the second track, `music: playing disc:naturallife`
+  (1562 s), is the ride's music (the menus played `fromtheinside`). The ride itself is shown by the screenshots.
+  The log's timestamps are UTC (01:08 on 11-22 is 20:08 on 11-21 here).
 
 Result: the 11-02 front-end error (`gpu: device mismatch`) does not happen on today's build. There is no failing
 call to fix, so no change to `gpu.rs` and no test for one. Something between 11-02 and 998d107 fixed it; likely
@@ -44,6 +50,8 @@ own log read off the phone (committed above), with no validation error line.
   line was never captured (P257b's log came after).
 - Only one ride (Dallas Free Ride, about 30 s). P336a's sx01 race error at frame 414 is a separate task and was
   not tried here.
+- The ride is proved by screenshots that are not committed (they show the game, so they stay out of git); the
+  committed log shows only the ride's music starting.
 - The home-screen app (installed web app, no address bar) was not opened; only a Safari tab.
 - The phone's iOS is reported as 18.7 in the user agent with Safari 27.0.1, the same as the user's 11-12 log;
   other iOS versions not tried.
