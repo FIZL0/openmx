@@ -2040,6 +2040,10 @@ fn trace_picture(
         let at: Vec<String> = nodes.iter().map(|m| format!("{:.3} {:.3} {:.3}", m.0[3][0], m.0[3][1], m.0[3][2])).collect();
         println!("picture pose: tick {tick} cut {} nodes {} {}", cut as u8, nodes.len(), at.join(" "));
     }
+    // And whether each seat's rider is drawn from the riding ragdoll's nodes (S109, P133 online), in
+    // seat order.
+    let riding: Vec<String> = seats.iter().map(|s| u8::from(riding_bones(s, ragdolled).is_some()).to_string()).collect();
+    println!("picture riding: tick {tick} {}", riding.join(" "));
     // And the plane while it is flown, as its draw takes it: from the tick before to this one, and
     // slid between them unless the seat cuts.
     if let Some(plane) = seat.garage.plane_flown() {
@@ -10366,6 +10370,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     // `--overview` (P166) draws nobody's.
     let mut seated = vec![!args.overview; world.seats.len()];
+    // The riding ragdoll each shell seat is drawn from online (P133), stepped beside the session.
+    let mut online_riding = net::riding::DrawnRiding::default();
     // What the online ride's riders said between drawn frames (P184), for the sound and the lines.
     let mut online_said = audio::Said::default();
     // Whether the ride says how to join it (P171): a seat free and a controller idle.
@@ -11993,6 +11999,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
                 seated[d] = on.show(d, &mut seat.sim, rig.body.as_mut());
+                // Its riding rider off the riding ragdoll, as offline (P133): the drawn riding ragdoll,
+                // stepped on the tick shown, pulled to the body as just posed. Drawing it is riding_ragdoll_on's.
+                if riding_ragdoll_on() {
+                    let skeleton = match (&rig.body, &ragdolled) {
+                        (Some(body), Some(doll)) if seat.sim.rider.ragdoll_kit.is_some() => Some(Arc::new(body.ragdoll_posed(doll))),
+                        _ => None,
+                    };
+                    online_riding.show(d, on.ticks(), &mut seat.sim.rider, skeleton, on.dt(), &mut world.place);
+                }
                 // Frozen and see-through on the ticks its pads say it is paused (P84), as on every
                 // machine.
                 seat.paused = on.paused(d);
@@ -12668,6 +12683,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // body from it is riding_ragdoll_on's (S90).
             if moving && bike_up && online.is_none() && seat.sim.rider.ragdoll_kit.is_some() {
                 seat.sim.rider.holds = ride_holds(rig).map(Arc::new);
+            }
+            // Online they hold the seat's riding ragdoll beside the session instead (P133).
+            // Like offline's, the last grips stay while the seat does not move. `i` is the shell
+            // seat, the `d` the seats were shown by.
+            if moving && bike_up && online.is_some() && seat.sim.rider.ragdoll_kit.is_some() {
+                online_riding.hold(i, ride_holds(rig).map(Arc::new));
             }
             // V128: the race's AI riders on the first seat's Sim, posed as the seat's own rider is
             // above, off their own riders and the controls their brains hand the bikes.
