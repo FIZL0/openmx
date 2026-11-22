@@ -39,8 +39,9 @@ def rgb565(c):
 
 def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same sums as one block at a time)
     bs = 16 if alpha5 else 8
-    blk = np.frombuffer(px, np.uint8)[: (w // 4 or 1) * (h // 4 or 1) * bs].reshape(-1, bs)
-    bw, bh = max(w // 4, 1), max(h // 4, 1); n = len(blk)
+    bw, bh = max(w // 4, 1), max(h // 4, 1); n = bw * bh
+    raw = np.frombuffer(px, np.uint8)[: n * bs]                         # short data: the missing blocks black
+    blk = np.concatenate([raw, np.zeros(n * bs - len(raw), np.uint8)]).reshape(-1, bs)
     c = blk[:, bs - 8:].astype(np.int64)
     c0, c1 = c[:, 0] | c[:, 1] << 8, c[:, 2] | c[:, 3] << 8
     bits = c[:, 4] | c[:, 5] << 8 | c[:, 6] << 16 | c[:, 7] << 24
@@ -62,10 +63,11 @@ def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same
                               np.zeros((n, 1), np.int64), np.full((n, 1), 255)], 1)
         av = np.where((a0 > a1)[:, None], eight, six)                   # (n, 8)
         tile[..., 3] = np.take_along_axis(av, (ab[:, None] >> (3 * np.arange(16))) & 7, 1)
-    out = tile.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+    out = np.zeros((max(h, 4), max(w, 4), 4), np.uint8)
+    out[:bh * 4, :bw * 4] = tile.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
     return out[:h, :w]
 
-def dxt_size(b):                                  # (w, h) of the largest mip, read from the headers alone
+def dxt_size(b):                                  # (w, h) of the mip dxt() decodes (the last), from the headers alone
     fmt = u32(b, 4)
     if fmt in (0x37, 0x38): o = 12 + u32(b, 8) * 4
     elif fmt in (0x26, 0x36): o = 12
@@ -162,11 +164,15 @@ def pack(src, xd, out, keep=()):
                 print("skip", rel, e); continue
             w, h = png_size(os.path.join(root, f))
             why = "more pixels" if xw * xh > w * h else "kept" if stem.lower() in keep else ""
-            rows.append(f"{rel}\t{k}\tPS2 {w}x{h}\tXbox {xw}x{xh}\t{why or 'PS2'}")
-            if why:                                   # decoded only when kept: the decoder is slow Python
+            if why:                                   # only the kept ones are decoded
+                try:
+                    b = dxt(xb)
+                except Exception as e:
+                    print("skip", rel, e); continue
                 p = os.path.join(out, "textures", f"{rel}-{k}.png")
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                write_png(p, np.ascontiguousarray(dxt(xb), np.uint8)); kept += 1; wrote.add(os.path.abspath(p))
+                write_png(p, np.ascontiguousarray(b, np.uint8)); kept += 1; wrote.add(os.path.abspath(p))
+            rows.append(f"{rel}\t{k}\tPS2 {w}x{h}\tXbox {xw}x{xh}\t{why or 'PS2'}")
     # a picture an earlier run kept that this one did not (KEEP shrank, a texture changed) goes
     for root, _, fs in os.walk(os.path.join(out, "textures")):
         for f in fs:
