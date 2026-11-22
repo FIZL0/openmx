@@ -5,7 +5,7 @@
 //! feet, so the ground runs on across the joins as a mod's blended joins do. Nothing is off a disc.
 
 use game_sim::contact_search::{self, Heightfield};
-use game_sim::tiles::{generate, Piece, Reach, Source, Tile, Tiled};
+use game_sim::tiles::{generate, Piece, Reach, Source, Tile, Tiled, ASKED_KEPT};
 use game_sim::track::{Terrain, TerrainLayout};
 use game_sim::world::{Ground, Hit, World};
 use ps2_float::{F, Vf};
@@ -250,10 +250,12 @@ fn streaming_never_changes_an_answer() {
     let before: Vec<Option<Hit>> = points.iter().map(|&(x, z)| tiled.at(F(x), F(z))).collect();
     assert_eq!(tiled.loaded().len(), 5);
 
-    // A rider at c's far end: a and its join go — at the second call, since what was asked about
-    // before the first is kept through it (MD28).
-    tiled.stream(&[Vf::new(1700.0, 0.0, 100.0, 1.0)]);
-    assert_eq!(tiled.loaded().len(), 5, "asked about since the last call: kept");
+    // A rider at c's far end: a and its join go — once ASKED_KEPT calls have passed since they were
+    // asked about, which keeps them through a tick that asks nothing (MD28, P324).
+    for _ in 0..=ASKED_KEPT {
+        tiled.stream(&[Vf::new(1700.0, 0.0, 100.0, 1.0)]);
+        assert_eq!(tiled.loaded().len(), 5, "asked about lately: kept");
+    }
     tiled.stream(&[Vf::new(1700.0, 0.0, 100.0, 1.0)]);
     let held = tiled.loaded();
     assert!(!held.contains(&0) && !held.contains(&3), "{held:?}");
@@ -286,8 +288,12 @@ fn a_far_tile_asked_every_tick_is_read_once() {
     }
     assert!(tiled.loaded().contains(&0), "a, asked about every tick, is held");
     assert_eq!(loads.load(Ordering::Relaxed), first + 1, "a was read once");
-    // Left alone, it goes at the next stream but one.
-    tiled.stream(&rider);
+    // Left alone, it stays through ASKED_KEPT streams — a pause's first frame asks nothing of it
+    // (P324) — and goes at the next.
+    for _ in 0..ASKED_KEPT {
+        tiled.stream(&rider);
+        assert!(tiled.loaded().contains(&0), "a, asked about lately, is held");
+    }
     tiled.stream(&rider);
     assert!(!tiled.loaded().contains(&0));
 }
@@ -297,7 +303,9 @@ fn a_far_tile_asked_every_tick_is_read_once() {
 /// the world's loads and drops at the next update.
 #[test]
 fn a_pictures_copy_answers_what_the_world_had_loaded() {
-    let (mut tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    // Far tiles go at the second stream, as they did before P324's keep, so the drop below is quick.
+    let (tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    let mut tiled = tiled.kept_for(0);
     let points: Vec<(f32, f32)> = (0..400).map(|i| (4.3 * i as f32 + 0.37, 280.0 + (i % 7) as f32)).collect();
     let whole: Vec<Option<Hit>> = points.iter().map(|&(x, z)| tiled.at(F(x), F(z))).collect();
     let copy = tiled.picture_copy();

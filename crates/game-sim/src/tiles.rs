@@ -260,6 +260,12 @@ pub struct Tiled {
     /// far from the riders, so a query that goes on asking about a far tile every tick — a parked
     /// plane's dust — does not read it again every tick.
     asked: RefCell<Vec<bool>>,
+    /// Each tile's [`Tiled::stream`] calls since it was last asked about: a far tile goes only once
+    /// this passes [`Tiled::kept`] (P324).
+    quiet: Vec<u32>,
+    /// How many [`Tiled::stream`] calls a far tile stays after it was last asked about:
+    /// [`ASKED_KEPT`], or what [`Tiled::kept_for`] set.
+    kept: u32,
     /// Each 1024-ft square's tiles, in owner order.
     index: HashMap<(i32, i32), Vec<usize>>,
     /// Each tile's rectangle in those squares, `[x0, z0, x1, z1]`, one square wider all round than
@@ -288,6 +294,12 @@ pub struct Tiled {
 /// How many near sets a world keeps cut: one for each rider of a full local ride, and their moves
 /// back over a square's edge.
 const NEAR_KEPT: usize = 8;
+
+/// How many [`Tiled::stream`] calls a far tile is kept after it was last asked about, one a ride
+/// frame that ticked, so a second or two (P324): a tick that asks nothing of it — the pause's first frame, where the world's cars
+/// stand — dropped two tiles the cars were on, and the ride's first tick back read them again, a
+/// 115 ms frame on an iPhone 15 Pro.
+pub const ASKED_KEPT: u32 = 60;
 
 /// Where the sweep's owner numbers for [`Tiled::moving`]'s shapes start: past every tile's.
 pub const MOVING_OWNER: i32 = 1 << 24;
@@ -460,6 +472,7 @@ impl Tiled {
             .collect();
         let slots = tiles.iter().map(|_| Slot::Out).collect();
         let asked = vec![false; tiles.len()];
+        let quiet = vec![0; tiles.len()];
         Ok(Tiled {
             tiles,
             area: Area { width, depth },
@@ -468,6 +481,8 @@ impl Tiled {
             source: RefCell::new(source),
             slots: RefCell::new(slots),
             asked: RefCell::new(asked),
+            quiet,
+            kept: ASKED_KEPT,
             index,
             squares,
             log: RefCell::new(Vec::new()),
@@ -479,6 +494,14 @@ impl Tiled {
             every_head: 0,
             cuts: 0,
         })
+    }
+
+    /// This world keeping a far tile `streams` [`Tiled::stream`] calls after it was last asked about,
+    /// not [`ASKED_KEPT`]: 0 lets every far tile not asked about since the last call go, as a pass
+    /// over the whole world that streams after each piece wants.
+    pub fn kept_for(mut self, streams: u32) -> Tiled {
+        self.kept = streams;
+        self
     }
 
     /// **The world wrapped round** (MD29, the port's own): on each axis `wrap` names, the far edge
@@ -669,8 +692,8 @@ impl Tiled {
     }
 
     /// Load the tiles within [`Reach::load`] of any of `near` and drop those past [`Reach::drop`] of
-    /// all of them, but for those asked about since the last call. Changes nothing the simulation is
-    /// answered (see the module note).
+    /// all of them, but for those asked about in the last [`Tiled::kept`] calls. Changes nothing the
+    /// simulation is answered (see the module note).
     ///
     /// A tile the source reads ahead ([`Source::want`]) is loaded once it is read; one the
     /// simulation asks for first is loaded then, as a tile past reach is.
@@ -679,6 +702,9 @@ impl Tiled {
         // A world of thousands of joins measures only the tiles that could be within the drop
         // reach (V96); every other one is past it, which is all the branches below ask of its gap.
         let around = self.around(near, self.reach.drop);
+        for (quiet, asked) in self.quiet.iter_mut().zip(&asked) {
+            *quiet = if *asked { 0 } else { quiet.saturating_add(1) };
+        }
         for i in 0..self.tiles.len() {
             let sq = self.squares[i];
             let apart = |b: &[i32; 4]| b[2] < sq[0] || sq[2] < b[0] || b[3] < sq[1] || sq[3] < b[1];
@@ -700,7 +726,7 @@ impl Tiled {
                 if ready {
                     self.ensure(i);
                 }
-            } else if held && gap > self.reach.drop && !asked[i] {
+            } else if held && gap > self.reach.drop && self.quiet[i] > self.kept {
                 self.slots.borrow_mut()[i] = Slot::Out;
                 self.log.borrow_mut().push(format!("world: {} dropped", self.tiles[i].name));
             } else if out && gap > self.reach.drop {
