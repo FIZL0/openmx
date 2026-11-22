@@ -31,7 +31,8 @@ Task P379. 2026-11-21.
 - The one second over 25 ms is the ride's first: 33.49 ms led by wait (32.81 ms, a missed refresh) right
   after the load, not near a wreck.
 
-No code change: the log shows the fix holds and names nothing left to fix.
+No code change: through these wreck kinds the frame budget held and the log names nothing left to fix
+(the sun-map pass and other wreck kinds are not covered by it: see below).
 
 ## What the original does
 
