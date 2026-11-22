@@ -4825,6 +4825,8 @@ struct FrameSecond {
     gpu: Duration,
     gpu_worst: Duration,
     timed: u32,
+    /// The frames it could not time, and why (P346).
+    misses: game_render::gpu::GpuMisses,
     /// Whether the renderer has timestamps at all, for saying so rather than nothing.
     timer: bool,
     /// The present stage's wait on the window — a phone's acquire and present, the rest of that
@@ -4846,8 +4848,11 @@ impl FrameSecond {
         self.last = Some(now);
     }
 
-    fn gpu(&mut self, timer: bool, times: &[(Duration, f32)]) {
+    fn gpu(&mut self, timer: bool, times: &[(Duration, f32)], misses: game_render::gpu::GpuMisses) {
         self.timer = timer;
+        self.misses.busy += misses.busy;
+        self.misses.unusable += misses.unusable;
+        self.misses.raw = misses.raw.or(self.misses.raw);
         for (t, _) in times {
             self.gpu += *t;
             self.gpu_worst = self.gpu_worst.max(*t);
@@ -4863,6 +4868,13 @@ impl FrameSecond {
             (false, _) => "gpu not timed here".to_string(),
             (true, 0) => "gpu no frame timed".to_string(),
             (true, n) => format!("gpu {:.2} ms a frame (worst {:.2})", ms(self.gpu) / f64::from(n), ms(self.gpu_worst)),
+        };
+        // `, 3 untimed (2 busy, 1 unusable, ticks 0 18446744073709551615)`: what the timer lost
+        let m = self.misses;
+        let gpu = match (m.busy + m.unusable, m.raw) {
+            (0, _) => gpu,
+            (n, None) => format!("{gpu}, {n} untimed ({} busy)", m.busy),
+            (n, Some([a, b])) => format!("{gpu}, {n} untimed ({} busy, {} unusable, ticks {a} {b})", m.busy, m.unusable),
         };
         let waited = ms(self.waited) / f64::from(self.frames.max(1));
         let line = format!("widest gap {:.1} ms, waited {waited:.2} ms a frame, {} sprites, {gpu}", ms(self.widest), self.sprites);
@@ -14211,7 +14223,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // Judged on the GPU's own time where it has timestamps (V122); without, on the
                     // draw's wall time, leaving out frames the CPU made late.
                     let gpu_times = w.renderer.gpu_times();
-                    second.gpu(w.renderer.timed(), &gpu_times);
+                    second.gpu(w.renderer.timed(), &gpu_times, w.renderer.gpu_misses());
                     let cpu = scale_frame_at.map_or(Duration::ZERO, |(t, w)| spent.duration_since(t).saturating_sub(w));
                     scale_frame_at = Some((spent, waited));
                     if render_scale.is_none() {
