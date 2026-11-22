@@ -4428,7 +4428,9 @@ impl AtvRide {
     /// tail and wreck.
     fn made(&self, at: Vf, heading: Vf, bounds: Option<(Vf, Vf)>) -> Result<Quad, String> {
         let curve = game_sim::camera::CurveTable::build();
-        let mut load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
+        // MD261: an Untamed quad's part reader box is Untamed's.
+        let read = if self.untamed { game_sim::quad::Load::read_untamed_model } else { game_sim::quad::Load::read_model };
+        let mut load = read(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
         self.mods.atv(self.seat, &mut load);
         let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
         ride.rig(&load, &self.riding, &self.wreck);
@@ -5517,4 +5519,38 @@ mod in_play_tests {
         parked.hand_to(&mut sim, &[Kind::Bike]);
         assert_eq!(sim.parked.len(), 1, "back once nobody flies one");
     }
+}
+
+#[cfg(test)]
+mod untamed_box_tests {
+    use super::*;
+
+    /// MD261: a quad pack on Untamed's step is read with Untamed's part reader box
+    /// ([`game_sim::quad::Load::read_untamed_model`], proved against MD147's spawn record in
+    /// game-sim's untamed_atv route tests); off it, with SLUS-21104's. The untamed_atv pack's race quad,
+    /// made at Rocksbury's start spot, where the two boxes give different inverse inertias.
+    #[test]
+    fn a_quad_on_untamed_step_takes_untamed_part_reader_box() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/untamed_atv");
+        let mut read = |p: &str| std::fs::read(dir.join(p)).ok();
+        let Ok(atv) = AtvRide::read("untamed_atv", "Veh/atv_Race250P.phy.bpb", &mut read) else {
+            eprintln!("skip: {} has not the race quad's files (the untamed_atv pack, off Untamed's disc)", dir.display());
+            return;
+        };
+        let (at, heading) = (Vf::new(395.76, 3.76, 155.86, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
+        let inertia = |a: &AtvRide| a.made(at, heading, None).unwrap().ride.recorded.expect("the quad's record").held.record.collider.inv_inertia;
+        let curve = game_sim::camera::CurveTable::build();
+        let reads = |untamed: bool| {
+            let load = match untamed {
+                true => game_sim::quad::Load::read_untamed_model(&atv.ini, &atv.model, at, heading, &curve),
+                false => game_sim::quad::Load::read_model(&atv.ini, &atv.model, at, heading, &curve),
+            };
+            let load = load.unwrap();
+            let mut r = game_sim::quad::Ride::spawn(&load, &atv.model, at, heading, None, Vec::new());
+            r.rig(&load, &atv.riding, &atv.wreck);
+            r.recorded.expect("the quad's record").held.record.collider.inv_inertia
+        };
+        assert_ne!(reads(true), reads(false), "the two boxes agree here: the test proves nothing");
+        assert_eq!(inertia(&atv), reads(false), "off Untamed's step: SLUS-21104's box");
+        assert_eq!(inertia(&atv.clone().on_untamed_step()), reads(true), "on Untamed's step: Untamed's box");    }
 }

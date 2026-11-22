@@ -4021,6 +4021,13 @@ impl Load {
         let frame = spawn_frame(at, heading);
         Ok(Load::read(ini, model.half_box(&frame), model.mounts(&frame)?, curve))
     }
+
+    /// [`Load::read_model`] as Untamed's loader reads the model (MD261): the part reader's box is
+    /// [`Model::untamed_half_box`] (MD250), the mounts as SLUS-21104's.
+    pub fn read_untamed_model(ini: &crate::phy::Ini, model: &Model, at: Vf, heading: Vf, curve: &crate::camera::CurveTable) -> Result<Load, String> {
+        let frame = spawn_frame(at, heading);
+        Ok(Load::read(ini, model.untamed_half_box(&frame), model.mounts(&frame)?, curve))
+    }
 }
 
 // --- MD129: the loader's model inputs ----------------------------------------------------------------
