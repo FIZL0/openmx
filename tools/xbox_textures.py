@@ -37,8 +37,8 @@ def unswizzle(a, w, h):                           # Xbox Morton order -> linear
 def rgb565(c):
     return np.stack([((c >> 11) & 31) * 255 // 31, ((c >> 5) & 63) * 255 // 63, (c & 31) * 255 // 31], -1)
 
-def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same sums as one block at a time)
-    bs = 16 if alpha5 else 8
+def dxt_blocks(px, w, h, alpha5, alpha4=False):   # all blocks at once (the same sums as one block at a time)
+    bs = 16 if alpha5 or alpha4 else 8           # alpha4: DXT3, sixteen 4-bit alphas before the colours
     bw, bh = max(w // 4, 1), max(h // 4, 1); n = bw * bh
     raw = np.frombuffer(px, np.uint8)[: n * bs]                         # short data: the missing blocks black
     blk = np.concatenate([raw, np.zeros(n * bs - len(raw), np.uint8)]).reshape(-1, bs)
@@ -46,7 +46,7 @@ def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same
     c0, c1 = c[:, 0] | c[:, 1] << 8, c[:, 2] | c[:, 3] << 8
     bits = c[:, 4] | c[:, 5] << 8 | c[:, 6] << 16 | c[:, 7] << 24
     p0, p1 = rgb565(c0), rgb565(c1)                                    # (n, 3)
-    four = (c0 > c1) | alpha5
+    four = (c0 > c1) | alpha5 | alpha4
     cols = np.stack([p0, p1, np.where(four[:, None], (2 * p0 + p1) // 3, (p0 + p1) // 2),
                      np.where(four[:, None], (p0 + 2 * p1) // 3, 0)], 1)  # (n, 4, 3)
     al = np.where(four[:, None], 255, np.array([255, 255, 255, 0]))     # (n, 4)
@@ -63,6 +63,8 @@ def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same
                               np.zeros((n, 1), np.int64), np.full((n, 1), 255)], 1)
         av = np.where((a0 > a1)[:, None], eight, six)                   # (n, 8)
         tile[..., 3] = np.take_along_axis(av, (ab[:, None] >> (3 * np.arange(16))) & 7, 1)
+    if alpha4:                                    # low nibble first, row by row
+        tile[..., 3] = np.stack([blk[:, :8] & 15, blk[:, :8] >> 4], -1).reshape(n, 16) * 17
     out = np.zeros((max(h, 4), max(w, 4), 4), np.uint8)
     out[:bh * 4, :bw * 4] = tile.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
     return out[:h, :w]
@@ -70,7 +72,7 @@ def dxt_blocks(px, w, h, alpha5):                 # all blocks at once (the same
 def dxt_size(b):                                  # (w, h) of the mip dxt() decodes (the last), from the headers alone
     fmt = u32(b, 4)
     if fmt in (0x37, 0x38): o = 12 + u32(b, 8) * 4
-    elif fmt in (0x26, 0x36): o = 12
+    elif fmt in (0x26, 0x32, 0x36): o = 12
     else: raise ValueError(f"fmt {fmt:#x}")
     n = u32(b, o); o += 12
     for _ in range(n):
@@ -83,7 +85,7 @@ def dxt(b):
         npal = u32(b, 8); pal = np.frombuffer(b, np.uint8, npal * 4, 12).reshape(-1, 4)[:, [2, 1, 0, 3]].copy()
         if fmt == 0x37: pal[:, 3] = 255
         o = 12 + npal * 4
-    elif fmt in (0x26, 0x36):
+    elif fmt in (0x26, 0x32, 0x36):               # DXT1, DXT3, DXT5
         o = 8 + 4
     else:
         raise ValueError(f"fmt {fmt:#x}")
@@ -93,7 +95,7 @@ def dxt(b):
     if fmt in (0x37, 0x38):
         a = np.frombuffer(px, np.uint8)[:w * h]
         return pal[unswizzle(a, w, h)]
-    return dxt_blocks(px, w, h, alpha5=(fmt == 0x36))
+    return dxt_blocks(px, w, h, alpha5=(fmt == 0x36), alpha4=(fmt == 0x32))
 
 def main(pd, xd, out):
     from PIL import Image, ImageDraw              # the side-by-side sheets only; `pack` needs no PIL

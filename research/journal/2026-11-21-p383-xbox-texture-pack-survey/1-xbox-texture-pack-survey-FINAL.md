@@ -8,7 +8,7 @@ the Xbox iso was missing). The iso is back at the repo root, so this session mad
 - Unpacked the Xbox disc: `tools/xbox_xiso.py … x X`, then `tools/xbox_res.py` on each of its 520 `.res`
   (a shell loop in the scratchpad, every one unpacked) → 9,565 `.dxt`. `openmx --dump-textures` of the PS2
   disc → 10,786 PNGs.
-- `tools/xbox_textures.py pack`: 9,400 pairs, **376 Xbox pictures kept** (more pixels), 8,974 the same
+- `tools/xbox_textures.py pack`: 9,424 pairs, **376 Xbox pictures kept** (more pixels), 8,998 the same
   size, 50 smaller, 1,258 PS2 textures with no Xbox twin. Counts by archive and the formats are in
   research/mxu-xbox.md "The texture pack (P383)". `free06_grass` 128 → 256 and `mill_siding` 128 → 256
   are in; most of the rest are the 255 track previews (256 → 512) and 27 bike chrome pictures (64 → 256).
@@ -20,9 +20,16 @@ the Xbox iso was missing). The iso is back at the repo root, so this session mad
   size from its headers (`dxt_size`) and decodes only the kept ones, and `dxt_blocks` decodes all blocks at
   once with numpy: 33 s. Same output as the slow run (`diff -r` of the two packs: identical), and the new
   decoder equals the old one on 156 sampled files of every format the old one read (0x26, 0x36, 0x37, 0x38).
+- Xbox format 0x32 (24 files: 23 `sx*/tex/score_tower4`, `nat10/tex/power_line`), which the old decoder
+  refused: its mip sizes are 16 bytes a 4x4 block (all 24 files end exactly where the mips say), and it is
+  DXT3 — 4-bit alphas, not DXT5's. Decoded as DXT3, score_tower4 (sx07) against its PS2 picture correlates
+  at 0.995 / 0.997 / 0.996 / 0.9999 (R, G, B, A); read as DXT5, the alpha only 0.92. All 24 are the PS2's size,
+  so none goes in the pack, but every `.res` is now surveyed.
+- Spec review: a broken Xbox file crashed `pack` after the change (decode outside the `try`); it is skipped
+  again. Short DXT data and sizes not a multiple of 4 are padded black as the old loop did.
 - `upscale_mods.py --disc --xbox`: unchanged since the 11-20 entry; not run here (it needs an upscale model,
   and the task asks only that it can take the Xbox picture, which its test proves).
-- Follow-up filed: P383a (low) — the user's picks among the same-size pairs, and the 0x32 format.
+- Follow-up filed: P383a (low) — the user's picks among the same-size pairs.
 - opentennis: nothing to take (as on 11-20).
 
 ## What the original does
@@ -45,10 +52,10 @@ Not a simulation task: the Xbox disc is only a texture source; the PS2 game is u
 
 ## Not verified / not 1:1
 
-- **"Or the user judges it better"**: `KEEP` is still empty. Nobody looked at the 8,974 same-size pairs
+- **"Or the user judges it better"**: `KEEP` is still empty. Nobody looked at the 8,998 same-size pairs
   (unattended run); filed as P383a.
-- **24 format-0x32 Xbox files** (`Tracks/sx*/tex/score_tower4`): skipped, the decoder does not know their
-  mip layout. The PS2 picture stays for them.
+- **Format 0x32 as DXT3**: checked on one picture (sx07 score_tower4) against its PS2 twin, not on
+  power_line; none of the 24 is kept, so the pack does not depend on it.
 - **Kept pictures other than free06_grass seen in the game**: only the free06 grass was looked at in a
   ride. The track previews, bike chrome and mill pictures were checked only by size and the md5 check above.
 - **Terrain ground pages and `.atm` animations**: not matched (the Xbox `.dx.trn` is still undecoded).

@@ -61,10 +61,11 @@ textures and lays each pair side by side; checked by eye on free06 and the 250SX
    mods/xbox-textures`.
 
 The whole-disc survey (2026-11-21): 520 `.res` unpack to 9,565 `.dxt` (formats 0x26 DXT1 5124, 0x36
-DXT5 3007, 0x37 1374, 0x38 36, 0x32 24); the PS2 dump has 10,786. 9,400 pairs: **376 Xbox pictures have
-more pixels** (274 keys, a key shared across archives always got the same picture), 8,974 the same size,
-50 fewer. The bigger ones: 255 track previews (`UI/trackpreview`, 256 → 512), 27 bike chrome in `UI/Bike`
+DXT5 3007, 0x37 1374, 0x38 36, 0x32 DXT3 24); the PS2 dump has 10,786. 9,424 pairs: **376 Xbox pictures
+have more pixels** (274 keys, a key shared across archives always got the same picture), 8,998 the same
+size, 50 fewer. The bigger ones: 255 track previews (`UI/trackpreview`, 256 → 512), 27 bike chrome in `UI/Bike`
 (64 → 256), the `free06`/`free09`/`nat*` mill and wood pictures, `free06_grass` (128 → 256), one
-`score_tower` per `sx*` track. 1,258 PS2 textures have no Xbox twin. The 24 format-0x32 files (`sx*/tex/
-score_tower4`) are not decoded: their mip headers differ, and they are skipped. `pack` reads the sizes from
-the headers and decodes only the kept pictures (33 s for the disc).
+`score_tower` per `sx*` track. 1,258 PS2 textures have no Xbox twin. Format 0x32 (23 `sx*/tex/score_tower4`,
+`nat10/tex/power_line`) is DXT3: the DXT5 layout, but sixteen 4-bit alphas; decoded so, score_tower4's
+alpha correlates with the PS2 picture's at 0.9999 (as DXT5, 0.92). `pack` reads the sizes from the headers
+and decodes only the kept pictures (33 s for the disc).
