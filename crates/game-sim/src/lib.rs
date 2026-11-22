@@ -547,7 +547,10 @@ impl Sim {
             // The input slot runs before the frame, and the reset chord with it (S193: the shell's
             // `Plane::step` ran it, this lane did not, so a replay waited out a wreck the original's
             // L1+R1 had already put back).
-            plane.reset_chord(controls.respawn, &self.tables.ride.acos);
+            // The plane's put-back is player 1's poof too, for Props Put Back (S475).
+            if plane.reset_chord(controls.respawn, &self.tables.ride.acos) {
+                self.traffic.props.put_back_due = true;
+            }
             let pad = flight::pad_through(self.input.pad(0), &self.phy.stick);
             // A downed rider's wreck bike meets the plane (S276, [`wreck_plane`]): its search with the
             // hull in its world before the plane's frame, its mirrors on the plane's list, and its

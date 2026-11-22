@@ -575,6 +575,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         air_wrecks: false,
         // Backwards Landings Bail on (S161).
         backwards_bail: true,
+        // Props Put Back on (S475).
+        props_put_back: true,
         // A quad picked (MD37d).
         atv: "atv_Race250P".into(),
         // An MX vs. ATV car picked (MD39c).
@@ -9177,6 +9179,50 @@ fn the_backwards_bail_row_toggles_and_survives_a_restart() {
     down_to(&mut m, &mut r, Key::ResetMods);
     tap(&mut m, &mut r, Control::Cross);
     assert!(!m.settings.backwards_bail, "the host's reset left it on");
+}
+
+/// S475: the Props Put Back row sits under its own Props heading on the Game Modifiers page, the
+/// world's; off is the default and the original's. On, it is written to the file and read back after
+/// a restart, it makes Original mode Mixed, and Original mode's On and the host's All Players reset
+/// turn it back off.
+#[test]
+fn the_props_put_back_row_toggles_and_survives_a_restart() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert!(!m.settings.props_put_back, "off is the default, the original's");
+    assert!(!m.settings.text().contains("props_put_back"), "{}", m.settings.text());
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    down_to(&mut m, &mut r, Key::PropsPutBack);
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::PropsPutBack).unwrap();
+    assert_eq!(row(&m).value, "Off");
+    assert!(row(&m).world);
+    assert_eq!(row(&m).off, None);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.props_put_back);
+    assert_eq!(row(&m).value, "On");
+    assert!(m.settings.text().contains("props_put_back = on\n"));
+    assert_ne!(m.original(), menu::Original::On, "Props Put Back on is not the original");
+
+    let dir = scratch("props-put-back");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, _) = menu::load(&dir);
+    assert!(settings.props_put_back);
+    std::fs::remove_dir_all(dir).ok();
+    assert!(!Settings::parse("props_put_back = off\n").props_put_back);
+
+    m.set_original(true);
+    assert!(!m.settings.props_put_back);
+    assert_eq!(m.original(), menu::Original::On);
+
+    m.settings.props_put_back = true;
+    down_to(&mut m, &mut r, Key::Player);
+    tap_until(&mut m, &mut r, Control::Left, |m| m.mods_whose() == "All");
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.settings.props_put_back, "the host's reset left it on");
 }
 
 /// P183: the Controls tab ends on a Vibration row, every player's, before I8's Experimental heading;

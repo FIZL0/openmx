@@ -5470,6 +5470,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.air_wrecks = args.air_wrecks && shell.front.menu.settings.air_wrecks;
                 a.backwards_bail = args.backwards_bail || shell.front.menu.settings.backwards_bail;
+                a.props_put_back = args.props_put_back || shell.front.menu.settings.props_put_back;
                 if args.atv.is_empty() {
                     a.atv = shell.front.menu.settings.atv.clone();
                 }

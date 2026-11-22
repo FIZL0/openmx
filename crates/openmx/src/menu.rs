@@ -534,6 +534,10 @@ pub struct Settings {
     /// [`game_sim::state::Sense::backwards_bail`]). Not the original's: off, the default, is the
     /// original, which rides such a landing out.
     pub backwards_bail: bool,
+    /// Props Put Back (S475, [`game_sim::prop_set::PropSet::put_back_with_rider`]): a human rider's
+    /// poof or lap puts every knocked prop back on its spot. Not the original's: off, the default, is
+    /// the original, where a prop comes back only on its own reset time.
+    pub props_put_back: bool,
     /// MX vs. ATV's quad (MD37d), an addition: the handling file the Garage's Quad row picked
     /// (`atv_Race250P`), which the pause's switch row then offers; empty, the default, for none.
     pub atv: String,
@@ -1054,7 +1058,9 @@ impl Menu {
     /// every seat (whatever Air Wrecks), Mixed otherwise. The HUD is not read: since P170 there is
     /// only openmx's, or none.
     pub fn original(&self) -> Original {
-        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.settings.air_wrecks && !self.settings.backwards_bail {
+        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.settings.air_wrecks && !self.settings.backwards_bail
+            && !self.settings.props_put_back
+        {
             Original::On
         } else if !Departure::ALL.iter().any(|d| self.some_original(*d)) {
             Original::Off
@@ -1076,6 +1082,8 @@ impl Menu {
             self.settings.air_wrecks = true;
             // Backwards Landings Bail off (S161): the original rides a backwards landing out.
             self.settings.backwards_bail = false;
+            // Props Put Back off (S475): the original leaves knocked props where they lie.
+            self.settings.props_put_back = false;
         }
     }
 }
@@ -1636,6 +1644,7 @@ impl Default for Settings {
             wrecks: true,
             air_wrecks: true,
             backwards_bail: false,
+            props_put_back: false,
             atv: String::new(),
             mxvatv_car: String::new(),
             vibration: true,
@@ -1945,6 +1954,7 @@ impl Settings {
                 "wrecks" => s.wrecks = v != "off",
                 "air_wrecks" => s.air_wrecks = v != "off",
                 "backwards_bail" => s.backwards_bail = v == "on",
+                "props_put_back" => s.props_put_back = v == "on",
                 "atv" => s.atv = if v == "off" { String::new() } else { v.to_string() },
                 "mxvatv_car" => s.mxvatv_car = if v == "off" { String::new() } else { v.to_string() },
                 "vibration" => s.vibration = v != "off",
@@ -2130,6 +2140,7 @@ impl Settings {
             + if self.physics_editor { "physics_editor = on\n" } else { "" }
             + &self.air_wrecks_text()
             + &self.backwards_bail_text()
+            + if self.props_put_back { "props_put_back = on\n" } else { "" }
             + &self.atv_text()
             + &self.mxvatv_car_text()
             + &self.vibration_text()

@@ -41,6 +41,9 @@ const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the ri
 const BACKWARDS_BAIL_HELP: &str = "Whether a landing with the bike facing back against the way it is going throws the rider off. \
      The original game judges a crossed-up landing by an angle that reads one past about 135 degrees as nearly straight, so the bike \
      rides it out and swings round. Off is the original game.";
+/// The Props Put Back row's help (S475).
+const PROPS_PUT_BACK_HELP: &str = "Whether knocked props go back on their spots when you poof or cross the start line in a race. \
+     The original game leaves them where they lie until each comes back on its own. Off is the original game. Not online.";
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_GRAPHICS: usize = 2;
 pub const TAB_AUDIO: usize = 3;
@@ -135,6 +138,8 @@ pub enum Key {
     Wrecks,
     AirWrecks,
     BackwardsBail,
+    /// Props Put Back (S475): knocked props back on a poof or at the start line.
+    PropsPutBack,
     /// Whether a wreck rumbles the pad (P183), every player's.
     Vibration,
     Bays,
@@ -700,6 +705,7 @@ impl Menu {
     /// row's count.
     fn wrecks_changed(&self) -> usize {
         usize::from(!self.settings.wrecks) + usize::from(!self.settings.air_wrecks) + usize::from(self.settings.backwards_bail)
+            + usize::from(self.settings.props_put_back)
     }
 
     /// The modifiers page's Wrecks and Air Wrecks (P175, from the Ride tab's P138 rows): the
@@ -734,6 +740,16 @@ impl Menu {
             .off_if(self.air_held().is_some(), "The tape or the room holds it for the ride")
             .off_if(host_only.is_some(), host_only.unwrap_or(""));
         vec![Row::heading("Wrecks"), wrecks.off_if(host_only.is_some(), host_only.unwrap_or("")), air, back]
+    }
+
+    /// The modifiers page's Props Put Back (S475): the world's, one switch for the ride's prop set,
+    /// taken as the next ride starts; held in an online room, where it stays off.
+    fn props_rows(&self) -> Vec<Row> {
+        let mut props = Row::on_off(Key::PropsPutBack, "Props Put Back", self.settings.props_put_back, PROPS_PUT_BACK_HELP);
+        props.world = true;
+        props.note = Some("The world's. Changes take when the next ride starts. Off is the original game.".into());
+        let online = self.lobby.room.is_some() || self.guest;
+        vec![Row::heading("Props"), props.off_if(online, "Off online")]
     }
 
     fn display_rows(&self) -> Vec<Row> {
@@ -1592,6 +1608,7 @@ impl Menu {
         // The wrecks' switches are the rider's on the bike.
         if category == Category::Bike {
             rows.extend(self.wrecks_rows());
+            rows.extend(self.props_rows());
         }
         rows.push(Row::heading("Presets"));
         let names: Vec<&str> = self.settings.presets.iter().map(|(n, _)| n.as_str()).collect();
@@ -1970,6 +1987,7 @@ impl Menu {
             Key::AirWrecks => s.air_wrecks = !s.air_wrecks,
             Key::Vibration => s.vibration = !s.vibration,
             Key::BackwardsBail => s.backwards_bail = !s.backwards_bail,
+            Key::PropsPutBack => s.props_put_back = !s.props_put_back,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Handling => {
@@ -2225,6 +2243,7 @@ impl Menu {
                 // The host's All Players reset is the whole ride's: the world's wrecks back on too.
                 if self.mods_seat().is_none() {
                     self.settings.wrecks = true;
+                    self.settings.props_put_back = false;
                     if self.air_held().is_none() {
                         self.settings.air_wrecks = true;
                         self.settings.backwards_bail = false;

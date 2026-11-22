@@ -21,10 +21,15 @@ reset is the earlier entry, research/journal/2026-11-21-s475-poof-keeps-knocked-
   - a poof: the rider frame's `respawned` (the L1+R1 chord and the wreck put-back alike), in
     `Sim::step`, `step_all_posed`, the flown riders' step and the split-screen seat step
     (`rider_contact.rs`).
+  - the plane's put-back: player 1's L1+R1 on the plane (`reset_chord` says it put the plane back).
   - the lap line: the race frame's `LineNotice::Lap` (a counted lap) or `Started` (a ghost race's first
     crossing) on a human's card.
 - The shell: `--props-put-back` turns it on (help text too). Forced off online, where both machines must
   step the props alike.
+- The Settings screen: a Props Put Back row under its own Props heading on the Game Modifiers page
+  (the world's, `props_put_back = on` in the settings file), taken as the next ride starts. Original
+  mode On turns it off, and on it reads Mixed; the host's All Players reset turns it off. Dimmed online.
+  Test: `tests/menu.rs` `the_props_put_back_row_toggles_and_survives_a_restart`.
 - Test: `tests/prop_set.rs` `a_poof_puts_knocked_props_back_with_the_switch_on`: a swung sign, the L1+R1
   poof; on, the sign is back on its spot, asleep, in that tick and stays; off, it swings on.
 - Nothing from ../opentennis: it has no knockable props.
@@ -43,17 +48,20 @@ checked by the new test above.
 ## Not verified / not 1:1
 
 - **Not 1:1 by design:** the switch is not in the original. Off is the original.
-- **No Settings row and no Original mode hook:** only the `--props-put-back` flag. The Settings screen and
-  Original mode live in menu.rs, outside this task's files; filed as P394.
+- **The row takes at the next ride:** toggled under the pause, it waits for the next ride start (P394).
+- **"The start line" is the race's line only:** free ride has no start line the game knows, so there only a
+  poof puts props back.
 - **Not on a tape:** a recorded tape does not carry the switch (Backwards Bail does), so a tape ridden with
   it on replays with it off. Part of the follow-up.
 - **The lap line path is not run in a test:** it needs a race on sx01 off the disc and a rider driven
   through the line. The mark it sets goes the same way as the poof's, which is tested.
 - **Online is off:** the switch is not agreed between the two machines, so the shell forces it off.
-- **The plane's own L1+R1 put-back** (a flying player) does not set the mark: it is not the rider frame's
-  `respawned`. Only riders on a bike poof here.
+- **The plane's put-back is not run in a test:** it sets the same mark as the bike's poof. Only player 1
+  flies a plane.
+- **Puts back every prop, not only the knocked ones:** an untouched prop is already on its spot, so this
+  changes nothing for it.
 - **Not seen in the app:** no pad on this machine to knock a prop and poof by hand.
 
 ## Next
 
-P394: the Settings row, Original mode and the tape line.
+P394: the tape line, and the row taking under the pause.
