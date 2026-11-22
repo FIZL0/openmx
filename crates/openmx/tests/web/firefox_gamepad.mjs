@@ -3,7 +3,7 @@
 // service (`navigator.requestGamepadServiceTest()`, behind dom.gamepad.test.enabled, what its own mochitests use) adds
 // a pad to the parent process's gamepad service as a platform backend does; from there it is Firefox's code that
 // lists it in `getGamepads()`, fires `gamepadconnected` and snapshots its buttons, as with a USB pad. No kernel pad:
-// /dev/uinput is root's on the machine the tests run on, and one would reach every other slot's browser (K13).
+// one would reach every other slot's browser (K13), and the machine's own pads are hidden from this one (T11, below).
 //
 //   node firefox_gamepad.mjs <firefox> <web dir> <disc.iso> <scratch profile dir> <out.png>
 //
@@ -23,7 +23,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { WORKER, PAGE, frames } from './frames.mjs';
 
 const [firefox, webdir, iso, profile, out] = process.argv.slice(2);
@@ -107,8 +107,18 @@ const prefs = {
 fs.mkdirSync(profile, { recursive: true });
 fs.writeFileSync(path.join(profile, 'user.js'),
   Object.entries(prefs).map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});\n`).join(''));
-const fox = spawn(firefox, ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port=0',
-  '--width=1280', '--height=720', 'about:blank'], {
+// Firefox lists every evdev pad on the machine, and since uinput opened up (11-21) other slots' `./kit pad` pads
+// ("ps2kit pad N") are some: one listed or pressed beside the test's pad took a seat or showed before any press
+// (T11). So Firefox runs under bubblewrap with an empty /dev/input (and no udev database), seeing only the test
+// service's pad; the rest of the machine is bound as it is. In a pid namespace of its own, so `fox.kill()` (bwrap)
+// ends Firefox and every process it started. Without bwrap it runs as it is, and says so.
+const foxArgs = ['--headless', '--no-remote', '--profile', profile, '--remote-debugging-port=0',
+  '--width=1280', '--height=720', 'about:blank'];
+const hide = ['--dev-bind', '/', '/', '--tmpfs', '/dev/input',
+  ...(fs.existsSync('/run/udev') ? ['--tmpfs', '/run/udev'] : []), '--unshare-pid', '--die-with-parent', '--'];
+const bwrap = spawnSync('bwrap', [...hide, 'true']).status === 0;
+if (!bwrap) console.error('no bwrap: Firefox sees the machine\'s pads, other slots\' too');
+const fox = spawn(bwrap ? 'bwrap' : firefox, bwrap ? [...hide, firefox, ...foxArgs] : foxArgs, {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, MOZ_DISABLE_NONLOCAL_CONNECTIONS: '1', MOZ_CRASHREPORTER_DISABLE: '1' },
 });
