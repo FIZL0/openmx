@@ -1306,3 +1306,4 @@ fn untamed_quad_record_strikes_the_bale_on_md224_steer() {
     assert_eq!(mirrors, want, "the bale's mirrors on tick 197");
     assert!(knocked[0].record.contacts.iter().all(|c| c.other == 1), "a mirror names the quad's record");
 }
+

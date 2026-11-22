@@ -4120,6 +4120,8 @@ impl Model {
     /// boxed node up to date in the file's order, parents first, so every node is the topmost one
     /// brought up to date and Untamed's world update makes its frame times its parent's orthonormal
     /// again ([`crate::atv_moto::untamed_orthonormal`]). The scene node under them (`frame`) is current.
+    /// Every node is taken to have a box, as every node of the race quad's model has: the walk skips a
+    /// boxless node, which is then brought up to date with its first boxed child, and only it orthonormal.
     pub fn untamed_worlds(&self, frame: &crate::math::Mat4) -> Vec<crate::math::Mat4> {
         let mut worlds: Vec<crate::math::Mat4> = Vec::with_capacity(self.nodes.len());
         for n in &self.nodes {

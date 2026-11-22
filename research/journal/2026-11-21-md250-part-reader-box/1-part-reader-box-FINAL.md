@@ -56,6 +56,12 @@ bale test.
   (crates/openmx/src/vehicle.rs) and tests/untamed_atv/route.rs. They are outside this task's files.
   Filed as MD261.
 
+- **The ride still spawns at the image's body, heading +z.** Only the model read (box and mounts) uses
+  the start spot. The record's inertia depends only on that read, and the replay tests seed from the
+  image's body. So "make the quad there" covers the read, not the spawn.
+- **Mounts keep `Model::worlds`.** The wheel setup's read order was not hooked, so whether its chain is
+  made orthonormal is unchecked. Wheel 2's 1-ulp z word may come from this rather than from the parser.
+
 ## Next
 
 Nothing for MD250.
