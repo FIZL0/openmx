@@ -9226,6 +9226,31 @@ fn the_props_put_back_row_toggles_and_survives_a_restart() {
     assert!(!m.settings.props_put_back, "the host's reset left it on");
 }
 
+/// P394: under the pause the Props Put Back row takes when the pause closes, and says so; a ride the
+/// shell holds it on (a played tape) shows it dimmed and leaves it be.
+#[test]
+fn the_props_put_back_row_takes_when_the_pause_closes() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::PropsPutBack).unwrap();
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    down_to(&mut m, &mut r, Key::PropsPutBack);
+    assert!(row(&m).note.unwrap_or_default().contains("when the pause closes"), "{:?}", row(&m).note);
+    assert_eq!(row(&m).off, None);
+    m.air_lock = Some("A played tape switches Air Wrecks where it was switched".into());
+    assert_eq!(row(&m).off.as_deref(), Some("The tape or the room holds it for the ride"));
+    tap(&mut m, &mut r, Control::Right);
+    assert!(!m.settings.props_put_back, "a held row changed");
+    m.air_lock = None;
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.props_put_back);
+}
+
 /// P183: the Controls tab ends on a Vibration row, every player's, before I8's Experimental heading;
 /// on is the default and the original's. Off, it is written to the file and read back after a restart.
 #[test]

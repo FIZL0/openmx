@@ -8268,6 +8268,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if args.backwards_bail {
             recorder.backwards_bail(true);
         }
+        // and one with Props Put Back on, the same (P394)
+        if args.props_put_back && args.online.is_none() {
+            recorder.props_put_back(true);
+        }
         recorder
     });
     // The drawn ground's chunks (P127), the longest part of a world's load, counted for the bar.
@@ -10023,6 +10027,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         world.seats[0].sim.rider.sense.air_wrecks = true;
         // and Backwards Landings Bail off, the original's (S161)
         world.seats[0].sim.rider.sense.backwards_bail = false;
+        // and Props Put Back off, the original's (P394)
+        world.seats.iter_mut().for_each(|s| s.sim.traffic.props.put_back_with_rider = false);
     }
     // The start zones' portals (V51), laid over the ground once: they never move.
     let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
@@ -10358,6 +10364,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // And Backwards Landings Bail's (S161).
     let mut menu_back = front.as_deref().map(|f| f.menu.settings.backwards_bail);
+    // And Props Put Back's (P394).
+    let mut menu_props = front.as_deref().map(|f| f.menu.settings.props_put_back);
     // The physics editor (P387) over player 1's bike, and why it can't turn anything on this ride.
     let phy_held = phy_editor::held(online.is_some(), head.is_some() || world.tape.is_some(), &stock_phys[0], &phy_bytes, &tables.ride.curve);
     let mut phy_desk = phy_editor::Editor::new(&format!("{}.phy", bike_words[0]), &phy_bytes);
@@ -10704,6 +10712,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 tape.backwards_bail(on);
             }
             println!("backwards landings bail: {} (the tape's, before frame {})", if on { "on" } else { "off" }, head.as_ref().map_or(0, Head::at));
+        }
+        // And Props Put Back, on every seat's prop set (P394).
+        if let Some(on) = head.as_ref().and_then(Head::props_put_back) {
+            world.seats.iter_mut().for_each(|s| s.sim.traffic.props.put_back_with_rider = on);
+            if let Some(tape) = &mut world.tape {
+                tape.props_put_back(on);
+            }
+            println!("props put back: {} (the tape's, before frame {})", if on { "on" } else { "off" }, head.as_ref().map_or(0, Head::at));
         }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
@@ -11299,6 +11315,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         // of whoever stands there (P57), on the markers kept under their seat's name.
                         let mut sim = spawn.clone();
                         sim.rider.sense.wrecks_enabled = args.wrecks && front.menu.settings.wrecks;
+                        // On the prop set's switch as the ride has it now, a pause's change too (P394).
+                        sim.traffic.props.put_back_with_rider = world.seats[0].sim.traffic.props.put_back_with_rider;
                         sim.rider.ghost.start();
                         let (profile, bike) = (saved_markers::profile("", i), &bike_words[0]);
                         sim.markers = saved_markers::load(&markers_dir, &args.track, &profile, bike);
@@ -11558,6 +11576,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         tape.backwards_bail(on);
                     }
                     println!("backwards landings bail: {} (from the pause)", if on { "on" } else { "off" });
+                }
+            }
+            // And on a Props Put Back switch the player changed (P394), on every seat's prop set;
+            // held by a played tape, and off online, where both machines must step the props alike.
+            if closed && menu_props != Some(front.menu.settings.props_put_back) {
+                let on = front.menu.settings.props_put_back;
+                menu_props = Some(on);
+                // The row as it closed, off included: a front-end ride's flag is the row it started on.
+                if front.menu.air_lock.is_none() && online.is_none() {
+                    for seat in &mut world.seats {
+                        seat.sim.traffic.props.put_back_with_rider = on;
+                    }
+                    if let Some(tape) = &mut world.tape {
+                        tape.props_put_back(on);
+                    }
+                    println!("props put back: {} (from the pause)", if on { "on" } else { "off" });
                 }
             }
             // The physics editor's page (P387): what it asked, and the ride retuned to it at once.

@@ -743,13 +743,18 @@ impl Menu {
     }
 
     /// The modifiers page's Props Put Back (S475): the world's, one switch for the ride's prop set,
-    /// taken as the next ride starts; held in an online room, where it stays off.
+    /// taken as the next ride starts or the pause closes (P394); held in an online room, where it
+    /// stays off, and under a played tape's pause, where the tape switches it.
     fn props_rows(&self) -> Vec<Row> {
         let mut props = Row::on_off(Key::PropsPutBack, "Props Put Back", self.settings.props_put_back, PROPS_PUT_BACK_HELP);
         props.world = true;
-        props.note = Some("The world's. Changes take when the next ride starts. Off is the original game.".into());
+        props.note = Some(match self.stack.first() {
+            Some(Screen::Pause) => "Changes take when the pause closes.".into(),
+            _ => "The world's. Changes take when the next ride starts. Off is the original game.".into(),
+        });
         let online = self.lobby.room.is_some() || self.guest;
-        vec![Row::heading("Props"), props.off_if(online, "Off online")]
+        let props = props.off_if(self.air_held().is_some(), "The tape or the room holds it for the ride").off_if(online, "Off online");
+        vec![Row::heading("Props"), props]
     }
 
     fn display_rows(&self) -> Vec<Row> {

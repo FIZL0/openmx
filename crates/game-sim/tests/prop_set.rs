@@ -377,3 +377,49 @@ fn a_poof_puts_knocked_props_back_with_the_switch_on() {
     assert!(!sim.traffic.props.put_back_due, "the step clears the mark");
     assert_ne!(sim.traffic.props.collections[0].objects[0].node, made.objects[0].node, "off, a due tick puts nothing back");
 }
+
+/// P394 — the Props Put Back switch rides on a tape as Backwards Landings Bail's does: a
+/// `props_put_back FRAME on|off` line, written only where it was set, read back, handed out by the
+/// head before its frame, and put on the prop set by `play_from`, so a tape ridden with it replays
+/// with it, a switch made mid-ride (the pause's) included.
+#[test]
+fn the_props_put_back_switch_rides_on_a_tape() {
+    use game_sim::replay::{self, PadFrame, PadTape, Recorder};
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut plain = Recorder::new("props put back");
+    let mut set = Recorder::new("props put back");
+    set.props_put_back(false);
+    set.props_put_back(true);
+    for k in 0..4 {
+        if k == 2 {
+            set.props_put_back(false);
+        }
+        let f = PadFrame::of_buttons(dt, 0);
+        plain.frame(f.dt(), &f.reports);
+        set.frame(f.dt(), &f.reports);
+    }
+    assert_eq!(set.tape.props_put_back, vec![(0, true), (2, false)], "two settings before one frame are the last");
+    assert!(!plain.to_text().contains("props_put_back"), "a tape with the switch untouched says nothing of it");
+    let text = set.to_text();
+    assert!(text.contains("props_put_back 0 on\n") && text.contains("props_put_back 2 off\n"), "{text}");
+    let back = PadTape::parse(&text).unwrap();
+    assert_eq!(back, set.tape);
+    assert_eq!(back.props_put_back_at(0), Some(true));
+    assert_eq!(back.props_put_back_at(1), None);
+    assert!(PadTape::parse("props_put_back 0 maybe").is_err());
+    assert!(PadTape::parse("props_put_back 4 on\nprops_put_back 2 off").is_err());
+
+    let mut head = replay::Head::new(back.clone());
+    assert_eq!(head.props_put_back(), Some(true));
+    head.next();
+    assert_eq!(head.props_put_back(), None);
+
+    let ride = |frames: usize, tape: &PadTape| {
+        let mut sim = Sim::new(7);
+        sim.traffic.props = sign();
+        replay::play_from(&PadTape { frames: tape.frames[..frames].to_vec(), ..tape.clone() }, sim).sim.traffic.props.put_back_with_rider
+    };
+    assert!(ride(2, &back), "the tape's switch was not put on");
+    assert!(!ride(4, &back), "the tape's mid-ride switch was not taken");
+    assert!(!ride(4, &PadTape { props_put_back: Vec::new(), ..back }), "untouched, the original's off");
+}

@@ -1170,6 +1170,10 @@ pub struct PadTape {
     /// throughout, the original's, which is every tape before S161; a ride started with it on says so
     /// at frame 0.
     pub backwards_bail: Vec<(usize, bool)>,
+    /// The Props Put Back switch (P394, [`crate::prop_set::PropSet::put_back_with_rider`]) where the
+    /// ride set it, the same way as [`PadTape::air_wrecks`]. Empty for a ride with it off throughout,
+    /// the original's, which is every tape before P394; a ride started with it on says so at frame 0.
+    pub props_put_back: Vec<(usize, bool)>,
     /// P262: whether the ride was simulated on ps2-float's `native` arithmetic (the player builds' plain
     /// f32) rather than the PS2's. A tape rides the same only on a build of the same sim: played on the
     /// other it drifts, so the shell warns ([`PadTape::sim_warning`]). False for an exact ride, which is
@@ -1184,7 +1188,7 @@ pub struct PadTape {
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new(), native_sim: false, race_seed: None }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new(), props_put_back: Vec::new(), native_sim: false, race_seed: None }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1206,6 +1210,11 @@ impl PadTape {
     /// The Backwards Landings Bail switch put on just before frame `k` (S161), if the ride set it there.
     pub fn backwards_bail_at(&self, k: usize) -> Option<bool> {
         self.backwards_bail.iter().rev().find(|(at, _)| *at == k).map(|(_, on)| *on)
+    }
+
+    /// The Props Put Back switch put on just before frame `k` (P394), if the ride set it there.
+    pub fn props_put_back_at(&self, k: usize) -> Option<bool> {
+        self.props_put_back.iter().rev().find(|(at, _)| *at == k).map(|(_, on)| *on)
     }
 
     /// The machines the first player is switched to just before frame `k`, in the order they were.
@@ -1458,6 +1467,22 @@ impl PadTape {
                     }
                     tape.backwards_bail.push((at, on));
                 }
+                // The Props Put Back switch from this frame on (P394): the frame, then on or off.
+                "props_put_back" => {
+                    let (Some(at), Some(on), None) = (word.next().and_then(parse_u64), word.next(), word.next()) else {
+                        return err(n, "props_put_back wants the frame it takes before, then on or off");
+                    };
+                    let on = match on {
+                        "on" => true,
+                        "off" => false,
+                        _ => return err(n, format!("props_put_back wants on or off, not '{on}'")),
+                    };
+                    let at = at as usize;
+                    if tape.props_put_back.last().is_some_and(|(last, _)| *last > at) {
+                        return err(n, format!("props_put_back {at} comes after a later one"));
+                    }
+                    tape.props_put_back.push((at, on));
+                }
                 // The first player's markers cleared before this frame (P99).
                 "markers_cleared" => {
                     let Some(at) = word.next().and_then(parse_u64) else {
@@ -1532,6 +1557,9 @@ impl PadTape {
         }
         for (at, on) in &self.backwards_bail {
             let _ = writeln!(s, "backwards_bail {at} {}", if *on { "on" } else { "off" });
+        }
+        for (at, on) in &self.props_put_back {
+            let _ = writeln!(s, "props_put_back {at} {}", if *on { "on" } else { "off" });
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -1721,7 +1749,7 @@ pub fn play(tape: &PadTape, seed: u32) -> Playback {
 }
 
 /// Play a whole recording into a run that starts from `sim`, with the markers the tape started with
-/// when it says (P99) and the first player's Air Wrecks (P138) and Backwards Landings Bail (S161) switches where it set them. Panics on markers this build cannot read ([`PadTape::start_markers`]).
+/// when it says (P99) and the first player's Air Wrecks (P138) and Backwards Landings Bail (S161) switches and Props Put Back (P394) where it set them. Panics on markers this build cannot read ([`PadTape::start_markers`]).
 pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
     let mut run = Playback::from_state(sim);
     if let Some(markers) = tape.start_markers().expect("the tape's markers") {
@@ -1736,6 +1764,9 @@ pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
         }
         if let Some(on) = tape.backwards_bail_at(k) {
             run.sim.rider.sense.backwards_bail = on;
+        }
+        if let Some(on) = tape.props_put_back_at(k) {
+            run.sim.traffic.props.put_back_with_rider = on;
         }
         run.advance(frame);
     }
@@ -2362,6 +2393,15 @@ impl Recorder {
         self.tape.backwards_bail.push((at, on));
     }
 
+    /// Write down that the Props Put Back switch is now `on` (P394), as [`Recorder::air_wrecks`] does.
+    pub fn props_put_back(&mut self, on: bool) {
+        let at = self.tape.len();
+        if self.tape.props_put_back.last().is_some_and(|(last, _)| *last == at) {
+            self.tape.props_put_back.pop();
+        }
+        self.tape.props_put_back.push((at, on));
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2443,6 +2483,12 @@ impl Head {
     /// [`Head::next`] hands out next (S161), where the recording set it there.
     pub fn backwards_bail(&self) -> Option<bool> {
         self.tape.backwards_bail_at(self.at)
+    }
+
+    /// The Props Put Back switch the ride takes before the frame [`Head::next`] hands out next
+    /// (P394), where the recording set it there.
+    pub fn props_put_back(&self) -> Option<bool> {
+        self.tape.props_put_back_at(self.at)
     }
 
     /// Whether the recording cleared the first player's markers before the frame [`Head::next`]
