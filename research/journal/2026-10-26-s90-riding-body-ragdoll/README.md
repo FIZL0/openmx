@@ -8,3 +8,7 @@ proof of the spring is S135. It was handed out a second time on 2026-10-27 becau
 and was blocked again with no code changed (entry 2). Reopened mechanically again by S135 (entry 3) and S201 (entry 4); still blocked, and the sim half is now done.
 
 Entry 5 (2026-11-02): the user lifted the ruling. The ragdoll is drawn by default, its swing is proved against the original's node rows, and its step moved to the frame's end so the shell draws it as springy as the original. Still to do: PCSX2 shots beside the shell's.
+
+Entry 6 (2026-11-21): PCSX2 shots beside the shell's, after both put-backs and through a landing on free09
+(`context/shots/s90/`). The ragdoll rider's posture and sag match the original's, with no over-swing.
+S74/S201's node rows have gone from the shared context, so the swing proof skips until C47 re-records them.
