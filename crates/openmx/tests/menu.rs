@@ -4573,9 +4573,10 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.page();
-    // Player, Machine (on the bike), the bike's knobs, the wrecks' heading and three, Presets' heading and five.
+    // Player, Machine (on the bike), the bike's knobs, the wrecks' heading and three, the props' heading
+    // and one (S475), Presets' heading and five.
     let bike = game_sim::modifiers::Category::Bike.knobs().len();
-    assert_eq!(rows.len(), 2 + bike + 4 + 1 + 5, "{rows:?}");
+    assert_eq!(rows.len(), 2 + bike + 4 + 2 + 1 + 5, "{rows:?}");
     assert_eq!(rows.last().unwrap().label, "Reset to Original");
     assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
