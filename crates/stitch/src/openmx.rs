@@ -451,7 +451,7 @@ pub fn check_world(
         for _ in 0..threads.max(1) {
             sc.spawn(|| {
                 let mut tiled = match world.tiled() {
-                    Ok(t) => t,
+                    Ok(t) => t.kept_for(0),
                     Err(e) => {
                         results.lock().expect("lock").push((usize::MAX, Err(e)));
                         return;
