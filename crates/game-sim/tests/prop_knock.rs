@@ -771,7 +771,7 @@ fn the_bike_strikes_the_ball() {
 
     let pushed = free.set.strike(&strike);
     let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
-    let mut bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed };
+    let mut bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed, cars: Vec::new() };
     let mut own = ridden_at(&before, rec);
     bump.resolve(&mut own, true);
     free.set.pushed(&bump.props);
@@ -881,7 +881,7 @@ fn the_bike_and_the_ball_push_each_other_as_the_original() {
             }
             let list: Vec<Contact> = list_at(ee, rec).into_iter().map(|c| Contact { other: c.other.map(|_| 1), ..c }).collect();
             let pushed = prop_contact::Pushed { collection: 2, object: 0, collider: ball_collider, body: ee_body(ee, body), mass };
-            let mut bump = rider_contact::Bump { me: 0, contacts: list, colliders: vec![collider], vehicles: vec![vehicle_at(ee, rec)], movers: Vec::new(), planes: Vec::new(), props: vec![pushed] };
+            let mut bump = rider_contact::Bump { me: 0, contacts: list, colliders: vec![collider], vehicles: vec![vehicle_at(ee, rec)], movers: Vec::new(), planes: Vec::new(), props: vec![pushed], cars: Vec::new() };
             let mut own = ridden_at(ee, rec);
             bump.resolve(&mut own, true);
             run_original(ee, r, first);
@@ -1319,7 +1319,7 @@ fn the_strike_is_queued_as_the_original_queues_it() {
     let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
     let pushed = free.set.strike(&strike);
     let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
-    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed };
+    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed, cars: Vec::new() };
     let mut heard: Vec<(Owner, Struck)> = rider_contact::heard_struck(&bump).into_iter().map(|s| (Owner::Bike(0), s)).collect();
     for (c, col) in free.set.collections.iter().enumerate() {
         heard.extend(col.heard.0.iter().map(|&(k, s)| (Owner::Prop { collection: c, object: k }, s)));
@@ -1404,7 +1404,7 @@ fn the_balls_probe_is_heard_striking_the_bike() {
     let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
     let pushed = free.set.strike(&strike);
     let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
-    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed };
+    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed, cars: Vec::new() };
     let mut heard: Vec<(Owner, Struck)> = rider_contact::heard_struck(&bump).into_iter().map(|s| (Owner::Bike(0), s)).collect();
     for (c, col) in free.set.collections.iter().enumerate() {
         heard.extend(col.heard.0.iter().map(|&(k, s)| (Owner::Prop { collection: c, object: k }, s)));

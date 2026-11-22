@@ -6914,6 +6914,36 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   against the original's tick-42 node (3775.0729, 246.97178, 3232.7180). The truck does not stop
 #   dead: its node goes on 0.5..0.8 ft a tick and climbs (S219's "stops dead" read the path car's
 #   own position, frozen while physical).
+# S251 — the woken truck's two-way contact with the bike (traffic.rs Traffic::physics_frame_among,
+#   stand_down; mover_contact.rs Sim::cars_among, cars_probed; test tests/physics_car_struck.rs
+#   the_wake_on_a_bikes_strike_is_the_originals; tests/replay.rs S207 ctruck; journal
+#   2026-11-21-s251-woken-truck-two-way-contact). S207's ctruck made again from s89-along (copy 3, slot
+#   35, research/s251/ride.sh) into context/capture/s251/ctruck.csv, copied to s207's (S207's was gone);
+#   RAM images context/states/s251-ctruck-12060..12066.eeMemory.bin (image N = csv row N+1). The truck is
+#   0x01cc7630, woken on frame 12063 (tick 44); player 1's chassis 0x00876da0 (+0x260 vel, +0x290 rates,
+#   +0x130 force, +0x140 torque), the bike's collision record 0x00879310, the truck's 0x01dc0420.
+#   - The node update 0x0026f800 on the truck's world node (object +0x134), alone on an image, makes the
+#     next frame: on 12062 it wakes the truck and gives the strike image's body velocity and chassis
+#     vel/rates bit for bit; chained 5 times from 12066 it gives rows 12067..12071 bit for bit. So the
+#     bike's search, the wake and both lists' resolves all run under it.
+#   - The wake (0x003e3b00) run as the bike's search calls it gives the port's node and body bit for bit;
+#     the car's +0x2e0 is +0x2a0 of the tick before.
+#   - While physical, the truck's path mesh is out of every search (S208's +0x428 +0x31 bits): the port
+#     stands it down (empty mesh, radius 0) in Traffic::place.
+#   - The truck's step gathers the bike's frame on its node and files its rays' hits as kind-1 mirrors on
+#     the bike's list (other = the truck's record): tick 45 three, tick 51 four (three at (3705.3105,
+#     238.99411, 3102.5474) on_body (-3.203, 3.76, 7.7), one at (3703.8718, 239.1356, 3099.9756) on_body
+#     (-0.039304256, 3.760035, 7.706704), normal (0.86409026, -0.116129994, -0.489757)); the truck's own
+#     list holds 4 ground entries and kind-0 entries on the bike. The post regathers the node's bikes, so
+#     they stay on the node through the step. No bike body-ray or sweep entry on the f.col on 44..51.
+#   - Tick 51 (12070 -> 12071): the force before the resolve, in write order: gravity (0,-400,0) at
+#     0x258064, 0x258128, 0x155c3c, then two wheel adds at 0x25c66c: (-4.17, 0.84, -7.17) and
+#     (-378.88, 38.48, 211.39); then three adds at 0x272a98 of (262.72, -35.31, -148.91) each, the
+#     port's three like mirrors' to the print. The port adds the fourth mirror after them (536.68,
+#     -72.13, -304.18, normal speed -0.5759); the logged stretch of the original has no fourth add. The
+#     port's force before the resolve is (204.90, -297.99, -119.38) against the original's (-375.57,
+#     -277.76, 212.93): its rear wheel is on the truck's f.col there (normal (0.7297, 0.0626, -0.6809))
+#     and pushes the other way. Not settled which: the wheel's force on the f.col or the fourth mirror.
 # S252 — every search's strike on a HasPhysics car's path mesh (crates/game-sim/src/world.rs Prop::strike_heard,
 #   flight_search::Scene's prop pair, ragdoll_scene::PathCar::struck, Traffic::heard from frame_late; test
 #   tests/replay.rs a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does; journal

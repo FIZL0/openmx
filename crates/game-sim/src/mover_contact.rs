@@ -30,7 +30,9 @@
 
 use crate::air;
 use crate::bike_col::{self, BikeCol};
-use crate::contact::{Contact, Node};
+use std::sync::Arc;
+
+use crate::contact::{Contact, Node, Other, Side};
 use crate::contact_search::{self, Hit, Record, Search, Struck, Swept};
 use crate::flight_search;
 use crate::math::Mat4;
@@ -294,11 +296,76 @@ impl crate::Sim {
         let Some(props) = world.moving() else { return Vec::new() };
         let cars = props.props.get(first..).unwrap_or(&[]);
         let (contacts, heard) = struck_among(col, &r.ride.transform(), cars, first, dt, r.ride.nearby.as_deref());
+        let frame = Arc::new(col.frame.clone());
         for slot in heard {
-            if let Some(k) = self.traffic.car_at(first + slot) {
-                self.traffic.strike(k, dt, world);
+            let Some(k) = self.traffic.car_at(first + slot) else { continue };
+            // The woken car's node update runs in the strike's frame, its rays on the ridden bikes'
+            // frames and its step pushing their chassis (S251).
+            let bikes: Vec<flight_search::Bike> = (0..self.players())
+                .map(|j| {
+                    let r = self.rider_of(j);
+                    flight_search::Bike { transform: r.ride.transform(), in_world: !(j == 0 && self.plane.is_some()) && r.state.wreck.is_none() && !r.ghost.on }
+                })
+                .collect();
+            let mut bump = self.bump(i, Vec::new());
+            let mut others: Vec<Other<'_>> =
+                bump.colliders.iter_mut().zip(bump.vehicles.iter_mut()).map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }).collect();
+            let woke = self.traffic.strike_among(k, dt, world, Arc::clone(&frame), &bikes, &mut others);
+            drop(others);
+            if woke {
+                self.bumped_all(&bump);
             }
         }
         contacts
+    }
+
+    /// **The physical cars' node updates among the ridden bikes** (S251), ahead of the cars' held
+    /// frame ([`crate::traffic::Traffic::physics_frame_among`]): their rays strike every ridden bike's
+    /// frame and their steps push those bikes' chassis, as on the strike's own frame
+    /// ([`Sim::car_contacts`]). Every bike's frame is player 1's (`bike_col`): one mesh on the node.
+    pub fn cars_among(&mut self, world: &mut dyn World, dt: F) {
+        if !self.traffic.physics.iter().flatten().any(|p| p.physical) {
+            return;
+        }
+        let Some(frame) = self.rider_of(0).bike_col.as_deref().map(|col| Arc::new(col.frame.clone())) else { return };
+        let bikes: Vec<flight_search::Bike> = (0..self.players())
+            .map(|j| {
+                let r = self.rider_of(j);
+                flight_search::Bike { transform: r.ride.transform(), in_world: !(j == 0 && self.plane.is_some()) && r.state.wreck.is_none() && !r.ghost.on }
+            })
+            .collect();
+        let mut bump = self.bump(0, Vec::new());
+        let mut others: Vec<Other<'_>> =
+            bump.colliders.iter_mut().zip(bump.vehicles.iter_mut()).map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }).collect();
+        let struck = self.traffic.physics_frame_among(dt, world, frame, &bikes, &mut others);
+        drop(others);
+        if struck {
+            self.bumped_all(&bump);
+        }
+    }
+
+    /// **The woken cars' rays' hits on player `me`'s frame, on its list** (S251): each mirror the
+    /// cars' steps in this frame kept for it ([`crate::traffic::Traffic::probed`]) goes behind the
+    /// list's own entries and the props', naming its car's body among the other sides after the
+    /// props' ([`crate::rider_contact::Bump::cars`]), as the props' probes' mirrors do (B29). The
+    /// list keeps at most [`CAPACITY`]. Every mirror kept for `me` is used up.
+    pub fn cars_probed(&mut self, me: usize, bump: &mut crate::rider_contact::Bump) {
+        let mut left = Vec::new();
+        for (k, player, mirror) in std::mem::take(&mut self.traffic.probed) {
+            if player != me {
+                left.push((k, player, mirror));
+                continue;
+            }
+            let Some(Some(p)) = self.traffic.physics.get(k) else { continue };
+            let at = bump.cars.iter().position(|c| c.collection == k).unwrap_or_else(|| {
+                bump.cars.push(p.pushed(k));
+                bump.cars.len() - 1
+            });
+            let first = bump.vehicles.len() + bump.planes.len() + bump.props.len();
+            if bump.contacts.len() < CAPACITY {
+                bump.contacts.push(Contact { other: Some(first + at), ..mirror });
+            }
+        }
+        self.traffic.probed = left;
     }
 }

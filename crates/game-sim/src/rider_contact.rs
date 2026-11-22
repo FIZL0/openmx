@@ -452,6 +452,10 @@ pub struct Bump {
     /// pushed by the resolve, and written back to the planes after the frame
     /// ([`crate::flight::Flight::pushed`]).
     pub planes: Vec<Flown>,
+    /// The woken `HasPhysics` cars' bodies their rays' mirrors on the list name (S251,
+    /// [`crate::Sim::cars_probed`]), the other sides after the props'. The mirrors are of kind 1,
+    /// which push no other side, so nothing is written back.
+    pub cars: Vec<crate::prop_contact::Pushed>,
 }
 
 /// **A flown plane's body as a bike's resolve pushes it** (N22a): a copy of its collision object's
@@ -505,7 +509,7 @@ impl Bump {
         }
         let mut mine = self.colliders[self.me];
         let mut planes: Vec<_> = self.planes.iter_mut().map(Flown::weighed).collect();
-        let mut bodies: Vec<_> = self.props.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
+        let mut bodies: Vec<_> = self.props.iter_mut().chain(self.cars.iter_mut()).map(crate::prop_contact::Pushed::weighed).collect();
         let mut others: Vec<Other<'_>> = self
             .colliders
             .iter_mut()
@@ -746,7 +750,7 @@ pub fn wreck_contacts(b: &Bump) -> Vec<crate::air::Contact> {
 
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
-    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
+    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new(), cars: Vec::new() }
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.
@@ -774,7 +778,7 @@ fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>, near: N
             v
         })
         .collect();
-    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
+    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new(), planes: Vec::new(), cars: Vec::new() }
 }
 
 /// `at` as it is: the copy of a point on a world that does not wrap.
@@ -894,6 +898,14 @@ impl crate::Sim {
         bump_of(&riders, me, contacts, &|from, at| crate::nearest_copy(world, from, at))
     }
 
+    /// What `bump` did to every player's chassis, its own player's too, written back ([`bumped_one`]):
+    /// a step outside the bikes' frames that pushes them all (S251, [`crate::traffic::Traffic::strike_among`]).
+    pub(crate) fn bumped_all(&mut self, bump: &Bump) {
+        for (i, v) in bump.vehicles.iter().enumerate() {
+            bumped_one(self.rider_of_mut(i), v);
+        }
+    }
+
     /// What `bump` did to the other players' chassis, written back ([`bumped_one`]).
     pub fn bumped(&mut self, bump: &Bump) {
         for (i, v) in bump.vehicles.iter().enumerate() {
@@ -919,6 +931,7 @@ impl crate::Sim {
             b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
             let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt, &*world);
             self.strike_into(b, strike, dt, world, &mut prop_movers);
+            self.cars_probed(0, b);
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
@@ -1243,6 +1256,7 @@ impl Sim {
                 None => &mut prop_movers,
             };
             self.strike_into(b, strike, dt, world, movers);
+            self.cars_probed(0, b);
         }
         // Shared, the seat's wreck bike was on the props' node with every seat's (S260): what their
         // rays struck on it goes to its frame; alone, it was on the node too (S243).

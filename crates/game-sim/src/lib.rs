@@ -481,7 +481,8 @@ impl Sim {
         }
         // The props' step waits for the bike's strike and push (S197, [`prop_contact`]). A downed
         // rider's wreck bike is on the props' node, struck by their rays in their pass (S243,
-        // [`prop_wreck`]); a plane ride has none.
+        // [`prop_wreck`]); a plane ride has none. A physical car's node update meets the bikes first (S251).
+        self.cars_among(world, dt);
         let mut prop_movers = match self.plane {
             Some(_) => {
                 self.hear_ridden();
@@ -607,7 +608,9 @@ impl Sim {
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let mut strike = self.prop_strike_in(0, dt, &*world);
-        let said = if cars.is_empty() && strike.contacts.is_empty() {
+        // A woken car's rays' hits on the bike go on its list too (S251, [`Sim::cars_probed`]).
+        let probed = self.traffic.probed.iter().any(|p| p.1 == 0);
+        let said = if cars.is_empty() && strike.contacts.is_empty() && !probed {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
             let kept = self.lend_rng(0);
@@ -619,6 +622,7 @@ impl Sim {
             let props = self.traffic.props.strike_in(&mut strike, dt, world, &mut prop_movers);
             let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
             bump.props = props;
+            self.cars_probed(0, &mut bump);
             self.lend_props(0);
             let kept = self.lend_rng(0);
             let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump));
@@ -933,6 +937,8 @@ impl Sim {
         // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]); every
         // downed rider's wreck bike is on the props' node (S243, [`prop_wreck`]).
         let sides: Vec<(usize, usize)> = (0..self.players()).map(|i| (i, self.players() + i)).collect();
+        // A physical car's node update meets the bikes first (S251, [`Sim::cars_among`]).
+        self.cars_among(world, dt);
         let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
         // And for a prop a bike's strike files in that pass, where the pass had them (S384).
         let hulls = self.wreck_hulls(&sides);
@@ -965,9 +971,10 @@ impl Sim {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
             let strike = self.prop_strike_after(i, first, dt, &*world);
+            let probed = self.traffic.probed.iter().any(|p| p.1 == i);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
-                .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
+                .filter(|l| !l.is_empty() || !strike.contacts.is_empty() || probed)
                 .map(|l| {
                     let mut b = self.bump_in(i, l, &*world);
                     // The parked cars' bodies, which its resolve pushes (S485), and the parked
@@ -981,6 +988,7 @@ impl Sim {
             if let Some(b) = bump.as_mut() {
                 // The riders after it in player order framed already (the walk is backwards).
                 self.strike_into_among(b, strike, dt, world, &mut prop_movers, &hulls, &|j| j > i);
+                self.cars_probed(i, b);
             }
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
@@ -1100,7 +1108,8 @@ impl Sim {
             // Its body rays against the knockable props (S479): the struck bodies after the players'
             // vehicles, the plane's body and the parked cars'.
             let strike = self.prop_strike_after(i, self.players() + 1 + self.parked_cars.len(), dt, &*world);
-            let mut bump = Some(list).filter(|l| !l.is_empty() || !strike.contacts.is_empty()).map(|l| {
+            let probed = self.traffic.probed.iter().any(|p| p.1 == i);
+            let mut bump = Some(list).filter(|l| !l.is_empty() || !strike.contacts.is_empty() || probed).map(|l| {
                 let mut b = self.bump_in(i, l, &*world);
                 b.planes = self.plane.as_ref().map(|p| p.flown(0, at, &*world)).into_iter().collect();
                 // The parked cars' bodies after the plane's, as their hulls follow its (S486); a
@@ -1117,6 +1126,7 @@ impl Sim {
             });
             if let Some(b) = bump.as_mut() {
                 self.strike_into(b, strike, dt, world, movers);
+                self.cars_probed(i, b);
             }
             let rivals: Vec<ride::Rival> = (1..self.players())
                 .filter(|&j| j != i)

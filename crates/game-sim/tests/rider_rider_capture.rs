@@ -479,6 +479,7 @@ fn port_resolve(ee: &Ee, recs: [u32; 2], me: usize, first: bool, colliders: &[Co
         movers: Vec::new(),
         planes: Vec::new(),
         props: Vec::new(),
+        cars: Vec::new(),
     };
     let mut own = ridden_at(ee, recs[me]);
     bump.resolve(&mut own, first);
