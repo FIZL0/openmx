@@ -22,6 +22,15 @@
 //! ([`the_original_tick_into_the_wreck_is_row_3414`]); the biplane wrecks are S87's. The images and
 //! captures are game data, git-ignored (`s93-long-3413.ram` is S88's own, made the way S93 made the
 //! others): absent, the tests skip.
+//!
+//! S158 adds a contact in C10's 2p state ([`TWO_P`]: Race500P, 60 Hz, no person needed): the rear
+//! strike, a generated two-pad tape (`context/recordings/split/s158/rear.p2m2`) steering P2 into
+//! P1's back, captured as `capture/2p/s158-rear.csv` with an image a frame
+//! (`states/s158/rear-<frame>.ram`). Its 128378 (P2's frame struck by P1's body ray, P1 thrown off
+//! the back) is a third [`NAMED`] contact through all the tests above;
+//! [`the_rear_strikes_images_are_one_ride`] ties the images to each other and to the capture, and
+//! [`the_original_tick_into_the_wreck_is_row_128380`] is P2 riding on into P1's wreck, the original's
+//! side only, as 3414.
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};
@@ -37,27 +46,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-fn ctx(rel: &str) -> Option<PathBuf> {
+/// Whichever of `rels` is there, the first first (S93's images and captures moved into `states/s93/`
+/// when the contexts were merged).
+fn first_of(rels: &[String]) -> Option<PathBuf> {
     let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
-    let local = kit.root.join("context").join(rel);
-    let path = if local.exists() { local } else { kit.ctx(rel) };
-    if !path.exists() {
-        skip(&format!("{} is not there", path.display()));
-        return None;
+    let found = rels.iter().flat_map(|rel| [kit.root.join("context").join(rel), kit.ctx(rel)]).find(|p| p.exists());
+    if found.is_none() {
+        skip(&format!("none of {rels:?} is there"));
     }
-    Some(path)
+    found
 }
 
-/// A RAM image S93 saved, ready to call into.
+/// A RAM image S93 or S158 saved, ready to call into.
 fn image(name: &str) -> Option<Ee> {
-    let path = ctx(&format!("states/{name}.ram"))?;
+    let path = first_of(&[format!("states/s93/{name}.ram"), format!("states/{name}.ram")])?;
     let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
     ee.set(28, u64::from(addr("boot_gp").unwrap()));
     Some(ee)
 }
 
-/// The split track's bike: race125p.phy and the bike's collision files.
-fn disc(tables: &Tables) -> Option<(Phy, BikeCol)> {
+/// The split track's bike: `phy` (the ride's bikes' tuning) and the bike's collision files.
+fn disc(tables: &Tables, phy: &str) -> Option<(Phy, BikeCol)> {
     let mut disc = match Disc::open_configured() {
         Ok(d) => d,
         Err(why) => {
@@ -80,8 +89,8 @@ fn disc(tables: &Tables) -> Option<(Phy, BikeCol)> {
         .collect();
     let phy = bikes
         .iter()
-        .find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok())
-        .expect("race125p.phy in a bike archive");
+        .find_map(|b| disc.res(b).ok()?.read_suffix(phy).ok())
+        .unwrap_or_else(|| panic!("{phy} in a bike archive"));
     Some((Phy::read_bytes(&phy, &tables.curve), col))
 }
 
@@ -93,7 +102,9 @@ struct Split {
 
 impl Split {
     fn load(name: &str) -> Option<Split> {
-        let text = std::fs::read_to_string(ctx(&format!("capture/split/{name}.csv"))?).expect("read the capture");
+        let leaf = name.rsplit('/').next().unwrap();
+        let path = first_of(&[format!("capture/{name}.csv"), format!("states/s93/{leaf}.csv")])?;
+        let text = std::fs::read_to_string(path).expect("read the capture");
         let mut lines = text.lines();
         let cols = lines.next().expect("a header").split(',').enumerate().map(|(i, c)| (c.to_string(), i)).collect();
         let rows = lines.map(|l| l.split(',').map(str::to_string).collect()).collect();
@@ -134,27 +145,213 @@ impl Split {
 /// runs, and 5998's row has P1 exactly as P2's push left it — its centre is 5997's to the bit, and
 /// 5999's has moved by two ticks' worth — so P1 is compared there, P2 at the tick's end. (3403's row
 /// is torn later on: both chassis are the tick's end, but P1's wreck shows a row late, at 3404.)
+///
+/// `before_torn`: what the row before caught mid-frame, so the image is not compared there (S158's
+/// rear strike: see [`TWO_P`]).
 struct Named {
     image: &'static str,
     capture: &'static str,
     frame: u32,
     wreck: [u32; 2],
     p1_torn: bool,
+    before_torn: &'static [&'static str],
+    state: &'static State,
 }
 
-const NAMED: [Named; 2] = [
-    Named { image: "s93-long-3402", capture: "splitscreen", frame: 3403, wreck: [1, 0], p1_torn: false },
-    Named { image: "s93-short-5997", capture: "splitscreen2", frame: 5998, wreck: [0, 1], p1_torn: true },
+const NAMED: [Named; 3] = [
+    Named {
+        image: "s93-long-3402",
+        capture: "split/splitscreen",
+        frame: 3403,
+        wreck: [1, 0],
+        p1_torn: false,
+        before_torn: &[],
+        state: &SPLIT,
+    },
+    Named {
+        image: "s93-short-5997",
+        capture: "split/splitscreen2",
+        frame: 5998,
+        wreck: [0, 1],
+        p1_torn: true,
+        before_torn: &[],
+        state: &SPLIT,
+    },
+    // S158's rear strike: P2 at 70 ft/s into P1 standing. One of P1's body rays finds P2's frame (the
+    // mirror on P2's list), and P1 comes off the back (4); P2 rides on at half its speed.
+    Named {
+        image: "s158/rear-128377",
+        capture: "2p/s158-rear",
+        frame: 128378,
+        wreck: [4, 0],
+        p1_torn: false,
+        before_torn: &["p2 force", "p2 moment"],
+        state: &TWO_P,
+    },
 ];
 
-/// Every image S93 saved in the split rides: the two above, the three biplane ones and the two the
-/// rides were recorded from.
-const IMAGES: [&str; 7] =
-    ["s93-long-3402", "s93-long-4661", "s93-long-5074", "s93-long-5505", "s93-short-5997", "splitscreen", "splitscreen2_shortcolision"];
+/// S158's rear strike's images by the frame each ends (`context/states/s158/rear-<frame>.ram`): the
+/// ticks up to the contact, the contact's (128378), and P2 riding into P1's wreck after it — into
+/// P1's frozen frame and the wreck bike, then (128392) the wreck bike alone.
+const REAR: [u32; 9] = [128376, 128377, 128378, 128379, 128380, 128381, 128391, 128392, 128413];
 
-/// The level's collision node (oracle.txt, S88), and P1's and P2's ridden vehicles.
-const NODE: u32 = 0x0061_e720;
-const PLAYERS: [u32; 2] = [0x00c1_f810, 0x012e_3ad0];
+fn rear(frame: u32) -> Option<Ee> {
+    image(&format!("s158/rear-{frame}"))
+}
+
+/// The images are one ride: from each, the original's tick on the next frame's dt is the next image,
+/// both riders' chassis, lists and wreck reasons to the bit; and the capture holds each image a row
+/// on (see [`TWO_P`]), but for row 128378, read inside the contact's frame.
+#[test]
+fn the_rear_strikes_images_are_one_ride() {
+    let Some(cap) = Split::load("2p/s158-rear") else { return };
+    for f in REAR {
+        let Some(ee) = rear(f) else { return };
+        let pl = two_p_players(&ee);
+        let row = cap.row_at(f) + 1;
+        let off = against_row([quantities(&ee, pl, 0), quantities(&ee, pl, 1)], &cap, row);
+        let torn: &[&str] = match f {
+            128376 => &["p2 "],
+            128377 => &["p2 force", "p2 moment"],
+            _ => &[],
+        };
+        assert_eq!(off.into_iter().filter(|b| !torn.iter().any(|t| b.starts_with(t))).collect::<Vec<_>>(), Vec::<String>::new(), "image {f}");
+    }
+    // row 128377 was read after the node's update of P2 and before P1's: its P2 is image 128377's
+    let (Some(ee), row) = (rear(128377), cap.row_at(128377)) else { return };
+    let pl = two_p_players(&ee);
+    let off = against_row([quantities(&ee, pl, 0), quantities(&ee, pl, 1)], &cap, row);
+    assert_eq!(off.into_iter().filter(|b| b.starts_with("p2 ")).collect::<Vec<_>>(), Vec::<String>::new(), "row 128377's P2");
+    for pair in REAR.windows(2).filter(|w| w[1] == w[0] + 1) {
+        let (Some(mut ee), Some(next)) = (rear(pair[0]), rear(pair[1])) else { return };
+        let pl = two_p_players(&ee);
+        let recs = records(&ee, pl);
+        let dt = cap.f32(cap.row_at(pair[1]), "dt");
+        ee.call(NODE_UPDATE, &[u64::from(TWO_P.node)], &[dt], BUDGET);
+        for p in 0..2 {
+            assert_eq!(quantities(&ee, pl, p), quantities(&next, pl, p), "{} ticked: p{}'s chassis", pair[0], p + 1);
+            let (got, want) = (list_at(&ee, recs[p], &recs), list_at(&next, recs[p], &recs));
+            assert_eq!(got.len(), want.len(), "{} ticked: p{}'s list", pair[0], p + 1);
+            for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(differ(a, b), Vec::<&str>::new(), "{} ticked: p{}'s contact {k}", pair[0], p + 1);
+            }
+        }
+        assert_eq!(wrecks(&ee, pl), wrecks(&next, pl), "{} ticked: the wreck reasons", pair[0]);
+    }
+}
+
+/// 128379: P2 rides on into P1's wreck, as S93's 3414 (`the_original_tick_into_the_wreck_is_row_3414`)
+/// but in the 2p state. P1's riding object has left the node (the wreck bike's is in its place) and
+/// is not resolved; P2's own ray strikes P1's frozen frame, and P2 resolves that and the wreck bike's
+/// two mirrored hits. P1's frozen object is never emptied again, so it gathers the mirror of P2's ray
+/// a tick until its list is full. The port has none of it (S88: a rider who is down is in no list,
+/// and the ride has no wreck bike), so this is the original's side only.
+#[test]
+fn the_original_tick_into_the_wreck_is_row_128380() {
+    let (Some(mut ee), Some(cap)) = (rear(128378), Split::load("2p/s158-rear")) else { return };
+    let pl = two_p_players(&ee);
+    let recs = records(&ee, pl);
+    assert_eq!(wrecks(&ee, pl), [4, 0], "P1 is down from 128378's contact");
+    let node = TWO_P.node;
+    let count = ee.u32_at(node + 0x30);
+    let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(node + 0x38) + 4 * k)).collect();
+    assert!(!objects.contains(&recs[0]) && objects[2] == recs[1], "the node's objects: {objects:x?}");
+    let wreck_bike = objects[3];
+    assert!(ee.u32_at(wreck_bike + 0xf0) == 0 && ee.u32_at(wreck_bike + 0xf4) != 0, "{wreck_bike:x} is no body's object");
+
+    let lists = Rc::new(RefCell::new(Vec::<(u32, u32, Vec<(u32, u32)>)>::new()));
+    let seen = Rc::clone(&lists);
+    ee.hooks.insert(RESOLVE, Box::new(move |ee: &mut Ee| {
+        let (r, first) = (ee.r(4) as u32, ee.r(5) as u32);
+        if recs.contains(&r) {
+            let (n, at) = (ee.u32_at(r + 0x100), ee.u32_at(r + 0x108));
+            let list = (0..n).map(|k| (ee.u32_at(at + 0x80 * k), ee.u32_at(at + 0x80 * k + 0x74))).collect();
+            seen.borrow_mut().push((r, first, list));
+        }
+        run_original(ee, r, first);
+    }));
+    let dt = cap.f32(cap.row_at(128379), "dt");
+    ee.call(NODE_UPDATE, &[u64::from(node)], &[dt], BUDGET);
+    let row = cap.row_at(128380);
+    assert_eq!(against_row([quantities(&ee, pl, 0), quantities(&ee, pl, 1)], &cap, row), Vec::<String>::new(), "128378 ticked is not row 128380");
+    assert_eq!(wrecks(&ee, pl), [4, 0], "P2 stays up");
+    // only P2 resolves: its own ray into P1's frame, then the wreck bike's two mirrors
+    let p2 = vec![(0, recs[0]), (1, wreck_bike), (1, wreck_bike)];
+    assert_eq!(*lists.borrow(), [(recs[1], 1, p2.clone())]);
+    for (k, &(kind, other)) in p2.iter().enumerate() {
+        assert_eq!((cap.u32(row, &format!("p2_c{k}.kind")), cap.u32(row, &format!("p2_c{k}.other"))), (kind, other), "P2's entry {k}");
+    }
+    // P1's frozen object: the mirror of P2's ray from 128378's tick and from this one
+    assert_eq!(cap.u32(row, "p1_rec_count"), 2);
+    for k in 0..2 {
+        assert_eq!((cap.u32(row, &format!("p1_c{k}.kind")), cap.u32(row, &format!("p1_c{k}.other"))), (1, recs[1]), "P1's entry {k}");
+    }
+}
+
+/// Every image S93 saved in the split rides: the two above, the three biplane ones and the two the
+/// rides were recorded from; and S158's rear strike's, both riders up, before the contact.
+const IMAGES: [(&str, &State); 11] = [
+    ("s158/rear-128372", &TWO_P),
+    ("s158/rear-128374", &TWO_P),
+    ("s158/rear-128376", &TWO_P),
+    ("s158/rear-128377", &TWO_P),
+    ("s93-long-3402", &SPLIT),
+    ("s93-long-4661", &SPLIT),
+    ("s93-long-5074", &SPLIT),
+    ("s93-long-5505", &SPLIT),
+    ("s93-short-5997", &SPLIT),
+    ("splitscreen", &SPLIT),
+    ("splitscreen2_shortcolision", &SPLIT),
+];
+
+/// Where a save state keeps what the tests read: the level's collision node, the riders' ridden
+/// vehicles, and the bikes' tuning.
+/// `row_lag`: how many rows after an image's frame its capture holds that frame's end. `resolves`:
+/// the riders' resolves in a tick, in order (player, first substep).
+struct State {
+    node: u32,
+    players: fn(&Ee) -> [u32; 2],
+    phy: &'static str,
+    row_lag: usize,
+    resolves: &'static [(usize, u32)],
+}
+
+/// S93's split state (oracle.txt, S88): its riders at fixed addresses, both on a Race125P, two
+/// substeps a tick at 30 Hz.
+const SPLIT: State = State {
+    node: 0x0061_e720,
+    players: |_| [0x00c1_f810, 0x012e_3ad0],
+    phy: "race125p.phy",
+    row_lag: 0,
+    resolves: &[(2, 1), (2, 0), (1, 1), (1, 0)],
+};
+
+/// C10's 2p state (oracle.txt, S157), which S158's rides start from: its riders down the game
+/// manager's actor list, both on a Race500P, one substep a tick at 60 Hz. The recorder reads a row
+/// as the frame starts, after the counter's step and before the simulation (S176), so row f+1 holds
+/// frame f's end; now and then it reads later, inside the frame (S158's row 128377 has P2 already
+/// updated and P1 not, its row 128378 the search's lists and P2's force half built).
+const TWO_P: State = State {
+    node: 0x0061_e630,
+    players: two_p_players,
+    phy: "race500p.phy",
+    row_lag: 1,
+    resolves: &[(2, 1), (1, 1)],
+};
+
+/// P1's and P2's ridden vehicles in the 2p state: the actor list's fourth and third entries
+/// (watch/2p.toml), each a ridden vehicle (type 2) whose player index says which (`tests/two_p_world.rs`).
+fn two_p_players(ee: &Ee) -> [u32; 2] {
+    let manager = addr("game_manager").expect("kit.toml's game_manager");
+    let down = |hops: &[u32]| hops.iter().fold(ee.u32_at(manager), |a, &h| ee.u32_at(a + h));
+    let out = [down(&[0x34, 0x34, 0x8, 0x8, 0x8, 0x0]), down(&[0x34, 0x34, 0x8, 0x8, 0x0])];
+    for (p, &v) in out.iter().enumerate() {
+        assert_eq!(ee.u32_at(v), 2, "p{}'s list entry is not a ridden vehicle", p + 1);
+        assert_eq!(ee.u32_at(ee.u32_at(v + 0x20) + 0x30), p as u32, "the list's p{} is another player", p + 1);
+    }
+    out
+}
+
 /// The node's update (node, dt) and a collision object's resolve (object, first substep).
 const NODE_UPDATE: u32 = 0x0026_f800;
 const RESOLVE: u32 = 0x0027_0dc0;
@@ -178,17 +375,17 @@ fn bits(v: Vf) -> [u32; 4] {
     v.to_bits()
 }
 
-/// P1's and P2's collision objects.
-fn records(ee: &Ee) -> [u32; 2] {
-    PLAYERS.map(|v| ee.u32_at(v + 0x7d0))
+/// P1's and P2's collision objects, of their ridden vehicles `pl`.
+fn records(ee: &Ee, pl: [u32; 2]) -> [u32; 2] {
+    pl.map(|v| ee.u32_at(v + 0x7d0))
 }
 
-fn chassis(ee: &Ee, p: usize) -> u32 {
-    ee.u32_at(PLAYERS[p] + 0x7a4)
+fn chassis(ee: &Ee, pl: [u32; 2], p: usize) -> u32 {
+    ee.u32_at(pl[p] + 0x7a4)
 }
 
-fn wreck(ee: &Ee, p: usize) -> u32 {
-    ee.u32_at(PLAYERS[p] + 0x748)
+fn wrecks(ee: &Ee, pl: [u32; 2]) -> [u32; 2] {
+    pl.map(|v| ee.u32_at(v + 0x748))
 }
 
 fn node_at(ee: &Ee, n: u32) -> Node {
@@ -303,8 +500,8 @@ fn run_original(ee: &mut Ee, r: u32, first: u32) {
 /// A rider's captured chassis quantities as RAM holds them, in [`CHASSIS`]'s order.
 type Quantities = [[u32; 3]; 7];
 
-fn quantities(ee: &Ee, p: usize) -> Quantities {
-    let ch = chassis(ee, p);
+fn quantities(ee: &Ee, pl: [u32; 2], p: usize) -> Quantities {
+    let ch = chassis(ee, pl, p);
     CHASSIS.map(|(_, at)| {
         let b = quad(ee, ch + at).to_bits();
         [b[0], b[1], b[2]]
@@ -329,13 +526,21 @@ fn dt(ee: &Ee) -> f32 {
     ee.f32_at(addr("frame_dt").unwrap())
 }
 
+/// The dt the contact's frame runs on. S93's images hold it; a 2p image holds its own frame's, and
+/// the next frame's is its row's (S176: frame f runs on row f's dt).
+fn step_dt(ee: &Ee, named: &Named, cap: &Split) -> f32 {
+    if named.state.row_lag == 0 { dt(ee) } else { cap.f32(cap.row_at(named.frame), "dt") }
+}
+
 /// A resolve, the original's or a stand-in: (machine, object, first substep).
 type Resolve = Box<dyn FnMut(&mut Ee, u32, u32)>;
 
-/// One tick of the node from the image with `resolve` answering every object's resolve call; then
-/// the riders as the contact's row should hold them (see [`Named::p1_torn`]) and their wreck reasons.
-fn tick(mut ee: Ee, named: &Named, mut resolve: Resolve) -> ([Quantities; 2], [u32; 2]) {
-    let p2 = records(&ee)[1];
+/// One tick of the node from the image, on `dt`, with `resolve` answering every object's resolve
+/// call; then the riders as the contact's row should hold them (see [`Named::p1_torn`]) and their
+/// wreck reasons.
+fn tick(mut ee: Ee, named: &Named, dt: f32, mut resolve: Resolve) -> ([Quantities; 2], [u32; 2]) {
+    let pl = (named.state.players)(&ee);
+    let p2 = records(&ee, pl)[1];
     let torn = Rc::new(RefCell::new(None));
     let seen = Rc::clone(&torn);
     ee.hooks.insert(RESOLVE, Box::new(move |ee: &mut Ee| {
@@ -343,24 +548,27 @@ fn tick(mut ee: Ee, named: &Named, mut resolve: Resolve) -> ([Quantities; 2], [u
         resolve(ee, r, first);
         // P2's second substep's resolve is its last: P1 as the rest of P2's update leaves it
         if r == p2 && first == 0 {
-            *seen.borrow_mut() = Some(quantities(ee, 0));
+            *seen.borrow_mut() = Some(quantities(ee, pl, 0));
         }
     }));
-    let dt = dt(&ee);
-    ee.call(NODE_UPDATE, &[u64::from(NODE)], &[dt], BUDGET);
-    let p1 = if named.p1_torn { torn.borrow().expect("P2 resolved") } else { quantities(&ee, 0) };
-    ([p1, quantities(&ee, 1)], [wreck(&ee, 0), wreck(&ee, 1)])
+    ee.call(NODE_UPDATE, &[u64::from(named.state.node)], &[dt], BUDGET);
+    let p1 = if named.p1_torn { torn.borrow().expect("P2 resolved") } else { quantities(&ee, pl, 0) };
+    ([p1, quantities(&ee, pl, 1)], wrecks(&ee, pl))
 }
 
 #[test]
 fn the_original_tick_from_each_image_is_the_contact_row() {
     for named in &NAMED {
-        let (Some(ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { return };
-        let row = cap.row_at(named.frame);
-        let before = [quantities(&ee, 0), quantities(&ee, 1)];
-        assert_eq!(against_row(before, &cap, row - 1), Vec::<String>::new(), "{} is not the row before", named.image);
-        assert_eq!([wreck(&ee, 0), wreck(&ee, 1)], [0, 0], "{}: a rider is already down", named.image);
-        let (riders, wrecks) = tick(ee, named, Box::new(run_original));
+        let (Some(ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { continue };
+        let row = cap.row_at(named.frame) + named.state.row_lag;
+        let pl = (named.state.players)(&ee);
+        let before = [quantities(&ee, pl, 0), quantities(&ee, pl, 1)];
+        let off: Vec<String> =
+            against_row(before, &cap, row - 1).into_iter().filter(|b| !named.before_torn.iter().any(|t| b.starts_with(t))).collect();
+        assert_eq!(off, Vec::<String>::new(), "{} is not the row before", named.image);
+        assert_eq!(wrecks(&ee, pl), [0, 0], "{}: a rider is already down", named.image);
+        let dt = step_dt(&ee, named, &cap);
+        let (riders, wrecks) = tick(ee, named, dt, Box::new(run_original));
         assert_eq!(against_row(riders, &cap, row), Vec::<String>::new(), "{} ticked is not {}", named.image, named.frame);
         assert_eq!(wrecks, named.wreck, "{}: who wrecks", named.image);
     }
@@ -369,11 +577,12 @@ fn the_original_tick_from_each_image_is_the_contact_row() {
 #[test]
 fn the_port_finds_the_originals_contacts() {
     let tables = Tables::build();
-    let Some((_, col)) = disc(&tables) else { return };
     for named in &NAMED {
-        let (Some(mut ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { return };
-        let dt = dt(&ee);
-        let recs = records(&ee);
+        let Some((_, col)) = disc(&tables, named.state.phy) else { return };
+        let (Some(mut ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { continue };
+        let dt = step_dt(&ee, named, &cap);
+        let node = named.state.node;
+        let recs = records(&ee, (named.state.players)(&ee));
         let seats: Vec<Seat<'_>> = recs
             .iter()
             .map(|&r| Seat { col: Some(&col), at: mat_at(&ee, ee.u32_at(r + 0xf8)), ghost: false, riding: true })
@@ -381,9 +590,13 @@ fn the_port_finds_the_originals_contacts() {
         let port = rider_contact::gather(&seats, F(dt));
 
         // the original's first half of the node's update: every object emptied, then every one searches
-        let count = ee.u32_at(NODE + 0x30);
-        let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(NODE + 0x38) + 4 * k)).collect();
-        assert!(objects.ends_with(&recs), "{}: the riders' objects are not the node's last two", named.image);
+        let count = ee.u32_at(node + 0x30);
+        let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(node + 0x38) + 4 * k)).collect();
+        assert!(
+            objects[objects.len() - 2..].iter().all(|o| recs.contains(o)),
+            "{}: the riders' objects are not the node's last two",
+            named.image
+        );
         for &o in &objects {
             ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x74), &[u64::from(o)], &[], 50_000_000);
         }
@@ -391,6 +604,8 @@ fn the_port_finds_the_originals_contacts() {
             ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x7c), &[u64::from(o)], &[dt], 50_000_000);
         }
 
+        // the row stamped with the contact's frame: S93's was read at the tick's end, the 2p one
+        // inside the frame, after the search (see TWO_P)
         let row = cap.row_at(named.frame);
         for p in 0..2 {
             let orig = list_at(&ee, recs[p], &recs);
@@ -398,7 +613,7 @@ fn the_port_finds_the_originals_contacts() {
             assert_eq!(port[p].len(), orig.len(), "{}: p{}'s contacts", named.image, p + 1);
             for (k, (a, b)) in port[p].iter().zip(&orig).enumerate() {
                 assert_eq!(differ(a, b), Vec::<&str>::new(), "{}: p{} contact {k}\nport {a:?}\noriginal {b:?}", named.image, p + 1);
-                // and what the capture kept of it at the end of the tick
+                // and what the capture kept of it
                 let at = |f: &str| format!("p{}_c{k}.{f}", p + 1);
                 assert_eq!(cap.u32(row, &at("kind")), a.kind);
                 assert_eq!(cap.u32(row, &at("other")), recs[a.other.expect("a rider on the other side")]);
@@ -410,8 +625,8 @@ fn the_port_finds_the_originals_contacts() {
     }
 }
 
-/// The riders' tuning, which is the port's [`rider_contact::collider`] for race125p
-/// (`tests/rider_contact.rs` proves it against both objects).
+/// The riders' tuning, which is the port's [`rider_contact::collider`] for the ride's bike
+/// (`tests/rider_contact.rs` proves it against both of S93's objects, race125p).
 fn colliders(phy: &Phy) -> Vec<Collider> {
     vec![rider_contact::collider(&phy.collisions, phy.mass.mass); 2]
 }
@@ -419,11 +634,11 @@ fn colliders(phy: &Phy) -> Vec<Collider> {
 #[test]
 fn the_port_resolves_every_rider_call_as_the_original() {
     let tables = Tables::build();
-    let Some((phy, _)) = disc(&tables) else { return };
     for named in &NAMED {
-        let Some(mut ee) = image(named.image) else { return };
-        let dt = dt(&ee);
-        let recs = records(&ee);
+        let Some((phy, _)) = disc(&tables, named.state.phy) else { return };
+        let (Some(mut ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { continue };
+        let dt = step_dt(&ee, named, &cap);
+        let recs = records(&ee, (named.state.players)(&ee));
         let colliders = colliders(&phy);
         let log = Rc::new(RefCell::new(Vec::<(usize, u32, usize, Vec<String>)>::new()));
         let seen = Rc::clone(&log);
@@ -463,10 +678,10 @@ fn the_port_resolves_every_rider_call_as_the_original() {
             }
             seen.borrow_mut().push((me, first, bump.contacts.len(), bad));
         }));
-        ee.call(NODE_UPDATE, &[u64::from(NODE)], &[dt], BUDGET);
+        ee.call(NODE_UPDATE, &[u64::from(named.state.node)], &[dt], BUDGET);
         let log = log.borrow();
-        // both riders, both substeps, with their contacts
-        assert_eq!(log.len(), 4, "{}: {log:?}", named.image);
+        // both riders, every substep, with their contacts
+        assert_eq!(log.len(), named.state.resolves.len(), "{}: {log:?}", named.image);
         for (me, first, n, bad) in log.iter() {
             assert!(*n > 0, "{}: p{} resolved an empty list", named.image, me + 1);
             assert!(bad.is_empty(), "{}: p{} substep {first}: {bad:#?}", named.image, me + 1);
@@ -477,10 +692,11 @@ fn the_port_resolves_every_rider_call_as_the_original() {
 #[test]
 fn the_tick_with_the_ports_resolve_is_the_contact_row() {
     let tables = Tables::build();
-    let Some((phy, _)) = disc(&tables) else { return };
     for named in &NAMED {
-        let (Some(ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { return };
-        let recs = records(&ee);
+        let Some((phy, _)) = disc(&tables, named.state.phy) else { return };
+        let (Some(ee), Some(cap)) = (image(named.image), Split::load(named.capture)) else { continue };
+        let dt = step_dt(&ee, named, &cap);
+        let recs = records(&ee, (named.state.players)(&ee));
         let colliders = colliders(&phy);
         let stood_in = Rc::new(RefCell::new(0));
         let count = Rc::clone(&stood_in);
@@ -514,24 +730,26 @@ fn the_tick_with_the_ports_resolve_is_the_contact_row() {
             *count.borrow_mut() += 1;
             // and the hook returns to the caller, as the call would have
         });
-        let (riders, wrecks) = tick(ee, named, port);
-        assert_eq!(*stood_in.borrow(), 4, "{}", named.image);
-        let row = cap.row_at(named.frame);
+        let (riders, wrecks) = tick(ee, named, dt, port);
+        assert_eq!(*stood_in.borrow(), named.state.resolves.len(), "{}", named.image);
+        let row = cap.row_at(named.frame) + named.state.row_lag;
         assert_eq!(against_row(riders, &cap, row), Vec::<String>::new(), "{} with the port's resolve", named.image);
         assert_eq!(wrecks, named.wreck, "{} with the port's resolve: who wrecks", named.image);
     }
 }
 
 /// S78 left it open which chassis resolves first; the images settle it: the node updates P2's
-/// vehicle, both substeps, before P1's, so P1 meets P2's chassis already pushed. The port's
-/// `Sim::step_all` steps the last player first for it.
+/// vehicle, both substeps, before P1's, so P1 meets P2's chassis already pushed — in S93's split
+/// state and in the 2p state alike. The port's `Sim::step_all` steps the last player first for it.
+/// (Only some of S93's images came through the contexts' merge: the test takes those there.)
 #[test]
 fn the_original_steps_the_last_player_first() {
-    let mut ran = 0;
-    for name in IMAGES {
+    for (name, state) in IMAGES {
         let Some(mut ee) = image(name) else { continue };
+        // the image's own dt, not the next frame's: only the order is asked, and these images have
+        // no named row to take it from
         let dt = dt(&ee);
-        let recs = records(&ee);
+        let recs = records(&ee, (state.players)(&ee));
         let log = Rc::new(RefCell::new(Vec::<(usize, u32)>::new()));
         let seen = Rc::clone(&log);
         ee.hooks.insert(RESOLVE, Box::new(move |ee: &mut Ee| {
@@ -541,11 +759,9 @@ fn the_original_steps_the_last_player_first() {
             }
             run_original(ee, r, first);
         }));
-        ee.call(NODE_UPDATE, &[u64::from(NODE)], &[dt], BUDGET);
-        assert_eq!(*log.borrow(), [(2, 1), (2, 0), (1, 1), (1, 0)], "{name}: the riders' resolves in order (player, first substep)");
-        ran += 1;
+        ee.call(NODE_UPDATE, &[u64::from(state.node)], &[dt], BUDGET);
+        assert_eq!(*log.borrow(), state.resolves, "{name}: the riders' resolves in order (player, first substep)");
     }
-    assert!(ran == 0 || ran == IMAGES.len(), "only {ran} of the images are there");
 }
 
 /// 3414: P2 slides back into P1's wreck (S93's image of 3413, saved for S88). The original's tick from
@@ -556,14 +772,16 @@ fn the_original_steps_the_last_player_first() {
 /// (S105) — so only the original's side is proved here.
 #[test]
 fn the_original_tick_into_the_wreck_is_row_3414() {
-    let (Some(mut ee), Some(cap)) = (image("s93-long-3413"), Split::load("splitscreen")) else { return };
-    let recs = records(&ee);
+    let (Some(mut ee), Some(cap)) = (image("s93-long-3413"), Split::load("split/splitscreen")) else { return };
+    let pl = (SPLIT.players)(&ee);
+    let recs = records(&ee, pl);
     let row = cap.row_at(3414);
-    let before = [quantities(&ee, 0), quantities(&ee, 1)];
+    let before = [quantities(&ee, pl, 0), quantities(&ee, pl, 1)];
     assert_eq!(against_row(before, &cap, row - 1), Vec::<String>::new(), "the image is not 3413");
-    assert_eq!([wreck(&ee, 0), wreck(&ee, 1)], [1, 0], "P1 is down from 3403's contact");
-    let count = ee.u32_at(NODE + 0x30);
-    let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(NODE + 0x38) + 4 * k)).collect();
+    assert_eq!(wrecks(&ee, pl), [1, 0], "P1 is down from 3403's contact");
+    let node = SPLIT.node;
+    let count = ee.u32_at(node + 0x30);
+    let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(node + 0x38) + 4 * k)).collect();
     assert!(!objects.contains(&recs[0]) && objects.contains(&recs[1]), "P1's riding object is still listed: {objects:x?}");
     let wreck_bike = objects[2];
     assert_eq!(objects[3], recs[1]);
@@ -582,9 +800,9 @@ fn the_original_tick_into_the_wreck_is_row_3414() {
         run_original(ee, r, first);
     }));
     let dt = dt(&ee);
-    ee.call(NODE_UPDATE, &[u64::from(NODE)], &[dt], BUDGET);
-    assert_eq!(against_row([quantities(&ee, 0), quantities(&ee, 1)], &cap, row), Vec::<String>::new(), "3413 ticked is not 3414");
-    assert_eq!([wreck(&ee, 0), wreck(&ee, 1)], [1, 0], "P2 stays up");
+    ee.call(NODE_UPDATE, &[u64::from(node)], &[dt], BUDGET);
+    assert_eq!(against_row([quantities(&ee, pl, 0), quantities(&ee, pl, 1)], &cap, row), Vec::<String>::new(), "3413 ticked is not 3414");
+    assert_eq!(wrecks(&ee, pl), [1, 0], "P2 stays up");
     // only P2 resolves, both substeps: the wreck bike's mirror, then its own two rays into P1's frame
     let p2 = vec![(1, wreck_bike), (0, recs[0]), (0, recs[0])];
     assert_eq!(*lists.borrow(), [(recs[1], 1, p2.clone()), (recs[1], 0, p2)]);

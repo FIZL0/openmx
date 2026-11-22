@@ -1,0 +1,15 @@
+# S158: P2 rear strike: steer 0.86 for 10 ticks at 280, brake 50 ticks at 293, then gas 0.4
+release
+sleep 30t
+down cross
+sleep 250t
+stick l 0.86 0
+sleep 10t
+stick l 0 0
+sleep 3t
+up cross
+down square
+sleep 50t
+up square
+down cross 0.4
+sleep 600t
