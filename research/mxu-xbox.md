@@ -59,3 +59,12 @@ textures and lays each pair side by side; checked by eye on free06 and the 250SX
    pack. Needs numpy only (no PIL). Terrain pages (`.ps2.trn` vs `.dx.trn`) and `.atm` are not matched.
 4. Upscaled with the Xbox picture as the source: `tools/upscale_mods.py MODEL --disc mods/upscaled-disc --xbox
    mods/xbox-textures`.
+
+The whole-disc survey (2026-11-21): 520 `.res` unpack to 9,565 `.dxt` (formats 0x26 DXT1 5124, 0x36
+DXT5 3007, 0x37 1374, 0x38 36, 0x32 24); the PS2 dump has 10,786. 9,400 pairs: **376 Xbox pictures have
+more pixels** (274 keys, a key shared across archives always got the same picture), 8,974 the same size,
+50 fewer. The bigger ones: 255 track previews (`UI/trackpreview`, 256 → 512), 27 bike chrome in `UI/Bike`
+(64 → 256), the `free06`/`free09`/`nat*` mill and wood pictures, `free06_grass` (128 → 256), one
+`score_tower` per `sx*` track. 1,258 PS2 textures have no Xbox twin. The 24 format-0x32 files (`sx*/tex/
+score_tower4`) are not decoded: their mip headers differ, and they are skipped. `pack` reads the sizes from
+the headers and decodes only the kept pictures (33 s for the disc).
