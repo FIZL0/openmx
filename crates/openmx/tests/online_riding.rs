@@ -106,13 +106,14 @@ fn both_end(mut kids: [std::process::Child; 2], readers: [std::thread::JoinHandl
     readers.map(|r| r.join().expect("the shell's output"))
 }
 
-/// Each `picture riding:` line's tick and whether the rider was drawn from the riding ragdoll.
-fn riding(said: &str) -> Vec<(u64, bool)> {
+/// Each `picture riding:` line's tick and, seat by seat, whether its rider was drawn from the riding
+/// ragdoll.
+fn riding(said: &str) -> Vec<(u64, Vec<bool>)> {
     said.lines()
         .filter_map(|l| l.strip_prefix("picture riding: tick "))
         .map(|l| {
             let mut w = l.split(' ');
-            (w.next().unwrap().parse().expect("a tick"), w.next() == Some("1"))
+            (w.next().unwrap().parse().expect("a tick"), w.map(|s| s == "1").collect())
         })
         .collect()
 }
@@ -134,12 +135,15 @@ fn headless_online_shells_show_the_riding_nodes() {
         assert!(s.lines().any(|l| l.contains(", 0 desyncs")), "{who}: the ride parted:\n{s}");
         let drawn = riding(s);
         assert!(!drawn.is_empty(), "{who}: no picture lines:\n{s}");
-        // From its first step (on the first grips drawn, once the session ticks: a host waits for
-        // its guest first) to the end, every frame.
-        let first = drawn.iter().position(|&(_, on)| on).unwrap_or_else(|| panic!("{who}: never drawn from the riding ragdoll:\n{s}"));
-        let off: Vec<u64> = drawn[first..].iter().filter(|&&(_, on)| !on).map(|&(t, _)| t).collect();
-        assert!(off.is_empty(), "{who}: drawn off the clip pose again at ticks {off:?}");
-        assert!(drawn.len() - first > 60, "{who}: drawn from the riding ragdoll on only {} frames", drawn.len() - first);
+        // Both seats, this machine's own and the other's: from its first step (on the first grips
+        // drawn, once the session ticks: a host waits for its guest first) to the end, every frame.
+        for seat in 0..2 {
+            let on = |(_, seats): &(u64, Vec<bool>)| seats.get(seat).copied().unwrap_or(false);
+            let first = drawn.iter().position(on).unwrap_or_else(|| panic!("{who}: seat {seat} never drawn from the riding ragdoll:\n{s}"));
+            let off: Vec<u64> = drawn[first..].iter().filter(|l| !on(l)).map(|&(t, _)| t).collect();
+            assert!(off.is_empty(), "{who}: seat {seat} drawn off the clip pose again at ticks {off:?}");
+            assert!(drawn.len() - first > 60, "{who}: seat {seat} drawn from the riding ragdoll on only {} frames", drawn.len() - first);
+        }
     }
     // The guest's idle seat beside an offline ride on the same idle pad: the same body standing, to
     // within a tenth of a foot (a body off its bike, or off the clip by its whole lean, is feet off).

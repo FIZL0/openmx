@@ -1,4 +1,4 @@
-# 1 — riding ragdoll online (PART)
+# 1 — riding ragdoll online (FINAL)
 
 Task P133. 2026-11-21.
 
@@ -26,8 +26,14 @@ Task P133. 2026-11-21.
   - starts afresh when the bike moved past `STRAY` (a re-run, a put-back), and is dropped while the rider is down;
   - is handed to the shown rider's `riding`, which the picture's `riding_bones_of` draws from.
   - `OPENMX_RIDING_RAGDOLL=0` turns it off online as offline.
-- `--trace-picture` prints `picture riding: tick T 0|1` per drawn frame: whether the first seat's rider is
-  drawn from the riding ragdoll.
+- The grips it is held to are the last ones drawn while the seat moved, its bike up: as offline, where
+  `Rider::holds` is only set then and kept otherwise.
+- `--trace-picture` prints `picture riding: tick T 0|1 …` per drawn frame: seat by seat, whether its rider
+  is drawn from the riding ragdoll.
+- Spec review: it asked for steps "after confirmed ticks"; it steps on the shown (predicted) tick on
+  purpose, since the bones must hang on the bike that is drawn, and a confirmed tick is several ticks
+  behind it online. Kept, and listed below. main.rs, GLOSSARY.md and the test sit outside
+  `crates/openmx/src/net/**`: the wiring must sit where the shell poses bodies and draws chassis.
 - Test `crates/openmx/tests/online_riding.rs`: two headless online shells on free09 (host holding Cross).
 - Nothing in `../opentennis` covers this (tennis has no ragdoll on a vehicle).
 
@@ -38,8 +44,8 @@ tick (S90, S110); the port's offline seat does the same.
 
 ## How it was proved
 
-- `cargo test -p openmx --test online_riding` (via `./kit check`): both machines draw every frame from the
-  riding ragdoll from its first step to the end, and the ride has 0 desyncs.
+- `cargo test -p openmx --test online_riding` (via `./kit check`): both machines draw both seats every
+  frame from the riding ragdoll from its first step to the end, and the ride has 0 desyncs.
 - Same test: the guest's idle seat's drawn nodes, at the ride's last tick, are within 0.032 ft of an offline
   ride's on the same idle pad (bound 0.1 ft).
 - By hand, 240 ticks, host with gas: the drawn rider's middle stays 3.9–4.7 ft above the bike as it rides,

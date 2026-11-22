@@ -2040,8 +2040,10 @@ fn trace_picture(
         let at: Vec<String> = nodes.iter().map(|m| format!("{:.3} {:.3} {:.3}", m.0[3][0], m.0[3][1], m.0[3][2])).collect();
         println!("picture pose: tick {tick} cut {} nodes {} {}", cut as u8, nodes.len(), at.join(" "));
     }
-    // And whether that rider is drawn from the riding ragdoll's nodes (S109, P133 online).
-    println!("picture riding: tick {tick} {}", u8::from(riding_bones(seat, ragdolled).is_some()));
+    // And whether each seat's rider is drawn from the riding ragdoll's nodes (S109, P133 online), in
+    // seat order.
+    let riding: Vec<String> = seats.iter().map(|s| u8::from(riding_bones(s, ragdolled).is_some()).to_string()).collect();
+    println!("picture riding: tick {tick} {}", riding.join(" "));
     // And the plane while it is flown, as its draw takes it: from the tick before to this one, and
     // slid between them unless the seat cuts.
     if let Some(plane) = seat.garage.plane_flown() {
@@ -12683,9 +12685,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 seat.sim.rider.holds = ride_holds(rig).map(Arc::new);
             }
             // Online they hold the seat's riding ragdoll beside the session instead (P133).
-            if online.is_some() {
-                let up = moving && bike_up && seat.sim.rider.ragdoll_kit.is_some();
-                online_riding.hold(i, ride_holds(rig).filter(|_| up).map(Arc::new));
+            // Like offline's, the last grips stay while the seat does not move. `i` is the shell
+            // seat, the `d` the seats were shown by.
+            if moving && bike_up && online.is_some() && seat.sim.rider.ragdoll_kit.is_some() {
+                online_riding.hold(i, ride_holds(rig).map(Arc::new));
             }
             // V128: the race's AI riders on the first seat's Sim, posed as the seat's own rider is
             // above, off their own riders and the controls their brains hand the bikes.
