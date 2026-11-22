@@ -58,7 +58,7 @@ while True:
     time.sleep(0.02)
 print('scene', round(time.time() - t0, 1), flush=True)
 while p.read32(IN_GAME) != 1:
-    if time.time() - t0 > 150:
+    if time.time() - t0 > 400:
         raise SystemExit('never in game')
     time.sleep(0.1)
 print('in game, frame', p.frame(), flush=True)
