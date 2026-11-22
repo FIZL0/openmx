@@ -339,13 +339,11 @@ const TWO_P: State = State {
     resolves: &[(2, 1), (1, 1)],
 };
 
-/// The game manager's slot (kit.toml's `@game_manager`).
-const GAME_MANAGER: u32 = 0x004e_1e98;
-
 /// P1's and P2's ridden vehicles in the 2p state: the actor list's fourth and third entries
 /// (watch/2p.toml), each a ridden vehicle (type 2) whose player index says which (`tests/two_p_world.rs`).
 fn two_p_players(ee: &Ee) -> [u32; 2] {
-    let down = |hops: &[u32]| hops.iter().fold(ee.u32_at(GAME_MANAGER), |a, &h| ee.u32_at(a + h));
+    let manager = addr("game_manager").expect("kit.toml's game_manager");
+    let down = |hops: &[u32]| hops.iter().fold(ee.u32_at(manager), |a, &h| ee.u32_at(a + h));
     let out = [down(&[0x34, 0x34, 0x8, 0x8, 0x8, 0x0]), down(&[0x34, 0x34, 0x8, 0x8, 0x0])];
     for (p, &v) in out.iter().enumerate() {
         assert_eq!(ee.u32_at(v), 2, "p{}'s list entry is not a ridden vehicle", p + 1);
@@ -748,6 +746,8 @@ fn the_tick_with_the_ports_resolve_is_the_contact_row() {
 fn the_original_steps_the_last_player_first() {
     for (name, state) in IMAGES {
         let Some(mut ee) = image(name) else { continue };
+        // the image's own dt, not the next frame's: only the order is asked, and these images have
+        // no named row to take it from
         let dt = dt(&ee);
         let recs = records(&ee, (state.players)(&ee));
         let log = Rc::new(RefCell::new(Vec::<(usize, u32)>::new()));

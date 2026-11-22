@@ -1,4 +1,4 @@
-# 2 — 2p rider rider (PART)
+# 2 — 2p rider rider (FINAL)
 
 Task S158. 2026-11-21. A new 2p capture with a rider-vs-rider contact, made from a generated two-pad tape
 (no person), and its contact replayed bit for bit as S88's.
@@ -65,7 +65,7 @@ rider_rider_capture`, 8 tests):
   `Bump::resolve` on the same RAM, both chassis;
 - with the port's resolve standing in, the tick still lands on the row and P1 still wrecks with reason 4;
 - the order test: the node resolves P2 before P1 in the 2p state too;
-- the nine images 128376–128381, 128391, 128392 and 128413 against the capture, and the five
+- the nine images 128376–128381, 128391, 128392 and 128413 against the capture, and the six
   consecutive pairs ticking into each other, chassis, lists and wreck reasons;
 - 128378 ticked is row 128380, with P2's three entries and P1's two frozen mirrors.
 
@@ -81,13 +81,13 @@ No change to `rider_contact.rs` was needed: the port already matches on a Race50
   not checked against it, as in S88.
 - **Only one contact, a rear strike.** Head-on, side swipe and landing on the other rider are not
   recorded. The brief's "every 2p contact" holds for the recordings there are: C10's own 2p ride has none
-  (part 1), and this one has one.
+  (part 1), and this one has one. Filed as S504.
 - **Rows 128377 and 128378 are torn.** The recorder read them inside the frame. The tests leave out what
   the tear changed (128377's P2, 128378's P2 force and moment) and prove 128377's P2 against the next
   image instead.
 - **Four of S93's images and `splitscreen.ram` are missing** from the merged context (s93-long-3413,
-  -4661, -5074, -5505), so S88's 3413 case and four order-test images skip. Filed as a follow-up.
+  -4661, -5074, -5505), so S88's 3413 case and four order-test images skip. Filed as C46.
 
 ## Next
 
-Spec review, then `./kit done`.
+Nothing for this task. S504 records more contact kinds; C46 brings back S93's missing images.
