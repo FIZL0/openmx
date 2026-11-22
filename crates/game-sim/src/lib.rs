@@ -967,9 +967,9 @@ impl Sim {
         for i in 0..self.players() {
             cars.push(self.car_contacts(i, world, dt));
         }
-        // The downed riders' wreck bikes' strikes on the riding bikes (S502), each ticked before its
-        // rider's frame: the mirrors go on the lists of the riders framed after it.
-        let mut wrecked: Vec<ridden_wreck::Struck> = Vec::new();
+        // The downed riders' wreck bikes among the riding bikes (S502), ahead of every rider's frame:
+        // their worlds step before the riders', and the mirrors go on the struck riders' lists.
+        let wrecked: Vec<ridden_wreck::Struck> = (0..self.players()).rev().filter_map(|i| self.wreck_meets_riders(i, dt, world)).collect();
         for (i, c) in controls.iter().enumerate().rev() {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
@@ -1013,8 +1013,6 @@ impl Sim {
                 .collect();
             // A downed rider's wreck bike by a parked car, searched and stepped with it (S486).
             self.wreck_meets_parked(i, dt, world);
-            // Else by a riding bike, its search among the riders' bikes (S502).
-            wrecked.extend(self.wreck_meets_riders(i, dt, world));
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
             // A downed rider's bones meet the parked cars (F73).

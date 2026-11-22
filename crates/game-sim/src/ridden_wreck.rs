@@ -7,11 +7,11 @@
 //! wreck bike's world steps before the riders' do, every rider's chassis as the frame before left it.
 //!
 //! So each downed rider's wreck bike with a riding bike in reach (within [`REACH`] past the bike's
-//! frame) is ticked among the riders' bikes just before its rider's frame, where the parked cars'
-//! lane ticks it ([`crate::parked_wreck`]), and its rider's frame then skips its tick
-//! ([`WreckBike::flown`]). One the parked cars' or a flown plane's lane ticked already this tick is
-//! left as that lane left it. A wreck bike out of every bike's reach is ticked by its rider's frame
-//! as before.
+//! frame) is ticked among the riders' bikes ahead of every rider's frame, and its rider's frame then
+//! skips its tick ([`WreckBike::flown`]). One a flown plane's lane ticked already this tick is left as
+//! that lane left it, and one in reach of a parked car is left to the parked cars' lane
+//! ([`crate::parked_wreck`]), which ticks it just before its rider's frame. A wreck bike out of every
+//! bike's reach is ticked by its rider's frame as before.
 //!
 //! The mirrors go on the struck rider's list for its frame ([`file_struck`]), ahead of its own
 //! entries, as the flown planes' do ([`crate::rider_contact::struck_first`]): the original's struck
@@ -59,6 +59,15 @@ impl crate::Sim {
             return None;
         }
         let from = self.rider_of(i).crash.as_ref()?.bike.origin();
+        if self.parked_cars.iter().enumerate().any(|(k, p)| {
+            let h = p.hull(n + k);
+            let mut at = h.at;
+            at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
+            let (_, centre, radius) = crate::world::Prop::posed(h.mesh, &at);
+            !(crate::actor::distance(centre, from) > radius + crate::parked_wreck::REACH)
+        }) {
+            return None;
+        }
         let bikes: Vec<Bike> = (0..n)
             .map(|j| {
                 let r = self.rider_of(j);

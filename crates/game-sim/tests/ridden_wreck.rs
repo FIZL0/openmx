@@ -9,6 +9,8 @@
 //!   wreck bike's body among the other sides after the players'.
 //! - `p2s_wreck_bike_pushes_p1_in_the_ride`: [`Sim::step_all`] with the strike rides P1 off where it
 //!   stood, where the same ride with P1 out of the bikes' world (no collision files) leaves it.
+//! - `p1s_wreck_bike_pushes_p2_in_the_ride`: the same with the riders swapped. P2 is framed first in
+//!   the walk, so this holds only with the wreck bikes ticked ahead of every rider's frame.
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};
@@ -117,20 +119,39 @@ fn p2s_wreck_bike_puts_mirrors_on_p1s_list() {
     assert!(ticks > 0, "P2's wreck bike never struck P1's bike");
 }
 
+/// How far the riding player `struck` moves along x in ten ticks of [`Sim::step_all`] beside the
+/// downed one, with it in the bikes' world and out of it; with `swap` P1 is the one down.
+fn pushed(struck: usize, swap: bool) -> Option<(f32, f32)> {
+    let tables = Tables::build();
+    let (phy, col, part) = disc(&tables)?;
+    let mut sims = [true, false].map(|p1_col| two(APART, TOWARDS, &phy, &col, &part, p1_col));
+    if swap {
+        for s in &mut sims {
+            let s = &mut *s;
+            std::mem::swap(&mut s.rider, &mut s.others[0].rider);
+        }
+    }
+    let start = sims[0].rider_of(struck).ride.position();
+    for s in &mut sims {
+        for _ in 0..10 {
+            s.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
+        }
+    }
+    let [a, b] = sims.map(|s| (s.rider_of(struck).ride.position().x() - start.x()).abs());
+    eprintln!("player {} moved {a} ft along x struck, {b} ft out of the bikes' world", struck + 1);
+    assert!(b < 0.01, "out of the bikes' world it moved {b} ft");
+    Some((a, b))
+}
+
 #[test]
 fn p2s_wreck_bike_pushes_p1_in_the_ride() {
-    let tables = Tables::build();
-    let Some((phy, col, part)) = disc(&tables) else { return };
-    let mut with = two(APART, TOWARDS, &phy, &col, &part, true);
-    let mut without = two(APART, TOWARDS, &phy, &col, &part, false);
-    let start = with.rider_of(0).ride.position();
-    for _ in 0..10 {
-        with.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
-        without.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
-    }
-    let moved = |s: &Sim| (s.rider_of(0).ride.position().x() - start.x()).abs();
-    let (a, b) = (moved(&with), moved(&without));
-    eprintln!("P1 moved {a} ft along x struck, {b} ft out of the bikes' world");
-    assert!(b < 0.01, "P1 out of the bikes' world moved {b} ft");
+    let Some((a, b)) = pushed(0, false) else { return };
     assert!(a > b + 0.01, "P2's wreck bike did not push P1: {a} ft");
+}
+
+/// The other way round: P1's wreck bike ticks ahead of P2's frame too, though P2 is framed first.
+#[test]
+fn p1s_wreck_bike_pushes_p2_in_the_ride() {
+    let Some((a, b)) = pushed(1, true) else { return };
+    assert!(a > b + 0.01, "P1's wreck bike did not push P2: {a} ft");
 }
