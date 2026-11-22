@@ -37,7 +37,7 @@ Task P324. 2026-11-21.
     world's cars on them asked about their ground every tick, and that frame asked nothing. The first tick
     back read both again on the ride's thread, a 115 ms frame (179 s).
 - The fix (game-sim `tiles.rs`): a far tile stays until 60 `stream` calls have passed with nothing asking
-  about it (`ASKED_KEPT`, about a second of frames), not one. The pause runs no stream calls, so the tiles
+  about it (`ASKED_KEPT`; the shell streams once a frame that ticked, so a second or two), not one. The pause runs no stream calls, so the tiles
   are still there when the ride goes on. The stitch's pass over the whole world, which streams after each
   piece to keep its memory down, keeps the old rule (`kept_for(0)`).
 
@@ -63,6 +63,8 @@ Not applicable: frame pacing and the world's tile streaming are the port's own.
 - **The riding misses on the world are not fixed.** Which GPU pass costs the extra ~7 ms is not known:
   Metal times only whole frames, and the desktop does it in ~1 ms. Filed as V139.
 - **The 40 fps pause with a controller connected is not reproduced.** No pad could be connected by an agent.
+- The 2026-11-05 log's +130–170 MB the second a pause opened is not looked into: on these logs (no
+  controller) the pause's memory sits inside the riding swing.
 - The memory still swings ~100 MB from one second to the next while riding (630↔790 MB on Dallas,
   950↔1150 MB on the world). It costs no frame on these logs; not looked into.
 

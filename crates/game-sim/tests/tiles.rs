@@ -303,7 +303,9 @@ fn a_far_tile_asked_every_tick_is_read_once() {
 /// the world's loads and drops at the next update.
 #[test]
 fn a_pictures_copy_answers_what_the_world_had_loaded() {
-    let (mut tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    // Far tiles go at the second stream, as they did before P324's keep, so the drop below is quick.
+    let (tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    let mut tiled = tiled.kept_for(0);
     let points: Vec<(f32, f32)> = (0..400).map(|i| (4.3 * i as f32 + 0.37, 280.0 + (i % 7) as f32)).collect();
     let whole: Vec<Option<Hit>> = points.iter().map(|&(x, z)| tiled.at(F(x), F(z))).collect();
     let copy = tiled.picture_copy();

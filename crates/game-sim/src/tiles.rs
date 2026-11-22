@@ -295,8 +295,8 @@ pub struct Tiled {
 /// back over a square's edge.
 const NEAR_KEPT: usize = 8;
 
-/// How many [`Tiled::stream`] calls a far tile is kept after it was last asked about, about a second
-/// of frames (P324): a tick that asks nothing of it — the pause's first frame, where the world's cars
+/// How many [`Tiled::stream`] calls a far tile is kept after it was last asked about, one a ride
+/// frame that ticked, so a second or two (P324): a tick that asks nothing of it — the pause's first frame, where the world's cars
 /// stand — dropped two tiles the cars were on, and the ride's first tick back read them again, a
 /// 115 ms frame on an iPhone 15 Pro.
 pub const ASKED_KEPT: u32 = 60;
