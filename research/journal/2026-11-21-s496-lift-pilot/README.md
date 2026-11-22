@@ -12,4 +12,5 @@ the port tasks, but the port had already found and named everything.
 
 Only part of the brief is done. The gate's drop, the route follower, avoid, and an arena-resident bike are
 not lifted, so the bike still runs on game-sim. Waiting on the user: whether to go on lifting, and the
-AGENT.md exemption for game-lift. Details in 1-lift-pilot-READY.md.
+AGENT.md exemption for game-lift. Details in 1-lift-pilot-FINAL.md. The user has since answered (land as
+it is, offsets allowed): research/journal/2026-11-21-s496-decisions/.
