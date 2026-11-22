@@ -9001,6 +9001,11 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # Hit listener 0x0015acf0, reached by thunk 0x0015c290 (wrapper +0x48): with +0x58 set and the struck
 #   collidable's +0x84 & [0x00468f68] (0x40) non-zero, calls wrapper vt +0x124 = enable 0x0015b790.
 #   +0x58 = 1 from the ctor 0x001590e0; no key reads it.
+#   S489: on a car its vt +0x124 is the car's enable 0x00398c50 (driven +0x4ac = 1). R48's truck's own
+#   rays on the plane's hull reach it (enable's ra 0x0015ad28, rows 1580-1600, alone on 1588-1589),
+#   besides the plane's rays on the truck (ra 0x0015ad6c), so the truck's brakes stay off.
+#   Car launch words: car +0x42c launch timer, +0x430 start (written by 0x00397e20), engine +0x6c
+#   launch boost (1.886 on r48-1487.ram).
 # The ray probe (wrapper +0x124) holds two listeners, in order: the object's (+0x48), then the
 #   collection's (+0x30, thunk 0x003b2b10 -> 0x003b2420 -> collection vt +0xa8 activate), which fires on
 #   every hit whatever the category.

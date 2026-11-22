@@ -2211,7 +2211,8 @@ fn r48_fly(to: u32) -> Option<(Vec<R48Tick>, Vf, Vf)> {
 }
 
 /// **R48's truck as the tape's state holds it** (S489a): its body, its four tires and its engine
-/// taken off the image into the settled one. R48's truck is not where the load's settle left it: it
+/// taken off the image into the settled one, with its launch timer and boost (S489: the boost is
+/// 1.886 on the image, and the truck's speed off the wake follows it). R48's truck is not where the load's settle left it: it
 /// sleeps 0.09 ft higher, its springs 0.08 ft less pressed and its body still sinking at 0.29 ft/s
 /// (something woke it after the load, and it slept again mid-bounce). A woken body takes that up
 /// where it stopped, so the Sim's push is held to the original's only from the same truck.
@@ -2282,8 +2283,10 @@ fn r48_seat_truck(ee: &Ee, parked: &mut game_sim::car::Parked) {
     (m.ground_speed, m.alpha, m.side_slip) = (word(c(0x55c)), word(c(0x560)), word(c(0x564)));
     (m.world_rates, m.velocity, m.forward, m.up, m.euler) = (quad(ee, c(0x570)), quad(ee, c(0x580)), quad(ee, c(0x590)), quad(ee, c(0x5a0)), quad(ee, c(0x5b0)));
     m.matrix = game_sim::math::Mat4([0, 16, 32, 48].map(|i| quad(ee, c(0x5c0 + i))));
+    (m.launch.timer, m.launch.start) = (word(c(0x42c)), word(c(0x430)));
     let e = ee.u32_at(c(0x544));
     let d = &mut m.drivetrain;
+    d.launch_boost = word(e + 0x6c);
     d.gear = ee.u32_at(e + 0xcc) as i32;
     (d.ratio, d.inv_ratio, d.wheel_rpm) = (word(e + 0xe4), word(e + 0xe8), word(e + 0xec));
     (d.converter_torque, d.multiplication, d.output_torque) = (word(e + 0xf4), word(e + 0xf8), word(e + 0xfc));
@@ -2352,7 +2355,7 @@ fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
 
 /// The last row [`r48_the_plane_keeps_pushing_the_truck`] holds the plane and the truck to the
 /// capture's.
-const R48_PUSH_THROUGH: u32 = 1587;
+const R48_PUSH_THROUGH: u32 = 1604;
 
 /// **The plane taxied into the truck keeps pushing it** (S487, S489a): the woken truck searches and
 /// steps in the plane's dynamics world ([`game_sim::car::InPlane`]), and on a tick the plane strikes
@@ -2360,8 +2363,11 @@ const R48_PUSH_THROUGH: u32 = 1587;
 /// the plane and the truck follow the capture along `+z` (place within 0.3 ft, speed within 2.6 ft/s;
 /// rows 1570-1579 within 0.01 ft and 0.6 ft/s: the rows 1571-1573 with no plane contact, the truck's
 /// 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to row 1640, and the truck driven past
-/// z 3870 by row 1628 (the original's 3877). Not held: from about row 1588 the braked rear tires'
-/// stick-slip has grown the small differences, the truck runs 3 ft/s slow and then the two part.
+/// z 3870 by row 1628 (the original's 3877). Since S489 the truck's own strikes on the plane's hull
+/// keep its brakes off as well, and the two follow the capture within 0.01 ft/s through row 1587. Not
+/// held: at row 1587 the plane's wing ray (its tip at `x` 7.5) meets the truck 0.0015 ft short of its
+/// tip in the original and just misses it in the Sim; from there the push parts, the truck 1.7 ft/s
+/// slow by row 1605.
 #[test]
 fn r48_the_plane_keeps_pushing_the_truck() {
     let Some(cap) = r48_capture() else { return };

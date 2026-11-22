@@ -1161,6 +1161,11 @@ impl Flight {
                     flight_search::Knock { mesh: h.mesh, to_world, centre, radius, velocity: f.body.velocity, capacity: h.capacity }
                 });
                 let theirs = c.search(&mut *ground, dt, mirrors, hull);
+                // Its own rays on the plane's hull reach its hit listener, which calls the same
+                // enable (S489, R48's oracle from row 1580): the driven word set, its brakes off.
+                if !theirs.is_empty() {
+                    c.struck();
+                }
                 let near = self.body.position;
                 let r = &mut self.record;
                 if !theirs.is_empty() {

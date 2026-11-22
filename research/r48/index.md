@@ -117,6 +117,34 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
   differences (rear spin after 1570: Sim 0.024 / -6.486, oracle 0.088 / -6.382) grow. The truck is
   3 ft/s slow at 1588, and from 1615 the two part (the Sim's truck climbs, vy 6-15).
 
+## What slowed the plane on the truck (S489)
+
+Per substep, the oracle's truck (hooked after its tire step 0x397f40) beside the Sim's, rows 1569-1600.
+
+- **The launch boost.** The image's engine has launch boost (engine +0x6c) 1.886, launch timer
+  (car +0x42c) and start (+0x430) mid-launch; the settled truck had boost 1. The boost scales the
+  drive torque while the tire spins forward, so the Sim's truck gained less off the wake (1.4 ft/s
+  slow by 1573). `r48_seat_truck` now takes the three words off the image. Rows 1569-1579 then
+  match within 0.008 ft/s.
+- **The truck's own strikes on the plane.** From row 1580 the Sim's truck braked on some ticks
+  (1580, 1588, 1589) and the original's never did after 1574. A hook on the enable 0x398c50 shows
+  two callers:
+  1. ra 0x15ad6c: the plane's rays striking the truck (S489a's `InPlane::struck`).
+  2. ra 0x15ad28: the hit listener 0x15acf0 (S200), from row 1580, alone on 1588-1589. It is the
+     truck's own rays striking the plane's hull: wrapper +0x58 set and the struck collidable's
+     +0x84 & [0x468f68] (0x40), it calls vt+0x124, the enable.
+  - Fix: in the plane's frame (`Flight`, the parked cars), a car whose own search struck the hull
+    calls `InPlane::struck` too, before its controls step.
+  - Now: rows 1569-1587 within 0.008 ft/s on the first substep, brakes 0 on both. The push holds
+    to the capture through row 1604 (`R48_PUSH_THROUGH`, was 1587); row 1605 fails (truck 1.7 ft/s slow).
+- **Where it parts: the plane's wing ray at row 1587.** The ray from (0, 4.47, -4.66) to
+  (7.5, 2.40, -1.63) in the plane's frame meets the truck's hull facet 31 at t 0.974 (1585) and
+  0.987 (1586) in the Sim. At 1587 the original still meets it, 0.0015 ft short of the ray's tip
+  (about t 0.9998); the Sim's ray does not reach it (its box test drops the facet). The Sim's truck
+  is 0.0015 ft ahead there, from the 0.002-0.008 ft/s left since row 1572. The lost contact gives
+  the Sim's plane a sideways kick on 1587's second substep, and the two part from 1588.
+  - Not chased: what leaves the 0.005 ft/s at row 1572 (the truck's kick tick 1574 starts there).
+
 ### In the riders' world (S491)
 
 - Tried: `Parked::struck` set the driven word, `Parked::frame` cleared it after the step (as
