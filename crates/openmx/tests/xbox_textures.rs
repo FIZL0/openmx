@@ -46,15 +46,15 @@ fn pst(w: u32, h: u32, c: [u8; 3]) -> Vec<u8> {
     d
 }
 
-/// A `w` x `h` Xbox `.dxt`, 8-bit palette without alpha (format 0x37), one mip, every pixel entry 0
-/// (`c`; the palette is BGRA).
+/// A `w` x `h` Xbox `.dxt`, 8-bit palette (format 0x37), one mip, every pixel entry 0 (`c`, opaque;
+/// the palette is BGRA).
 fn dxt(w: u32, h: u32, c: [u8; 3]) -> Vec<u8> {
     let mut d = Vec::new();
     for v in [2u32, 0x37, 256] {
         d.extend_from_slice(&v.to_le_bytes());
     }
     let mut pal = vec![0u8; 1024];
-    pal[..4].copy_from_slice(&[c[2], c[1], c[0], 0]);
+    pal[..4].copy_from_slice(&[c[2], c[1], c[0], 0xff]);
     d.extend(pal);
     for v in [1, w, h, w, h, w * h] {
         d.extend_from_slice(&v.to_le_bytes());
