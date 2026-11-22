@@ -31,7 +31,10 @@ Task S489. 2026-11-21.
 - Against the original's node update replayed on states/r48/r48-1487.ram (the oracle the R48 tests
   already use), per substep: the truck's velocity, rates, brakes, engine and four tires.
   - Before: 1.4 ft/s slow by row 1573; brakes 1 on rows 1580, 1588, 1589.
-  - After: within 0.008 ft/s on rows 1569-1587, brakes 0 on both.
+  - After: within 0.008 ft/s on rows 1569-1587 (each tick's first substep), brakes 0 on both.
+- The car's search hands back only its own entries on the plane's hull (`InPlane::search`), so the
+  listener's category check is always met there; its controls step (`preforce`) runs after, in the
+  substeps.
 - `cargo test --release -p game-sim --test c16_fly r48`: the push holds to the capture through row
   1604; with 1605 it fails (truck 22.74 ft/s vs 24.48).
 
@@ -39,7 +42,7 @@ Task S489. 2026-11-21.
 
 - From row 1587 the Sim parts from the original. The plane's wing ray (tip at x 7.5) meets the
   truck's hull 0.0015 ft short of its tip in the original and misses in the Sim, whose truck is
-  0.0015 ft ahead. Reason: a 0.002-0.008 ft/s difference left since row 1572; not chased.
+  0.0015 ft ahead. Reason: a 0.002-0.008 ft/s difference left since row 1572; not chased (S508).
 - What leaves that difference at row 1572 is not known. Reason: not looked at; the truck's speed is
   right to 0.0006 ft/s on 1571.
 - The same own-ray enable is not in the drivers' world (S499, car.rs `AmongCars`) or the riders'

@@ -116,6 +116,8 @@ Addresses in this boot: plane 0x007ccae0, truck car 0x01490240 (body at +0x160),
 - Left: from 1573 the braked rear tires stick-slip (force z flips ±4000 each substep). Small
   differences (rear spin after 1570: Sim 0.024 / -6.486, oracle 0.088 / -6.382) grow. The truck is
   3 ft/s slow at 1588, and from 1615 the two part (the Sim's truck climbs, vy 6-15).
+  - Replaced by S489 (below): the stick-slip came from the brakes the Sim left on; the push now
+    holds through 1604.
 
 ## What slowed the plane on the truck (S489)
 
