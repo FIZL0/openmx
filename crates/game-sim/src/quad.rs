@@ -4116,6 +4116,33 @@ impl Model {
         crate::prop_world::node_bounds(&BoundsNode { own: None, world: *frame, children: roots }).half_extent
     }
 
+    /// Each node's world rows as Untamed's part reader leaves them (MD250): its box walk brings each
+    /// boxed node up to date in the file's order, parents first, so every node is the topmost one
+    /// brought up to date and Untamed's world update makes its frame times its parent's orthonormal
+    /// again ([`crate::atv_moto::untamed_orthonormal`]). The scene node under them (`frame`) is current.
+    /// Every node is taken to have a box, as every node of the race quad's model has: the walk skips a
+    /// boxless node, which is then brought up to date with its first boxed child, and only it orthonormal.
+    pub fn untamed_worlds(&self, frame: &crate::math::Mat4) -> Vec<crate::math::Mat4> {
+        let mut worlds: Vec<crate::math::Mat4> = Vec::with_capacity(self.nodes.len());
+        for n in &self.nodes {
+            let parent = n.parent.map_or(*frame, |p| worlds[p]);
+            worlds.push(crate::math::Mat4(crate::atv_moto::untamed_orthonormal(&crate::toys::compose(&n.local, &parent).0)));
+        }
+        worlds
+    }
+
+    /// **Untamed's part reader's box** (MD250): [`Model::half_box`] over [`Model::untamed_worlds`].
+    pub fn untamed_half_box(&self, frame: &crate::math::Mat4) -> Vf {
+        use crate::prop_world::BoundsNode;
+        let worlds = self.untamed_worlds(frame);
+        fn tree(m: &Model, worlds: &[crate::math::Mat4], i: usize) -> BoundsNode {
+            let children = (0..m.nodes.len()).filter(|&k| m.nodes[k].parent == Some(i)).map(|k| tree(m, worlds, k)).collect();
+            BoundsNode { own: Some(m.nodes[i].own), world: worlds[i], children }
+        }
+        let roots = (0..self.nodes.len()).filter(|&k| self.nodes[k].parent.is_none()).map(|k| tree(self, &worlds, k)).collect();
+        crate::prop_world::node_bounds(&BoundsNode { own: None, world: *frame, children: roots }).half_extent
+    }
+
     /// **The wheel setup's mounts**: each [`WHEEL_NODES`] node's world origin carried back into
     /// `frame` (less `frame`'s origin, then the rows' dots: `vmulax`, `vmadday`, `vmaddz` on the
     /// transposed rows), `w` 1; no wheel has a sweep shape, as the quad's init asks for none.
