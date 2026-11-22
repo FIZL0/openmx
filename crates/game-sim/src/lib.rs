@@ -967,14 +967,18 @@ impl Sim {
         for i in 0..self.players() {
             cars.push(self.car_contacts(i, world, dt));
         }
+        // The downed riders' wreck bikes' strikes on the riding bikes (S502), each ticked before its
+        // rider's frame: the mirrors go on the lists of the riders framed after it.
+        let mut wrecked: Vec<ridden_wreck::Struck> = Vec::new();
         for (i, c) in controls.iter().enumerate().rev() {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
             let strike = self.prop_strike_after(i, first, dt, &*world);
             let probed = self.traffic.probed.iter().any(|p| p.1 == i);
+            let struck = ridden_wreck::struck_on(&wrecked, i);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
-                .filter(|l| !l.is_empty() || !strike.contacts.is_empty() || probed)
+                .filter(|l| !l.is_empty() || !strike.contacts.is_empty() || probed || struck)
                 .map(|l| {
                     let mut b = self.bump_in(i, l, &*world);
                     // The parked cars' bodies, which its resolve pushes (S485), and the parked
@@ -989,6 +993,9 @@ impl Sim {
                 // The riders after it in player order framed already (the walk is backwards).
                 self.strike_into_among(b, strike, dt, world, &mut prop_movers, &hulls, &|j| j > i);
                 self.cars_probed(i, b);
+                // And the wreck bikes' mirrors, ahead of its own entries (S502).
+                let at = self.rider_of(i).ride.transform().0[3];
+                ridden_wreck::file_struck(b, i, &wrecked, at, &*world);
             }
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
@@ -1006,6 +1013,8 @@ impl Sim {
                 .collect();
             // A downed rider's wreck bike by a parked car, searched and stepped with it (S486).
             self.wreck_meets_parked(i, dt, world);
+            // Else by a riding bike, its search among the riders' bikes (S502).
+            wrecked.extend(self.wreck_meets_riders(i, dt, world));
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
             // A downed rider's bones meet the parked cars (F73).
@@ -1716,6 +1725,10 @@ pub mod wreck_plane;
 /// A downed rider's wreck bike meets the parked cars (S486): their hulls in its search, their bodies
 /// on its resolve.
 pub mod parked_wreck;
+
+/// A downed rider's wreck bike meets the riding bikes (S502): their frames in its search, its mirrors
+/// on the struck riders' lists.
+pub mod ridden_wreck;
 
 /// The parked plane in the riders' world (S494): stepped every frame, struck and pushed by the bikes.
 pub mod parked_plane;
