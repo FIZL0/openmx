@@ -11583,8 +11583,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if closed && menu_props != Some(front.menu.settings.props_put_back) {
                 let on = front.menu.settings.props_put_back;
                 menu_props = Some(on);
+                // The row as it closed, off included: a front-end ride's flag is the row it started on.
                 if front.menu.air_lock.is_none() && online.is_none() {
-                    let on = args.props_put_back || on;
                     for seat in &mut world.seats {
                         seat.sim.traffic.props.put_back_with_rider = on;
                     }

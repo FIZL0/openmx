@@ -13,7 +13,9 @@ Task P394. 2026-11-21.
   - a played tape starts with the switch off on every seat (the original's), then takes the tape's lines on
     every seat's prop set, written on again to a tape recorded during the playback;
   - the pause closing on a changed row puts the switch on every seat's prop set (split screen too), and on the
-    recorded tape; held by a played tape (the same hold as Air Wrecks), and never online;
+    recorded tape, off included (a front-end ride's `--props-put-back` is the row it started on, so the
+    flag does not pin it on as `--backwards-bail` pins its switch); held by a played tape (the same hold as
+    Air Wrecks), and never online;
   - a local player joining mid-ride takes the first seat's switch, so a pause change reaches them too.
 - Menu (`crates/openmx/src/menu_pages.rs`, not on the task's file list but its note was now wrong): under the
   pause the row says "Changes take when the pause closes." and is held under a played tape, like Backwards
