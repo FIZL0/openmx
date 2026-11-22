@@ -4060,6 +4060,11 @@ impl Machine {
                 crate::flight_search::Knock { mesh, to_world, centre, radius, velocity: self.body.velocity, capacity: h.capacity }
             });
             let theirs = c.search(&mut *world, dt, mirrors, knock);
+            // Its own rays on the car's hull reach its hit listener, which calls the same enable
+            // (S507, as S489 found in the plane's world): the driven word set, its brakes off.
+            if !theirs.is_empty() {
+                c.struck();
+            }
             let near = self.body.position;
             let r = &mut collision.record;
             if !theirs.is_empty() {
