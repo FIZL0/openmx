@@ -642,14 +642,17 @@ fn scene_start() -> (Vf, Vf) {
 }
 
 /// The pack's quad made and rigged as the shell makes it, at the image's body and in its world's box;
-/// the model read at the scene's start spot ([`scene_start`]).
+/// the model read at the scene's start spot ([`scene_start`]), its box as Untamed's part reader takes
+/// it ([`quad::Model::untamed_half_box`]).
 fn made(fs: &Files, ee: &Ee, at: &At) -> quad::Ride {
     let spot = v(ee, at.body + 0x70);
     let bounds = (at.area != 0).then(|| (v(ee, at.area + 0x30), v(ee, at.area + 0x40)));
     let curve = game_sim::camera::CurveTable::build();
     let (spot, heading) = (Vf::new(spot.0[0], spot.0[1], spot.0[2], 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
     let (start, facing) = scene_start();
-    let load = quad::Load::read_model(&fs.ini, &fs.model, start, facing, &curve).unwrap_or_else(|e| panic!("{e}"));
+    let frame = quad::spawn_frame(start, facing);
+    let mounts = fs.model.mounts(&frame).unwrap_or_else(|e| panic!("{e}"));
+    let load = quad::Load::read(&fs.ini, fs.model.untamed_half_box(&frame), mounts, &curve);
     let mut ride = quad::Ride::spawn(&load, &fs.model, spot, heading, bounds, Vec::<Call>::new());
     ride.rig(&load, &fs.riding, &fs.wreck);
     ride
@@ -1177,11 +1180,9 @@ fn untamed_quad_resolves_its_hits_on_the_bale_as_the_original() {
     let rec = ee.u32_at(QUAD + 0xf8);
     let (quad_body, bale_body) = (ee.u32_at(rec + 0xe4), ee.u32_at(BALE + 0xe4));
     assert_eq!(ee.u32_at(ee.u32_at(rec + 4) + 0x88), RESOLVE, "the quad record's vt +0x88");
-    // The quad's record from its files is the image's, but for what the resolution writes first and
-    // the inverse inertia, some 36 ulps off: read at the scene's start spot, the part reader's box is
-    // still the image's but for 8 ulps in y and 34 in z, and no turn of the frame gives it (MD250). The
-    // cases below read the image's.
-    let fresh = |c: &game_sim::contact::Collider| game_sim::contact::Collider { cofg_world: Vf::ZERO, normal_speed: F::ZERO, relative: Vf::ZERO, inv_inertia: Vf::ZERO, ..*c };
+    // The quad's record from its files is the image's, but for what the resolution writes first; its
+    // inverse inertia too, from Untamed's part reader's box (MD250). The cases below read the image's.
+    let fresh = |c: &game_sim::contact::Collider| game_sim::contact::Collider { cofg_world: Vf::ZERO, normal_speed: F::ZERO, relative: Vf::ZERO, ..*c };
     let image_record = untamed_held(&ee, rec).record;
     assert_eq!(fresh(&held.record.collider), fresh(&image_record.collider), "the quad's record is not the image's");
     assert_eq!(held.record.impulse_mask.to_bits(), image_record.impulse_mask.to_bits(), "the quad's impulse mask");
@@ -1305,4 +1306,3 @@ fn untamed_quad_record_strikes_the_bale_on_md224_steer() {
     assert_eq!(mirrors, want, "the bale's mirrors on tick 197");
     assert!(knocked[0].record.contacts.iter().all(|c| c.other == 1), "a mirror names the quad's record");
 }
-

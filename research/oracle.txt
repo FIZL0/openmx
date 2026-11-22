@@ -14355,6 +14355,19 @@ libc_qsort                  boot 0x0040f338 (base, n, size, cmp) the BSD qsort: 
 #   Not exact: frame spawn_frame(start, +z) gives mounts 11/12 words (wheel 2 z c01d7080, image c01d70c0)
 #   and box 4004287d 3fff2a9a 4044d004; record +0x60/+0x70 need 4004287d 3fff2a9e/9f 4044d026. Yaw, pitch,
 #   roll sweeps (+-0.05 rad, 1e-5 step), start - cofg (0,1,0), origin sweeps: none give box and mounts.
+#   Found (2026-11-21, live hook): MD160 vehicle-atv.p2s with 0x00192040's first two words patched to
+#   `j 0x000f1000`; the trampoline spins when ra == 0x004b9cd4 (the part reader's jal 0x00192040 at
+#   0x004b9ccc) and a0 == 0x01be8c30 (the quad's scene node, as in md147 spawn), after a write of ra/a0 to
+#   0x000f0000/4; research/md147/start.pad played to the spin, saved. The first part-reader call that
+#   frame is another object's node (0x01983250, no children). At the quad's call: the 43 node locals are
+#   the .psg's, the scene node's rows identity at 43c5e147 4070a3d7 431bdc28 (flags 0x81, clean), every
+#   model node dirty (0xa4). 0x00192040 there gives half 4004287d 3fff2a9e 4044d026 = the record's box.
+#   Cause: the box walk 0x001923a0 updates each boxed node in order, parents first, so each is the
+#   topmost node 0x0018f720 brings up to date and gets 0x00131aa0 (orthonormal again) after local x
+#   parent: ported as quad::Model::untamed_worlds / untamed_half_box (atv_moto::untamed_orthonormal);
+#   all 43 world rows and the box bit for bit, at either the image's frame or spawn_frame(start, +z).
+#   The start spot words in RAM (43c5e147, 431bdc28) are 1 ulp under the correctly rounded parse of
+#   "395.76"/"155.86" (43c5e148, 431bdc29): the game's float parser; not ported.
 # MD234 — MD160's Untamed drives with the ground from Rocksbury's terrain and the noise from the port
 # (tests/mxvatv_car_frame/untamed_terrain.rs). Comment rows only. Journal: research/journal/2026-11-17-md234-untamed-terrain-replay.
 #   Smooth noise 0x001324b0: permutation words 0x00408080 (256), gradients 0x0040b0c0 (256), unbuilt flag
