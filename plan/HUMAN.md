@@ -372,6 +372,10 @@ The 10-30 log (`~/Downloads/openmx-log (3).txt`, build 2366) never showed it: it
 is still drawn where the ragdoll lay, as the original does (S74). Since P224 those frames are not counted,
 so any ` (no rider drawn …)` line from a newer build is the real thing.
 
+On 11-21 an agent rode the iPhone itself (0.18.0 build 5260, two launches, about 45 minutes): no such line
+and no `gpu error:`, so P224 closed with nothing to fix. If it comes back, just say so: agents pull both
+logs off the phone over omarchy-desktop's USB (`ios fsync … pull`), no LocalSend needed.
+
 ## Weston for the gate's private display (K16)
 
 Since K16 every `./kit check` puts its test windows on a private headless weston + Xwayland instead of
