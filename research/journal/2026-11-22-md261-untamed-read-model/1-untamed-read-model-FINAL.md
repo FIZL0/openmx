@@ -28,6 +28,9 @@ A save-state RAM image: MD147's `spawn.ee.bin`.
 - The test also asserts `read_model` (SLUS-21104's box) does not: it gives `3c0c4949 3c0951f1 3c64b689`,
   35, 32 and 5 ulps off. So the test tells the two boxes apart.
 - Checked the test really ran (no skip) with a temporary panic printing both words, then removed it.
+- The shell's switch has its own test, `untamed_box_tests` in crates/openmx/src/vehicle.rs: the pack's quad
+  made by `AtvRide::made` takes `read_untamed_model`'s inertia on Untamed's step and `read_model`'s off it
+  (they differ at that spot). Also probed to run, not skip.
 
 ## Not verified / not 1:1
 
