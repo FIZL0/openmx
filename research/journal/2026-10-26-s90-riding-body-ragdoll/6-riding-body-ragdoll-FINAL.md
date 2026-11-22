@@ -58,7 +58,13 @@ skeleton by the riding pose spring.
   recording2 state also has three AI riders, which the shell's free ride doesn't.
 - Camera and render differ (the shell's chase camera sits higher and farther, so the rider is smaller).
   That is presentation, not this task, and not chased.
+- The shell is not seeded from the PCSX2 state. It starts from `--track free09`'s own spawn, the same spawn
+  recording2 (and every motocross state) starts from. So the start spot matches, but the bike's speed and
+  pose at load are the shell's, not the state's. Tick 96 shows the two lined up.
 - The swing proof skips until C47 re-records S74/S201's rows. Its tolerance figures are from 2026-11-02.
+  I tick S90 anyway (decided, unattended). The proof passed on main on 2026-11-02. Since then
+  `crates/game-sim/src/ragdoll.rs` has been touched (S280, MX vs. ATV's rider world), so a regression in
+  between is possible and unchecked. Today's shots show none. C47 puts the check back.
 - Entry 5's other items still stand: a wreck on the very first tick enters from the skeleton, and online
   sessions draw the stand-in (V63/P133).
 

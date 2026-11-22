@@ -16,9 +16,11 @@ from ps2kit.pine import Pine  # noqa: E402
 
 FRAME_COUNTER = 0x00479D04
 GAME_MANAGER = 0x004E1E98
-SLOT = '/home/rycs/repos/openmx-slots/pcsx2/s2/PCSX2/savestates/SLUS-20767 (9866FE54).08.p2s'
+# The kit copy's config folder (copy N lives in openmx-slots/pcsx2/sN/PCSX2).
+COPY = os.environ.get('PCSX2_CONFIG', os.path.expanduser(f"~/repos/openmx-slots/pcsx2/s{os.environ.get('KIT_PCSX2', '2')}/PCSX2"))
+SLOT = os.path.join(COPY, 'savestates', 'SLUS-20767 (9866FE54).08.p2s')
 OUT = os.path.join(ROOT, 'context', 'shots', 's90')
-SNAPS = '/home/rycs/repos/openmx-slots/pcsx2/s2/PCSX2/snaps'
+SNAPS = os.path.join(COPY, 'snaps')
 PRESS = os.path.join(ROOT, 'research/journal/2026-10-20-c6-c6-recording2-capture/playback/press.py')
 PID = int(os.environ['PCSX2_PID'])
 PAUSE = os.environ.get('SHOT_PAUSE', '1') == '1'
