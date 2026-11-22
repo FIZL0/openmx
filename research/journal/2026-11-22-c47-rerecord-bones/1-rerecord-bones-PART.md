@@ -27,7 +27,8 @@ Task C47. 2026-11-22.
 | s74/free09-down | 2448..2987 (540) | 2668, 2716 | 2588 |
 | s201/free09-ride3, free09-ride2 | 2373..2893 (521) | 2575, 2705 | — |
 
-  In all: 9 put-backs and 3 wreck entries across the s74 files, which is what rider_anim.rs asks for. The
+  In all: 9 put-backs and 3 wreck entries across the s74 files, the counts rider_anim.rs asks for (not run;
+  see below). The
   s201 pair came from S201's own `entry_watch.py` and `play_entry.sh`, unchanged.
 
 ## The check fails, and not because of a regression
@@ -47,11 +48,14 @@ Task C47. 2026-11-22.
 
 **Bisect.** I built S201's own commit (aeec49464) in a spare worktree and ran its riding_spring on the new
 captures. It fails the same way, with the same numbers: 0.0601 entries, the 2.4/2.65 ft openings, 0.134 ft at
-free06-down 3121. So the riding code since 11-02 did not cause this. The new ride captures differ from the
-ones S74/S201 measured against, and the riding model does not follow them.
+free06-down 3121. So for the entry and spring tests, the riding code since 11-02 did not cause this. The
+give test (the_riding_body_gives_as_the_originals) came later, with S90 (28eb97f13), so this bisect says
+nothing about its 306 misses.
 
-The big misses sit on the opening stretch, before any put-back. That points at the ride itself, for example
-a landing or a bump the old live-pad rides never hit, rather than at the put-back entry.
+The big misses sit on the opening stretch, before any put-back, all at node 4. Two causes fit, and I did
+not tell them apart:
+- the ride itself, for example a landing or a bump the old live-pad rides never hit;
+- a different read phase, from tape playback at speed 0.3 rather than S74's live pad.
 
 **Captures parked.** All slots share `context/`, so leaving these files in `context/s74` and `context/s201`
 would turn riding_spring red at every gate. I moved them to `context/c47/s74/` and `context/c47/s201/`; the
@@ -73,7 +77,7 @@ tapes are in `context/c47/`. Moving the two folders back restores them.
 
 ## Next
 
-Follow-up task S (filed): find why the riding model misses the new ride captures' openings and settled
+The check is not met: with the captures parked, riding_spring skips again. C47 is blocked on S509 (filed): find why the riding model misses the new ride captures' openings and settled
 stretches (part 2 / node 4, up to 2.65 ft), with `context/c47/s74` as the input. When it is fixed, or the
 bounds are re-measured, move `context/c47/s74` and `context/c47/s201` back to `context/` and run riding_spring,
 rider_anim and motion.
