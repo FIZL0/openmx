@@ -32,7 +32,8 @@
 //! bike and the rider, and on the sweep the categories 0x8 and 0x800 — is none of the scenery's. The
 //! path cars are the world's toys, in its moving list, as the plane's world holds them (S171). The
 //! other riders' bikes are in its nearby list too, and [`WreckBike::tick_ridden`] hands them in
-//! (S134). A world with neither gets [`NoObjects`].
+//! (S134), and with them the race gates, the list's last entries ([`WreckBike::tick_gated`], S503).
+//! A world with neither gets [`NoObjects`].
 
 #![deny(clippy::float_arithmetic)]
 
@@ -445,6 +446,24 @@ impl WreckBike {
     /// ([`flight_search::Bike::in_world`] off), so the search skips it. The answer is the mirrors each
     /// rider's record took, in the riders' order.
     pub fn tick_ridden(&mut self, dt: F, ground: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>, riders: Riders<'_>) -> Vec<Vec<contact::Contact>> {
+        self.tick_gated(dt, ground, props, trees, riders, &[])
+    }
+
+    /// [`WreckBike::tick_ridden`] with the race gates in its world too (S503): the original's nearby
+    /// list holds the toys, the riders' bikes, then the gates (category [`flight_search::GATE`]), and
+    /// all three are handed in together ([`Scene::gated`]). The original's gates have their nearby bit
+    /// clear, so its searches list them and never test them; a gate with the bit set is paired as the
+    /// hierarchy it is (the ray probe's box gate then its parts, the sweep's parts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_gated(
+        &mut self,
+        dt: F,
+        ground: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        riders: Riders<'_>,
+        gates: &[flight_search::Gate<'_>],
+    ) -> Vec<Vec<contact::Contact>> {
         let Riders { bikes, chassis, colliders } = riders;
         let rays = ray_tree();
         let bounds = ground.map(|f| {
@@ -453,7 +472,7 @@ impl WreckBike {
         });
         let velocities: Vec<Vf> = chassis.iter().map(|c| c.velocity).collect();
         let mut nearby = flight_search::search();
-        let mut scene = Scene::flown(props, trees, Some(bikes), bounds, &rays, &self.record.node, &mut nearby).owned(&velocities);
+        let mut scene = Scene::flown(props, trees, Some(bikes), bounds, &rays, &self.record.node, &mut nearby).owned(&velocities).gated(gates);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(velocities.iter().map(|_| Record { capacity: crate::rider_contact::CAPACITY, ..Record::default() }));

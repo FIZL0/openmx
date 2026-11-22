@@ -1260,6 +1260,10 @@ pub struct Scene<'a> {
     wrecks_at: usize,
     wrecked_from: usize,
     wreck_facets: std::collections::HashMap<usize, Vec<Facet>>,
+    /// The race gates in the wreck bike's search (S503, [`Scene::gated`]), as the knocks.
+    gates: &'a [Gate<'a>],
+    gates_at: usize,
+    gate_facets: std::collections::HashMap<usize, Vec<Facet>>,
 }
 
 /// What the plane's record keeps as struck for a downed wreck bike's hull (F35): [`WRECKED`] and its
@@ -1295,6 +1299,39 @@ pub struct Knock<'a> {
 pub struct Knocks<'a> {
     pub knocks: &'a [Knock<'a>],
     pub asleep: &'a [bool],
+}
+
+/// A race gate's collidable's category (`+0x84`, S503): the game's base word with the `WAYPOINTGATE`
+/// name bit, as every gate in the s62 and c33 images has it.
+pub const GATE: u32 = 0x20_0020;
+
+/// What the record keeps as struck for part `p` of the gates' parts, counted across [`Scene::gated`]'s
+/// gates in order: `GATES + p`.
+pub const GATES: usize = 1 << 21;
+
+/// **A race gate as the wreck bike's search meets it** (S503): `col\machineracegate.col`'s hierarchy,
+/// placed where the waypoint stands it. Its sphere (`+0x40`, `+0x60`) is what the gather measures and
+/// the sweep's sphere test reads; its box (`+0x120` centre, `+0x130` half extents, in its frame
+/// `+0x1a0`) gates the ray probe; its parts (`+0x200` count, `+0x204` switches, `+0x214` list) are
+/// meshes each on its own transform. `nearby` is the collidable's `+0x31` bit 0: clear on every gate
+/// in the original's images, so its nearby searches list a gate but never test it.
+#[derive(Clone, Copy, Debug)]
+pub struct Gate<'a> {
+    pub centre: Vf,
+    pub radius: F,
+    pub box_centre: Vf,
+    pub half: Vf,
+    pub frame: Mat4,
+    pub parts: &'a [GatePart<'a>],
+    pub nearby: bool,
+}
+
+/// One of a [`Gate`]'s parts: its mesh, where it stands, and whether it is switched on.
+#[derive(Clone, Copy, Debug)]
+pub struct GatePart<'a> {
+    pub mesh: &'a track::Mesh,
+    pub transform: Mat4,
+    pub enabled: bool,
 }
 
 /// A prop's ray probe's listeners (S200), in the order the prop's init puts them on it: the prop's
@@ -1854,6 +1891,9 @@ impl<'a> Scene<'a> {
             wrecks_at: 0,
             wrecked_from: 0,
             wreck_facets: std::collections::HashMap::new(),
+            gates: &[],
+            gates_at: 0,
+            gate_facets: std::collections::HashMap::new(),
         }
     }
 
@@ -1954,6 +1994,40 @@ impl<'a> Scene<'a> {
             self.nearby.found.push(world_search::Candidate { object: self.wrecks_at + j, distance });
         }
         self
+    }
+
+    /// **The race gates in the wreck bike's search** (S503): each a collidable after the world's (and
+    /// the knocks' and wrecks'), category [`GATE`], struck, colliding with every category, a candidate
+    /// of the nearby list after what the broad phase gathered — the original's list holds the toys,
+    /// the bikes, then the gates, gathered wherever they are — by the gather's distance from the ray
+    /// probe's centre ([`broad_phase::reach_distance`] of its sphere). A gate has no collision record,
+    /// so a hit on one is only itself, a part's [`GATES`] number, standing still. The original's gates
+    /// are never tested ([`Gate::nearby`] clear), so their being here changes nothing it does.
+    pub fn gated(mut self, gates: &'a [Gate<'a>]) -> Scene<'a> {
+        let (centre, _) = reach(self.rays, &self.transform);
+        self.gates = gates;
+        self.gates_at = self.objects.objects.len();
+        for (g, gate) in gates.iter().enumerate() {
+            self.objects.objects.push(Collidable {
+                class: Class::Object,
+                flags: flags::ENABLED,
+                nearby: gate.nearby,
+                radius: gate.radius,
+                category: GATE,
+                collides_with: 0xffff_ffff,
+                categories: any_category(),
+                ..Collidable::default()
+            });
+            let distance = broad_phase::reach_distance(four(gate.centre), gate.radius, four(centre));
+            self.nearby.found.push(world_search::Candidate { object: self.gates_at + g, distance });
+        }
+        self
+    }
+
+    /// The race gate `g`, when `other` is one of [`Scene::gated`]'s collidables.
+    fn gate(&self, other: usize) -> Option<usize> {
+        let g = other.checked_sub(self.gates_at).filter(|_| self.gates_at != 0)?;
+        (g < self.gates.len()).then_some(g)
     }
 
     /// The downed wreck bike `j`, when `other` is one of [`Scene::wrecking`]'s collidables.
@@ -2137,6 +2211,53 @@ impl Scene<'_> {
 }
 
 impl Scene<'_> {
+    /// A probe's narrow phase against race gate `g` (S503): the ray probe's hierarchy case (the box in
+    /// the gate's frame, then each switched-on part), the sweep's (its sphere, then every part).
+    fn pair_gate(&mut self, probe: usize, g: usize) -> bool {
+        let gate = self.gates[g];
+        let first = GATES + self.gates[..g].iter().map(|o| o.parts.len()).sum::<usize>();
+        if probe == RAY {
+            let mut cache = std::mem::take(&mut self.gate_facets);
+            for (j, p) in gate.parts.iter().enumerate() {
+                cache.entry(first + j).or_insert_with(|| facets(p.mesh));
+            }
+            let parts: Vec<ray_probe::Part> = gate
+                .parts
+                .iter()
+                .enumerate()
+                .map(|(j, p)| ray_probe::Part {
+                    enabled: p.enabled,
+                    mesh: ray_probe::Mesh {
+                        id: (first + j) as u32,
+                        transform: p.transform.0,
+                        root: 0,
+                        nodes: &p.mesh.nodes,
+                        facets: &cache[&(first + j)],
+                        vertices: &p.mesh.vertices,
+                    },
+                })
+                .collect();
+            let group = ray_probe::Hierarchy { centre: gate.box_centre, half: gate.half, frame: gate.frame.0, parts: &parts };
+            let rays = self.rays;
+            let probe = RayProbe { transform: self.transform, root: rays.root, nodes: &rays.nodes, segments: &rays.segments };
+            let hit = ray_probe::pair(&probe, &ray_probe::Shape::Hierarchy(group), &mut self.ray);
+            self.gate_facets = cache;
+            hit
+        } else {
+            let parts: Vec<sweep_probe::Placed> = gate
+                .parts
+                .iter()
+                .enumerate()
+                .map(|(j, p)| sweep_probe::Placed { transform: p.transform.0, mesh: MeshRef::of(p.mesh), object: first + j })
+                .collect();
+            let target =
+                sweep_probe::Target { nearby: gate.nearby, centre: gate.centre, radius: gate.radius, shape: sweep_probe::Shape::Hierarchy(&parts) };
+            sweep_probe::pair(&mut self.sweep, Some(&target))
+        }
+    }
+}
+
+impl Scene<'_> {
     /// A probe's narrow phase against trunk `j` of the world's trees, collidable `other`: a prop's.
     fn pair_trunk(&mut self, probe: usize, other: usize, j: usize) -> bool {
         let Some(trees) = self.trees else { return false };
@@ -2185,6 +2306,9 @@ impl Narrow for Scene<'_> {
     fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
 
     fn pair(&mut self, _objects: &mut [Collidable], probe: usize, other: usize) -> bool {
+        if let Some(g) = self.gate(other) {
+            return self.pair_gate(probe, g);
+        }
         if let Some(j) = self.wreck(other) {
             return self.pair_wreck(probe, other, j);
         }
@@ -2388,11 +2512,14 @@ pub fn movers(props: &[Prop]) -> Vec<crate::contact::Mover> {
     props.iter().map(|p| p.moving.map(|m| m.mover()).unwrap_or_default()).collect()
 }
 
-/// The category of what [`Scene`] reports as struck: a downed wreck bike's hull ([`WRECKED`]) is
+/// The category of what [`Scene`] reports as struck: a race gate's part ([`GATES`]) is [`GATE`], a
+/// downed wreck bike's hull ([`WRECKED`]) is
 /// [`crate::wreck_bike::COLLIDABLE`], a knockable prop's ([`KNOCKED`]) is a prop's collidable's, another plane's ([`PLANES`]) is [`crate::flight::COLLIDABLE`], a trunk's
 /// ([`TREES`]) is [`TREE`], a bike's ([`BIKES`]) is [`BIKE`], every prop's is scenery.
 pub fn category(object: usize) -> u32 {
-    if object >= WRECKED {
+    if object >= GATES {
+        GATE
+    } else if object >= WRECKED {
         crate::wreck_bike::COLLIDABLE
     } else if object >= KNOCKED {
         crate::prop_world::COLLIDABLE

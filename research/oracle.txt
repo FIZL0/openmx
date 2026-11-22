@@ -9051,6 +9051,20 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # kind-0 entries name P1's record on 5999 (2), 6000 (2), 6001 (1); P1's record takes the kind-1 mirrors.
 # Resolve 0x00270dc0 order in a frame: the wreck bike's four substeps, then P1's record's — P1's chassis is the
 # previous frame's through the wreck bike's step, and the wreck bike's resolve leaves its velocity unchanged.
+# S503 — the race gates in the wreck bike's nearby list (flight_search::Gate, Scene::gated, WreckBike::tick_gated;
+# proof tests/wreck_bike.rs a_wreck_bike_meeting_a_gate_replays_bit_exact; journal 2026-11-22-s503-wreck-bike-gates).
+# Gate collidable (vtable 0x451c10, class 2 at +2): +0x31 bit 0 the nearby bit, CLEAR on every gate in all
+# five s62 states and in c33/free09-ai4.ee.bin (the race), so the nearby searches list gates and never test
+# them. +0x40 sphere centre, +0x60 radius (43.277), +0x84 category 0x200020, +0xcc collides 0xffffffff,
+# +0xe8 category list mode 1 empty, +0x116 flags 0x14/0x54/0xd4, kind (+0x68) 1. +0x120 box centre (local,
+# ~(-0.028, 7.09, -0.012)), +0x130 half extents (33.39, 27.43, 2.30), +0x140 world box centre, +0x150 world
+# half, +0x160 and +0x1a0 the frame. +0x200 part count 2 (machineracegate.col's two), +0x204 switches,
+# +0x214 part list; a part is a 0x250-byte mesh (vtable 0x451b50, +0x78 the gate, +0x120 its transform =
+# the gate's frame, +0x230 0: no skeleton, no bone bound). side-2607: gate 0x016af9c0 (15.3 ft gather
+# distance). Collision node 0x00e17ef0 (+0x30 count 5, +0x38 array): 0x00c70bf0, record 0x01035d10 (AI
+# bike 0x1034c00), the wreck bike's record 0x00dfe560, 0x015ac000, 0x00c8ab40; 0x0026f800 on it with each
+# row's dt gives side.csv's bike_a body bit for bit. With the bike's velocity poked to 60 ft/s at the
+# gate's near post and the gate's +0x30 word | 0x100, the bike strikes the gate at 2644; the port follows.
 
 # --- P157: the thrill camera, the manager's +0x64 (crates/game-sim/src/camera.rs Thrill, crates/openmx/
 #   src/chase.rs OtherCamera, wired in openmx's ride loop; proof crates/openmx/tests/thrill_camera.rs) ---
