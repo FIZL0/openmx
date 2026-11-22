@@ -1234,8 +1234,11 @@ fn a_ride_that_cannot_seat_a_joiner_says_so() {
 
 /// N10's acceptance over the lobby's real connections, on the LAN (mDNS, no relay, no board, nothing
 /// leaves the machine): a host opens its freeride of one ([`peer::Peer::open`], the pause's "Open to
-/// Online"), rides alone, and two peers join it by its room code mid-ride, one after the other, each
-/// through the lobby's handshake and into the session at a tick. From each join's tick every machine
+/// Online"), rides alone, and two peers join it mid-ride, one after the other, each through the lobby's
+/// handshake and into the session at a tick. They join by the host's ticket, as a pasted ticket, not its
+/// room code: the ticket carries the host's addresses, so the join needs no lookup on the machine's one
+/// mDNS group, where every slot's LAN tests answer at once (K38, K85; lobby.rs joins the same way). The
+/// room code lookup on the LAN is openmx-net's own test. From each join's tick every machine
 /// in the ride agrees — the state's hash before every settled tick and the pads it ran — and the
 /// host's ride never went back but for the settled tick at the second join.
 #[test]
@@ -1283,11 +1286,12 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
         // g once the host has ridden two seconds alone and its code is out; k five seconds after g is in
         if !asked[0] && tick >= 60 && !short.is_empty() {
             assert!(peers[0].room.as_ref().unwrap().riding, "the room is the ride");
-            peers[1].net.send(Cmd::Join(short.clone(), vec![on("thq2", "pro250a", 2)]));
+            assert!(!peers[0].ticket.is_empty(), "the host's ticket is out before its room code");
+            peers[1].net.send(Cmd::Join(peers[0].ticket.clone(), vec![on("thq2", "pro250a", 2)]));
             asked[0] = true;
         }
         if !asked[1] && joins == 1 && tick >= h.np.admit.joins[0].1 as usize + AFTER {
-            peers[2].net.send(Cmd::Join(short.clone(), vec![on("thq3", "race125p", 1), on("thq4", "race125p", 0)]));
+            peers[2].net.send(Cmd::Join(peers[0].ticket.clone(), vec![on("thq3", "race125p", 1), on("thq4", "race125p", 0)]));
             asked[1] = true;
         }
         if joins == 2 && h.np.settled() > h.np.admit.joins[1].1 as i64 + AFTER as i64 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.settled() > h.np.admit.joins[1].1 as i64 + AFTER as i64)) {
