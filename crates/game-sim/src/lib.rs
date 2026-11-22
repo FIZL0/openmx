@@ -423,6 +423,12 @@ impl Sim {
         }
     }
 
+    /// [`Sim::parked_cars_sleep`] for the cars a driven car's frame stepped (S499,
+    /// [`car::cars_from_car`]), whose Sim is not stepped while its car is up.
+    pub fn parked_cars_rest(&mut self, resting: &[bool]) {
+        self.parked_cars_sleep(resting);
+    }
+
     /// The pad half of a frame: the device manager's update, and the rider's hands off it.
     ///
     /// Split out of [`Sim::frame`] for the shell, which reads the pad on every frame and rides on
