@@ -1,0 +1,5 @@
+# S158 scout: hold the gas (Cross) straight on.
+release
+sleep 30t
+down cross
+sleep 1800t
