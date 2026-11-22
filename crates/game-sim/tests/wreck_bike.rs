@@ -1049,6 +1049,7 @@ fn a_wreck_bike_into_a_riders_bike_replays_bit_exact() {
         }
         let dt = F(cap.get(f, "dt"));
         let riders = Riders { bikes: Bikes { mesh: &mesh, bikes: &bikes }, chassis: &mut chassis, colliders: &mut colliders };
+        assert!(ridden.struck.struck.is_empty(), "tick {f}: a prop struck the wreck bike; the riders are not first among its others");
         let mirrors = ridden.tick_ridden(dt, Some(&field), Some(&props), None, riders);
         let want = ee_body(&ee, body);
         let differ = bodies_differ(&ridden.body, &want);
@@ -1066,8 +1067,13 @@ fn a_wreck_bike_into_a_riders_bike_replays_bit_exact() {
         for (p, m) in mirrors.iter().enumerate() {
             let r = records[p];
             let at = ee.u32_at(r + 0x108);
-            let theirs = (0..ee.u32_at(r + 0x100)).filter(|&k| ee.u32_at(at + 0x80 * k) == 1 && ee.u32_at(at + 0x80 * k + 0x74) == SPLIT_WRECK.1).count();
-            assert_eq!(m.len(), theirs, "tick {f}: the mirrors on rider {p}'s record");
+            let theirs: Vec<[[u32; 4]; 2]> = (0..ee.u32_at(r + 0x100))
+                .map(|k| at + 0x80 * k)
+                .filter(|&e| ee.u32_at(e) == 1 && ee.u32_at(e + 0x74) == SPLIT_WRECK.1)
+                .map(|e| [quad(&ee, e + 0x30).to_bits(), quad(&ee, e + 0x40).to_bits()])
+                .collect();
+            let ours: Vec<[[u32; 4]; 2]> = m.iter().map(|e| [e.normal.to_bits(), e.point.to_bits()]).collect();
+            assert_eq!(ours, theirs, "tick {f}: the mirrors (normal, point) on rider {p}'s record");
             mirrored += m.len();
         }
         struck += usize::from(got.iter().any(Option::is_some));

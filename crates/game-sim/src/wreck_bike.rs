@@ -441,7 +441,9 @@ impl WreckBike {
     /// owned by its rider's collision record, which takes the mirror. Each rider `k` is its bike, its
     /// chassis as the other side of a contact and its record's collision object, as the frame before
     /// left them: the wreck bike's world steps before the riders' does, and nothing of the riders moves
-    /// under its substeps. The answer is the mirrors each rider's record took, in the riders' order.
+    /// under its substeps. The wrecked rider's own bike may be among them: it has left the world
+    /// ([`flight_search::Bike::in_world`] off), so the search skips it. The answer is the mirrors each
+    /// rider's record took, in the riders' order.
     pub fn tick_ridden(&mut self, dt: F, ground: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>, riders: Riders<'_>) -> Vec<Vec<contact::Contact>> {
         let Riders { bikes, chassis, colliders } = riders;
         let rays = ray_tree();

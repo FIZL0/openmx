@@ -51,7 +51,7 @@ as the frame before left them. Every tick:
 
 - The body is the original's to the bit.
 - Its entries name P1's record where the original's do.
-- P1's record takes as many mirrors as the original's.
+- P1's record takes the original's mirrors, normal and point to the bit.
 - The chassis handed in comes back unchanged.
 
 The same bike ticked by `tick_among`, without the bikes, parts at 5999. Ticks striking a bike: 3. Mirrors
@@ -62,7 +62,9 @@ filed: 5.
 - No game loop calls `tick_ridden` yet. The 2p ride's wreck still ticks with `tick_among`, and the
   mirrors are not filed on the struck rider's list: follow-up S502.
 - Toys (0x48): path cars are in the moving list already (S171). None was near this wreck, so the two
-  together are untested. 0x200020 objects (the gates) are still not handed in.
+  together are untested. 0x200020 objects (the gates) are still not handed in: follow-up S503.
+- The test has no prop striking the wreck bike, so the riders' renumbering after struck props is not
+  exercised.
 - Only one wreck: a wreck bike ray-striking a riding bike. A bike's sweep hit, a resolve that pushes the
   chassis, and the long ride's slow rub of P2 on P1's wreck bike (3414) are not checked.
 - Frame 5998's interpreter row is not compared with the capture's.
