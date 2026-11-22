@@ -12,6 +12,8 @@ Task T11. 2026-11-21.
 - `tests/web/firefox_gamepad.mjs` now starts Firefox under bubblewrap with an empty tmpfs over /dev/input
   (and over /run/udev, the udev database), the rest of the machine bound as it is. Firefox then sees only
   the pad from its own gamepad test service. Without bwrap it runs as before and says so on stderr.
+- bwrap also gets `--unshare-pid`: killing bwrap ends the namespace, so Firefox and its content processes
+  all go (checked with a `sh -c 'sleep & sleep'` child: both gone after bwrap was killed).
 - No timeout widened.
 
 ## What the original does
@@ -27,6 +29,8 @@ Not about the original: a test harness fix.
     the gate's failure and worse.
   - With the fix, `./kit check --rerun "-p openmx --test web -- a_firefox_pad_rides"` under the same
     presses: passed (gas 0.14, brake 0, webgl2).
+  - With `--unshare-pid` added, the whole `-p openmx --test web` under the same presses: 13 passed, none
+    skipped, 2 ignored (the two `#[ignore]` ones).
 
 ## Not verified / not 1:1
 
