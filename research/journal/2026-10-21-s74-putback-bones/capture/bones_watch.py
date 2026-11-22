@@ -4,6 +4,9 @@ r"""S74: the rider's drawn skeleton through the put-back and its ghost, once a t
     ./kit pcsx2 with -- python3 -B research/journal/2026-10-21-s74-putback-bones/capture/bones_watch.py \
         --state 6 --script ride --out context/s74/free06-ride.txt
 
+With `--attach` (C47) it loads nothing and plays no pad: a tape made by C47's `bones_tape.py` plays the
+script, and the watcher logs `--frames` ticks from `--after` (see C47's `play_bones.sh`).
+
 Loads the state, finds the human's bike (type 2, control source 1) and its rider body actor (the type-4
 record less 0x400 whose request block +0x488 is the bike's +0xb80), and logs every tick, as hex, while
 S66's pad scripts play on the kit pad in a thread:
@@ -59,15 +62,38 @@ def main() -> int:
     ap.add_argument('--script', choices=sorted(SCRIPTS), default='ride')
     ap.add_argument('--seconds', type=float, default=18.0)
     ap.add_argument('--out', required=True)
+    # C47: with no pad at full speed, a tape plays the script instead (C47's `bones_tape.py`, played by
+    # its `play_bones.sh`): attach waits up to this many seconds for the tape's state to load and the
+    # frame counter to reach --after, loads nothing and sends no pad commands; it then logs --frames ticks.
+    ap.add_argument('--attach', type=float, default=0.0)
+    ap.add_argument('--after', type=int, default=0, help='with --attach: the first frame to log')
+    ap.add_argument('--frames', type=int, default=540, help='with --attach: how many ticks to log')
     a = ap.parse_args()
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     p = Pine()
-    p.load_state(a.state)
-    t0 = time.time()
-    while time.time() - t0 < 2.5:
-        time.sleep(0.05)
-    bike = human_bike(p)
-    body = rider_body(p, bike) if bike else 0
+    if a.attach:
+        # The tape's load is the frame counter jumping (the Reset before it zeroes the counter).
+        t0 = time.time()
+        bike = body = 0
+        last, loaded = None, False
+        while time.time() - t0 < a.attach:
+            f = p.read32(FRAME_COUNTER)
+            if last is not None and abs(f - last) > 100:
+                loaded = True
+            last = f
+            if loaded and f >= a.after - 3:
+                bike = human_bike(p)
+                body = rider_body(p, bike) if bike else 0
+                if body:
+                    break
+            time.sleep(0.05)
+    else:
+        p.load_state(a.state)
+        t0 = time.time()
+        while time.time() - t0 < 2.5:
+            time.sleep(0.05)
+        bike = human_bike(p)
+        body = rider_body(p, bike) if bike else 0
     if not body:
         print('no human bike or rider body')
         return 1
@@ -101,16 +127,21 @@ def main() -> int:
     regions = [r for r in regions if r] + [(f'node{j}', nodes[j], 0xc0) for j in range(n)]
     spans = [(addr, ln) for _, addr, ln in regions]
     th = threading.Thread(target=pad, args=(SCRIPTS[a.script],))
-    th.start()
+    if not a.attach:
+        th.start()
     prev = None
     t0 = time.time()
+    seen = time.time()
     torn = 0
     gaps = 0
-    while time.time() - t0 < a.seconds:
+    while a.attach or time.time() - t0 < a.seconds:
         f = p.read32(FRAME_COUNTER)
-        if f == prev:
+        if a.attach and (f >= a.after + a.frames or time.time() - seen > 20):
+            break  # logged them all, or the tape ended and paused the VM
+        if f == prev or f < a.after:
             time.sleep(0.002)
             continue
+        seen = time.time()
         time.sleep(0.004)
         b = p.settle(spans, f)
         if b is None:
@@ -124,7 +155,8 @@ def main() -> int:
         for name, _, ln in regions:
             out.write(f'{name} {b[o:o + ln].hex()}\n')
             o += ln
-    th.join()
+    if not a.attach:
+        th.join()
     out.write(f'# torn {torn} gaps {gaps}\n')
     out.close()
     print(f'wrote {a.out}, torn {torn}, gaps {gaps}')
