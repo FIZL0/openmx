@@ -1,4 +1,4 @@
-# 1 — woken truck two way contact (PART)
+# 1 — woken truck two way contact (FINAL)
 
 Task S251. 2026-11-21.
 
@@ -50,6 +50,11 @@ Task S251. 2026-11-21.
   wake against the interpreter) was done on S207 ctruck's new images instead.
 - Every bike's frame on the truck's node is player 1's frame mesh: one mesh for all players, as
   `Sim::car_contacts` already does. A two-player strike was not captured.
+- A woken truck lying at rest under a bike now has its body turned back on by its own rays' hit on
+  the bike's frame (S239's rule for a prop, applied to the truck's search). Not captured for a truck;
+  `tests/truck_wheel.rs` no longer asserts the truck stays put under a dropped bike.
+- The path mesh stays stood down for the whole physical span (S208 stood it down only for each
+  search); the put-back restoring it is not tested apart from the rides that reach it.
 - The bikes' body rays and sweep do not file the f.col: not needed on ctruck (the original's lists show
   only mirrors), not read for a bike driving fast into a woken truck.
 - Main's replay row for ctruck (36) was for S207's lost capture; with the new csv in the shared context
