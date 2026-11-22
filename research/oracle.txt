@@ -9039,6 +9039,13 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # 0.0917431191, velocity +0x260. Record: mass 12.4224/0.0805, inverse inertia (0,0,0,1), cofg 0, +0xf0 the
 # chassis, +0xf4 0 (no body), +0x1f8 the collidable, actors +0x110 0x2008, collides +0x114 0xffffffff.
 # Against the wreck bike (collidable 0x9a058, actors 8, collides 0x40000) a bike is an actor contact, not mutual.
+# 2026-11-21, done: S93's short split ride (context/states/s93/s93-short-5997.ram, capture/split/splitscreen2.csv)
+# run whole in the interpreter from 5998. P2 wrecks at 5998; its wreck bike's collision record 0x012a4b30
+# (body *(+0xf4) = 0x012a3bc0, record - 0xf70; collidable 0x012a4270, node 0x012e4fc0; P1's 0x01333240).
+# Riders' vehicles 0x00c1f810 / 0x012e3ad0, records *(+0x7d0) 0x013311a0 / 0x012a3420. The wreck bike's
+# kind-0 entries name P1's record on 5999 (2), 6000 (2), 6001 (1); P1's record takes the kind-1 mirrors.
+# Resolve 0x00270dc0 order in a frame: the wreck bike's four substeps, then P1's record's — P1's chassis is the
+# previous frame's through the wreck bike's step, and the wreck bike's resolve leaves its velocity unchanged.
 
 # --- P157: the thrill camera, the manager's +0x64 (crates/game-sim/src/camera.rs Thrill, crates/openmx/
 #   src/chase.rs OtherCamera, wired in openmx's ride loop; proof crates/openmx/tests/thrill_camera.rs) ---
