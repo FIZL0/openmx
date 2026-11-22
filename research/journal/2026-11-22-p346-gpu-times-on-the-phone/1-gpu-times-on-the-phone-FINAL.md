@@ -90,6 +90,9 @@ Not applicable: frame timing on the phone is ours (AGENT.md, rendering).
   the CPU came on a different build and ride; neither ride here showed that pattern, so whether those
   were the GPU or the compositor is still open. With the timer fixed, any new phone log answers it: a
   stall second's `gpu … (worst N)` over 16.7 ms is the GPU.
+- **No change or test in `crates/openmx/src/ios_gpu.rs`**, the task's file. The surface code there was
+  not what held the drawable (the GPU was), and the fix is in the shared GPU timer. A desktop test cannot
+  show Metal's ordering, so the proof is the phone logs, not an "ios present stalls" test.
 - **Only the iPhone 15 Pro, two rides** (sx01 129 s, world_ultra 350 s), touch only, phone on USB power.
 
 ## Next
