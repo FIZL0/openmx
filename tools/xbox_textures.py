@@ -219,8 +219,8 @@ def look_apart(a, b):
         if h >= 4 and w >= 4: c = c.reshape(h // 4, 4, w // 4, 4, 4).mean((1, 3))
         return c
     d = np.abs(flat(a) - flat(b)); d = d[..., :3].mean(-1) + d[..., 3] / 2
-    h, w = d.shape; ry, rx = max(h // 4, 1), max(w // 4, 1)
-    return float(max(d[y:y + ry, x:x + rx].mean() for y in range(0, h, ry) for x in range(0, w, rx)))
+    return float(max(r.mean() for band in np.array_split(d, min(4, d.shape[0]), 0)
+                     for r in np.array_split(band, min(4, d.shape[1]), 1)))
 
 PAGE = """<title>Xbox Texture Picks</title>
 <meta name="claude:viewport-fit-sides" content="cover">
@@ -258,7 +258,7 @@ ROWS.forEach(r=>{
   const c=document.createElement('div'); c.className='card';
   c.innerHTML=`<div class="pics"><figure><img loading="lazy" src="img/${r.f}.ps2.png" alt=""><figcaption>PS2</figcaption></figure>`+
     `<figure><img loading="lazy" src="img/${r.f}.xbox.png" alt=""><figcaption>Xbox</figcaption></figure></div>`+
-    `<label class="pick"><input type="checkbox"><span class="name"></span></label><div class="meta"></div>`;
+    `<div class="pick"><input type="checkbox"><span class="name"></span></div><div class="meta"></div>`;
   c.querySelector('.name').textContent=r.stem;
   c.querySelector('.meta').textContent=`${r.size} · ${r.rel}${r.n>1?` · and ${r.n-1} more`:''} · apart ${r.d}`;
   const box=c.querySelector('input');
@@ -285,7 +285,7 @@ document.getElementById('send').onclick=async()=>{
 </script>
 """
 
-def differ(src, xd, out, least=8.0):
+def differ(src, xd, out, least=12.0):             # 12: below it the pairs looked the same by eye (P383a)
     """Score every same-size pair (`look_apart`) into `out/differ.tsv`, most apart first; the stems whose
     worst pair is at least `least` apart go on `out/index.html`, a page to tick the Xbox pictures to keep
     (pictures in `out/img/`, at most 256 px). One card a stem, as `KEEP` names them. How many on the page."""
@@ -324,7 +324,7 @@ def differ(src, xd, out, least=8.0):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["differ"]:
         # xbox_textures.py differ TEXTURES_SRC XBOX_DIR OUT [--least D]  (needs PIL: uv run --with pillow,numpy)
-        a = sys.argv[2:]; least = float(a[a.index("--least") + 1]) if "--least" in a else 8.0
+        a = sys.argv[2:]; least = float(a[a.index("--least") + 1]) if "--least" in a else 12.0
         differ(*a[:3], least=least)
     elif sys.argv[1:2] == ["pack"]:
         # xbox_textures.py pack TEXTURES_SRC XBOX_DIR OUT [--keep NAME ...]  (OUT: mods/xbox-textures)

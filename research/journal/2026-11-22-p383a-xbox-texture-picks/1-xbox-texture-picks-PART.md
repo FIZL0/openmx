@@ -12,7 +12,11 @@ Task P383a. 2026-11-22.
   per pixel) and the other 6 (free09/free11 `*_mask`) within 14; the 18 files whose palette alpha is all 0
   (`namedefault*`) are all-transparent on the PS2 too. Forcing 255 is what made the 0x37 logos and fonts
   top the first scoring at 255 "apart". `tools/xbox_textures.py` now keeps it; the test fixture
-  (`crates/openmx/tests/xbox_textures.rs`) is made opaque to match; research/mxu-xbox.md corrected.
+  (`crates/openmx/tests/xbox_textures.rs`) is made opaque to match; research/mxu-xbox.md corrected. Kept in
+  this task (the spec review flagged it as unasked): without it the page would lead with ~200 logos whose
+  only "difference" is the decoder's lost alpha, and a later pick of a 0x37 picture would pack it opaque.
+- Spec review fixes: clicking a card's name toggled twice (label + handler), now once; the 16 scoring regions
+  are even (`np.array_split`; a leftover strip could make more); `differ`'s default cut-off is 12, the page's.
 - New `xbox_textures.py differ TEXTURES_SRC XBOX_DIR OUT [--least D]` (needs PIL: `uv run --with pillow
   --with numpy`): scores each same-size pair by how different it looks (both laid on grey by alpha,
   averaged over 4×4 cells so DXT block noise and palette dither count little; mean colour distance plus
