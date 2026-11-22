@@ -153,7 +153,8 @@ pub fn import_mxa(mods: &Path) -> Vec<String> {
         let result = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| stitch::mxa::open(&b)).and_then(|t| {
             let id = stitch::mxa::mod_id(&t)?;
             match made_from(&id) {
-                Some(other) if other != name && dir.join(&other).is_file() => Err(format!("the same track as {other}, made {id} already")),
+                Some(other) if other != name && dir.join(&other).is_file() => Err(format!("the same mod id as {other}, made {id} already")),
+                None if dir.join(&id).exists() => Err(format!("tracks/{id} is there and was not made from an .mxatrack")),
                 _ => {
                     let json = o(vec![("file", s(name.clone())), ("bytes", J::N(bytes)), ("modified", J::N(modified))]);
                     Ok(stitch::mxa::write_mod(&t, &dir, json)?)
@@ -457,7 +458,7 @@ mod tests {
         let log = scan(&mods).log;
         assert_eq!(log.len(), 2, "{log:?}");
         assert!(log[0].starts_with("mods: tracks/broken.MXATRACK left out: "), "{log:?}");
-        assert_eq!(log[1], "mods: tracks/two.mxatrack left out: the same track as one.mxatrack, made mxa_testtrack1 already");
+        assert_eq!(log[1], "mods: tracks/two.mxatrack left out: the same mod id as one.mxatrack, made mxa_testtrack1 already");
         // Saved over (another size), it is made again.
         let titled = stitch::mxa::Track { title: "Test Track Two".into(), ..t };
         std::fs::remove_file(mods.join("tracks/two.mxatrack")).unwrap();
@@ -465,6 +466,12 @@ mod tests {
         let again = scan(&mods);
         assert!(again.log.contains(&"mods: tracks/one.mxatrack made the track mod mxa_testtrack1".to_string()), "{:?}", again.log);
         assert_eq!(again.tracks[0].name, "Test Track Two");
+        // A folder of that id not made from an .mxatrack is not written over.
+        let hand = stitch::mxa::Track { id: "hand_made".into(), ..titled };
+        std::fs::create_dir_all(mods.join("tracks/mxa_handmade")).unwrap();
+        std::fs::write(mods.join("tracks/hand.mxatrack"), stitch::mxa::package(&hand, "")).unwrap();
+        let log = scan(&mods).log;
+        assert!(log.contains(&"mods: tracks/hand.mxatrack left out: tracks/mxa_handmade is there and was not made from an .mxatrack".to_string()), "{log:?}");
         let _ = std::fs::remove_dir_all(&mods);
     }
 

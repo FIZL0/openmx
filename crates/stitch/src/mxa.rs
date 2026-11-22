@@ -186,7 +186,11 @@ fn ground(t: &mut Track, b: &[u8]) -> Result<(), String> {
         }
     }
     let (lo, hi) = ([v[0], v[1], v[2]], [v[3], v[4], v[5]]);
-    if lo[0] != -t.width / 2.0 || lo[2] != -t.depth / 2.0 || hi[0] != t.width / 2.0 || hi[2] != t.depth / 2.0 || hi[1] <= lo[1] || hi[1] - lo[1] > 65536.0 {
+    // Within a hundredth of a foot (the editor's float arithmetic is not ours), and a flat track's
+    // bounds may be no taller than its one height.
+    let near = |a: f32, b: f32| (a - b).abs() <= 0.01 + b.abs() * 1e-5;
+    let slack = |h: f32| 0.01 + h.abs() * 1e-5;
+    if !near(lo[0], -t.width / 2.0) || !near(lo[2], -t.depth / 2.0) || !near(hi[0], t.width / 2.0) || !near(hi[2], t.depth / 2.0) || hi[1] < lo[1] || hi[1] - lo[1] > 65536.0 {
         return Err("collision.msc: its bounds are not the track's".into());
     }
     if r.u32()? != t.resolution || r.u32()? != t.rows || r.u32()? != u32::from(t.surface) {
@@ -196,7 +200,7 @@ fn ground(t: &mut Track, b: &[u8]) -> Result<(), String> {
     let mut heights = Vec::with_capacity(n);
     for _ in 0..n {
         let h = r.f32()?;
-        if !h.is_finite() || h < lo[1] || h > hi[1] {
+        if !h.is_finite() || h < lo[1] - slack(lo[1]) || h > hi[1] + slack(hi[1]) {
             return Err("collision.msc: a height outside its bounds".into());
         }
         heights.push(h);
@@ -354,8 +358,17 @@ pub fn write_mod(t: &Track, tracks: &Path, stamp: J) -> Result<PathBuf, String> 
         meta.insert(4, ("description", s(&t.description)));
     }
     put("mod.json", o(meta).pretty().as_bytes())?;
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::rename(&staged, &dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // The old folder is set aside, not deleted, until the new one is in its place.
+    let old = tracks.join(format!(".{id}.old"));
+    let _ = std::fs::remove_dir_all(&old);
+    let had = std::fs::rename(&dir, &old).is_ok();
+    if let Err(e) = std::fs::rename(&staged, &dir) {
+        if had {
+            let _ = std::fs::rename(&old, &dir);
+        }
+        return Err(format!("{}: {e}", dir.display()));
+    }
+    let _ = std::fs::remove_dir_all(&old);
     Ok(dir)
 }
 

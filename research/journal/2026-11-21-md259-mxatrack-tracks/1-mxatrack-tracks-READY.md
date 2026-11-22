@@ -1,4 +1,4 @@
-# 1 — mxatrack tracks (PART)
+# 1 — mxatrack tracks (READY)
 
 Task MD259. 2026-11-21.
 
@@ -64,9 +64,22 @@ in 64-cell chunks, then props). Sample (i, j) sits at (−w/2 + i·w/(N−1), h,
   spacing is dropped at the far edge.
 - **Small tracks.** MXA allows 32 ft. A map under about 300 ft is all inside the edge's 150-ft
   band, so the bike is thrown every tick (as with any small map).
+- **Stadium and venue.** `venueId` and the Stadium environment are read but not used. A Stadium
+  track rides as a plain freeride, with no stadium around it.
+- **Bounds slack.** The collision's bounds must match ±width/2 and ±depth/2 within 0.01 ft, and
+  heights must sit inside the bounds within the same slack. A guess at MXA's float rounding, untried
+  on a real file.
+- **Repeat lines and leftovers.** A broken or clashing file is read and logged again at every start.
+  Deleting an `.mxatrack` leaves its mod in place. Two MXA ids that differ only in punctuation share a
+  mod id, and the second is left out.
+- **First list after a drop is slower.** The front end's list builds the terrain the first time it
+  sees a new file (once).
 - **v1/v2 chunk rule.** In collision versions 1 and 2 the ground chunks come first. We check every
   chunk's structure, not that ground count.
 
 ## Next
 
-Ask the person for a real `.mxatrack` made in MXA. Drop it in `mods/tracks/` and ride `mxa_<id>`.
+The person: make a track in MXA Track Studio, save the `.mxatrack`, and put it in `mods/tracks/`
+(or in context/mxa for an agent). Then ride `mxa_<id>` (the front end lists it, or
+`openmx --track mxa_<id>`). If it is left out, the log line says why. The texture, props and stadium
+are MD260.
