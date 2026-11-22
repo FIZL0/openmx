@@ -111,8 +111,12 @@ mod body_at {
 }
 
 fn ram() -> Option<Ee> {
+    ram_of(STATE)
+}
+
+fn ram_of(state: &str) -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let path = kit.ctx("states").join(STATE);
+    let path = kit.ctx("states").join(state);
     if !path.exists() {
         skip(&format!("{} is not there: `./kit state ram` of its save state", path.display()));
         return None;
@@ -452,6 +456,67 @@ fn a_put_away_truck_ticks_to_nothing() {
         assert!(!port.tick(DT, None, None, None));
     }
     assert!(port == before, "a put-away truck moved");
+}
+
+/// S251's strike images (`research/s251/strike.py`): S207's ctruck ride made again from s89-along,
+/// saved on the frame before the bike's strike wakes the company truck and on the strike's frame.
+const STRIKE_BEFORE: &str = "s251-ctruck-12062.eeMemory.bin";
+const STRIKE_AFTER: &str = "s251-ctruck-12063.eeMemory.bin";
+
+/// Player 1's chassis in those images, and its velocity and rates (`research/oracle.txt` S251).
+const PLAYER_CHASSIS: u32 = 0x0087_6da0;
+const CHASSIS_VELOCITY: u32 = 0x260;
+const CHASSIS_RATES: u32 = 0x290;
+
+/// **S251: the wake on a bike's strike, as the bike's search calls it**: the original's wake run in
+/// the interpreter on the image of the frame before the strike (the truck still on its path, its last
+/// update the tick before), against the port's from the same car, and against the strike frame's image.
+#[test]
+fn the_wake_on_a_bikes_strike_is_the_originals() {
+    let Some(mut ee) = ram_of(STRIKE_BEFORE) else { return };
+    let Some(after) = ram_of(STRIKE_AFTER) else { return };
+    let Some(parts) = archives() else { return };
+    let cars = trucks(&ee);
+    let car = *cars.iter().find(|&&c| after.u32_at(c + at::PHYSICAL) != 0).expect("a truck woken on the strike frame");
+    assert_eq!(ee.u32_at(car + at::PHYSICAL), 0, "asleep the frame before");
+    let model = text(&ee, car + at::NAME);
+    let object = ee.u32_at(car + at::OBJECT);
+    let Loaded { car: mut port, .. } = load(&parts, &model, Some(ee_edge(&ee, object)));
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let inv_dt = F(after.f32_at(app + at::INV_DT));
+    ee.set_f32(app + at::INV_DT, inv_dt.0);
+    ee.set_f32(app + at::DT, after.f32_at(app + at::DT));
+
+    let dt = after.f32_at(app + at::DT);
+
+    // The node update alone, on the image before, makes the strike frame: the truck woken, its body
+    // and the bike's chassis as the strike image holds them (the bike's search, its wake and the
+    // two lists' resolves all run under it).
+    let mut whole = ram_of(STRIKE_BEFORE).unwrap();
+    whole.set_f32(app + at::INV_DT, inv_dt.0);
+    whole.set_f32(app + at::DT, dt);
+    whole.call(NODE_UPDATE, &[u64::from(whole.u32_at(object + obj::WORLD_NODE))], &[dt], NODE_BUDGET);
+    assert_ne!(whole.u32_at(car + at::PHYSICAL), 0, "{model}: woken by the node update");
+    let body = whole.u32_at(object + obj::BODY);
+    assert_eq!(quad(&whole, body + body_at::VELOCITY).to_bits()[..3], quad(&after, body + body_at::VELOCITY).to_bits()[..3], "{model}: the body's velocity");
+    for field in [CHASSIS_VELOCITY, CHASSIS_RATES] {
+        assert_eq!(quad(&whole, PLAYER_CHASSIS + field).to_bits()[..3], quad(&after, PLAYER_CHASSIS + field).to_bits()[..3], "the bike's chassis +{field:#x}");
+    }
+
+    // The wake itself, as the bike's search calls it, against the port's from the same car.
+    let mut ours = car_of(&ee, car);
+    let last = mat(&ee, car + at::WORLD_LAST);
+    let node = ee.u32_at(car + at::NODE);
+    ee.call(at::WAKE, &[u64::from(car)], &[], BUDGET);
+    assert!(port.wake(&mut ours, &last, inv_dt), "{model}: the port's wake");
+    let theirs = mat(&ee, node + WORLD_ROWS);
+    assert_eq!(mat_bits(&ours.pose), mat_bits(&theirs), "{model}: the node after the wake");
+    let moving = Moving::of(&last, &ours.pose, inv_dt);
+    let v = virtual_of(&mut ee, car, at::VELOCITY_SLOT, at::VELOCITY);
+    assert_eq!(moving.velocity.to_bits()[..3], v.to_bits()[..3], "{model}: the car's velocity at the wake");
+    let b = ee_body(&ee, body);
+    let differ = bodies_differ(port.body(), &b);
+    assert!(differ.is_empty(), "{model}: the woken body: {differ:?}");
 }
 
 /// A truck on a straight path over flat ground, in the ride (`Sim`), struck on its tenth tick: it

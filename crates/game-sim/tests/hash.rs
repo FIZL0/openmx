@@ -631,7 +631,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 12512 since S494a: the parked helicopters (`Sim::parked_helis`), the same way as the planes.
     // 12536 since F79: the other local seats' bikes (`Sim::ridden_guests`), refilled by the shell
     // every pass, so not walked and not on the wire.
+    // 12608 since S251: the woken cars' strike and node-update lists (`Traffic::stepped`, `probed`,
+    // `ticked`), filled and emptied inside a frame, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12536, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12608, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

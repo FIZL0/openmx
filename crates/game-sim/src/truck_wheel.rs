@@ -31,8 +31,10 @@
 //!
 //! **Not 1:1.** The original's `f.col` is filed from the wake to the put-away, and the port takes it
 //! in reach for the same span ([`PhysicsCar::physical`]); whether the bit drops while the body lies
-//! off before the put-away was not read. The body rays and the sweep still meet the path mesh, not
-//! the `f.col`, and do not push the truck (S251).
+//! off before the put-away was not read. The body rays and the sweep do not file the `f.col`; the
+//! truck's own rays meet the bike instead ([`crate::traffic::Traffic::physics_frame_among`], S251).
+//! On S207 ctruck's tick 51 the rear wheel on the `f.col` gives a force before the resolve that is
+//! not the original's (`research/oracle.txt` S251).
 //!
 //! The trucks are the [`crate::Sim`]'s ([`crate::traffic::Traffic::physics`]), lent to the riding bike
 //! for its frame with the props ([`crate::prop_wheel::Lent`]) and taken back after it.

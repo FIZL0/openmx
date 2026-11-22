@@ -47,7 +47,7 @@
 use std::sync::Arc;
 
 use crate::biplane::Body;
-use crate::contact::{Mover, Node};
+use crate::contact::{Contact, Mover, Node, Other};
 use crate::contact_search::{self, Heightfield};
 use crate::eco::Trees;
 use crate::flight_search::Rays;
@@ -271,6 +271,46 @@ impl PhysicsCar {
         self.set.search(dt, std::slice::from_ref(&*rays), field, props, trees);
         let movers: Vec<Mover> = props.map(|p| crate::flight_search::movers(&p.props)).unwrap_or_default();
         self.step(dt, &movers)
+    }
+
+    /// **[`PhysicsCar::tick`] with the ridden bikes on the node** (S251): the probe's rays strike the
+    /// `bikes`' frames (`mesh`, [`crate::bike_col::BikeCol::frame`]) too, as a prop's do (B29), each hit
+    /// an entry naming the bike by its player, and the step resolves those entries against `others`,
+    /// the bikes' chassis by player, both ways: the truck is pushed back and the bike pushed on. Hands
+    /// back whether it settled, and each hit's mirror (kind 1) with the bike's player, which goes on
+    /// that bike's list behind its own entries ([`crate::Sim::cars_probed`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_among(
+        &mut self,
+        dt: F,
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        mesh: Arc<Mesh>,
+        bikes: &[crate::flight_search::Bike],
+        others: &mut [Other<'_>],
+    ) -> (bool, Vec<(usize, Contact)>) {
+        let r = &mut self.set.heard.1;
+        r.mesh = Some(mesh);
+        r.bikes = bikes.to_vec();
+        r.file = true;
+        let rays = Arc::clone(&self.rays);
+        self.set.search(dt, std::slice::from_ref(&*rays), field, props, trees);
+        let probed = std::mem::take(&mut self.set.heard.1.probed).into_iter().map(|(_, player, mirror)| (player, mirror)).collect();
+        let movers: Vec<Mover> = props.map(|p| crate::flight_search::movers(&p.props)).unwrap_or_default();
+        let tables = self.tables.get_or_insert_with(|| Arc::new(Tables::build())).clone();
+        // The bikes stay on the node through the step: the post gathers the list with them there.
+        self.set.step_among(dt, &tables, &movers, others);
+        let settled = self.physical && self.settle(dt);
+        self.set.heard.1 = Default::default();
+        (settled, probed)
+    }
+
+    /// The body as the other side of a bike's contacts ([`crate::prop_contact::Pushed`]), car `k`'s.
+    pub fn pushed(&self, k: usize) -> crate::prop_contact::Pushed {
+        let collider = self.object().collision.as_ref().map(|c| c.collider).unwrap_or_default();
+        let bone = &self.set.bones[0];
+        crate::prop_contact::Pushed { collection: k, object: 0, collider, body: bone.body, mass: bone.mass }
     }
 
     /// The second half of [`PhysicsCar::tick`]: the world stepped with `movers`, then the listener.

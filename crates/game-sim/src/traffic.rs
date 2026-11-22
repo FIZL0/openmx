@@ -50,8 +50,11 @@
 //! S186; by a riding bike's body rays, S186a) its body wakes with the car's motion and the car stands
 //! where the body is, its clock running on, until it is put back on its path a `ResetTime` after it
 //! comes to rest ([`crate::physics_car`]). The other searches do not strike one yet (S252). A riding
-//! bike's wheels stand on the woken car's f.col ([`crate::truck_wheel`], S208); its body rays and
-//! sweep do not meet it yet (S251).
+//! bike's wheels stand on the woken car's f.col ([`crate::truck_wheel`], S208). While physical the
+//! car's path mesh is stood down ([`stand_down`]) and its node update meets the ridden bikes: its
+//! rays strike their frames, its step pushes their chassis, and its rays' mirrors go on their lists
+//! (S251, [`Traffic::physics_frame_among`]). The bikes' body rays and sweep do not file the f.col: on
+//! S207 ctruck's strike and the seven ticks after it the original's bike list holds only the mirrors.
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
@@ -59,6 +62,8 @@ use std::sync::{Arc, OnceLock};
 
 use ps2_float::{Acc, Dest, F, Vf, libm, vu};
 
+use crate::contact::Other;
+use crate::flight_search;
 use crate::physics_car::PhysicsCar;
 use crate::hash::{State, Walk};
 use crate::math::{self, Mat4};
@@ -489,13 +494,22 @@ pub struct Traffic {
     /// The `HasPhysics` cars' physics objects (S186), one a car in the `.toy`'s order (`None` for a
     /// car without), or none at all ([`Traffic::with_physics`]).
     pub physics: Vec<Option<PhysicsCar>>,
+    /// The cars a bike's strike woke and stepped this frame ([`Traffic::strike_among`]), which the
+    /// cars' update reads and empties ([`Traffic::frame_late`]): empty between frames, not state.
+    pub stepped: Vec<usize>,
+    /// What those steps' rays struck on the ridden bikes: the car, the bike's player and the mirror
+    /// (kind 1) that goes on the bike's list ([`crate::Sim::cars_probed`]). Emptied there, not state.
+    pub probed: Vec<(usize, usize, crate::contact::Contact)>,
+    /// The physical cars whose node update ran among the ridden bikes this frame
+    /// ([`Traffic::physics_frame_among`]), which [`Traffic::physics_frame`] skips: emptied there, not state.
+    pub ticked: Vec<usize>,
 }
 
 impl Traffic {
     /// The cars of a track, as its load leaves them.
     pub fn new(specs: Vec<Spec>) -> Traffic {
         let cars = specs.iter().map(Car::new).collect();
-        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default(), physics: Vec::new() }
+        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default(), physics: Vec::new(), stepped: Vec::new(), probed: Vec::new(), ticked: Vec::new() }
     }
 
     /// **Another track's cars after these** (MD153): a world's tiles' cars, each tile's loaded alone,
@@ -585,13 +599,22 @@ impl Traffic {
         if self.physics.iter().all(Option::is_none) {
             return;
         }
+        let stepped = std::mem::take(&mut self.stepped);
+        // A mirror no bike's frame took (its bike had none this frame) goes nowhere.
+        self.probed.clear();
         let specs = Arc::clone(&self.specs);
         let mut before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
         for (k, (spec, car)) in specs.iter().zip(&mut self.cars).enumerate() {
             let Some(p) = self.physics.get_mut(k).and_then(Option::as_mut) else {
                 continue;
             };
-            p.last = car.pose;
+            if stepped.contains(&k) {
+                // Woken and stepped by a bike's strike this frame ([`Traffic::strike_among`]): its last
+                // pose the one it stood at asleep.
+                before[k] = p.last;
+            } else {
+                p.last = car.pose;
+            }
             if p.physical {
                 spec.advance(car, dt);
                 car.pose = p.pose();
@@ -637,6 +660,57 @@ impl Traffic {
         woke
     }
 
+    /// **Car `k` struck by a riding bike's search** (S251): [`Traffic::strike`], then, woken, the
+    /// world node's update for it in the same frame, ahead of the bikes' steps — its search with the
+    /// ridden `bikes` on the node and its step pushing them, `others` their chassis by player
+    /// ([`PhysicsCar::tick_among`]) — its mesh stood at the body, and the mesh's motion from the car's
+    /// last update's top to there, which the striking bike's resolve meets. The car's update keeps
+    /// the pose it stood at asleep as its last ([`Traffic::frame_late`]).
+    ///
+    /// S251's strike images (`research/s251`): the original's wake and node update, run in the
+    /// interpreter on the frame before ctruck's strike, put the body and the model node where the
+    /// strike frame's image has them, its five entries on the bike's frame pushing the truck back and
+    /// the bike's chassis on; the car's velocity the frame's image caches is the moved node's.
+    pub fn strike_among(&mut self, k: usize, dt: F, world: &mut dyn World, mesh: Arc<Mesh>, bikes: &[flight_search::Bike], others: &mut [Other<'_>]) -> bool {
+        let inv_dt = if dt > F::ZERO { F::ONE / dt } else { F::ZERO };
+        let own = self.prop_of(k);
+        let (Some(Some(p)), Some(car)) = (self.physics.get_mut(k), self.cars.get_mut(k)) else {
+            return false;
+        };
+        let last = p.last;
+        let asleep = car.pose;
+        if !p.wake(car, &last, inv_dt) {
+            return false;
+        }
+        let hidden = own.map(|i| hide(world, [i, i + 1]));
+        {
+            let (field, props, trees) = world.wooded();
+            let (_, probed) = p.tick_among(dt, field.as_deref(), props, trees, mesh, bikes, others);
+            self.probed.extend(probed.into_iter().map(|(player, mirror)| (k, player, mirror)));
+        }
+        if let Some(h) = hidden {
+            show(world, h);
+        }
+        car.pose = p.pose();
+        p.last = asleep;
+        let moving = Moving::of(&last, &car.pose, inv_dt);
+        self.stepped.push(k);
+        self.place(world);
+        if let (Some(i), Some(props)) = (own, world.moving())
+            && let Some(prop) = props.props.get_mut(i)
+        {
+            prop.moving = Some(moving);
+        }
+        true
+    }
+
+    /// Car `k`'s mesh among the world's props: in [`Traffic::span`], one prop a car with a mesh.
+    fn prop_of(&self, k: usize) -> Option<usize> {
+        let first = self.first?;
+        self.specs.get(k)?.mesh.as_ref()?;
+        Some(first + self.specs.iter().take(k).filter(|s| s.mesh.is_some()).count())
+    }
+
     /// **The struck listeners heard** (S252): every car whose mesh a search struck this tick
     /// ([`crate::world::Prop::strike_heard`]) — the bikes' scenery searches and sweeps, their wheels,
     /// the wreck bikes and the ragdolls, a plane's two probes, the knockable props' search and the
@@ -658,8 +732,9 @@ impl Traffic {
     /// of the world, its own mesh out of it ([`hide`]), the step and the settle. Runs before the
     /// cars' updates, so a car put back takes its path update the same frame.
     fn physics_frame(&mut self, dt: F, world: &mut dyn World) {
+        let ticked = std::mem::take(&mut self.ticked);
         let mut slot = self.first;
-        for (spec, p) in self.specs.iter().zip(&mut self.physics) {
+        for (k, (spec, p)) in self.specs.iter().zip(&mut self.physics).enumerate() {
             let own = match (slot, &spec.mesh) {
                 (Some(k), Some(_)) => {
                     slot = Some(k + 1);
@@ -667,7 +742,7 @@ impl Traffic {
                 }
                 _ => None,
             };
-            let Some(p) = p.as_mut().filter(|p| p.physical) else { continue };
+            let Some(p) = p.as_mut().filter(|p| p.physical && !ticked.contains(&k)) else { continue };
             let hidden = own.map(|k| hide(world, [k, k + 1]));
             {
                 let (field, props, trees) = world.wooded();
@@ -677,6 +752,35 @@ impl Traffic {
                 show(world, h);
             }
         }
+    }
+
+    /// **[`Traffic::physics_frame`] with the ridden bikes on the node** (S251): every physical car's
+    /// node update, its search with the `bikes`' frames (`mesh`) and its step pushing their chassis
+    /// (`others`, by player), as on the frame a bike's strike woke it ([`Traffic::strike_among`]).
+    /// The rays' hits on the bikes go to [`Traffic::probed`]. Runs ahead of the cars' held frame,
+    /// which then skips these cars; their path meshes are stood down ([`Traffic::place`]), so the
+    /// props' search between misses them either way. Says whether any ray struck a bike.
+    pub fn physics_frame_among(&mut self, dt: F, world: &mut dyn World, mesh: Arc<Mesh>, bikes: &[flight_search::Bike], others: &mut [Other<'_>]) -> bool {
+        let mut struck = false;
+        for k in 0..self.physics.len() {
+            if !self.physics[k].as_ref().is_some_and(|p| p.physical) || self.ticked.contains(&k) {
+                continue;
+            }
+            let own = self.prop_of(k);
+            let hidden = own.map(|i| hide(world, [i, i + 1]));
+            let probed = {
+                let (field, props, trees) = world.wooded();
+                let Some(p) = self.physics[k].as_mut() else { continue };
+                p.tick_among(dt, field.as_deref(), props, trees, Arc::clone(&mesh), bikes, others).1
+            };
+            if let Some(h) = hidden {
+                show(world, h);
+            }
+            struck |= !probed.is_empty();
+            self.probed.extend(probed.into_iter().map(|(player, mirror)| (k, player, mirror)));
+            self.ticked.push(k);
+        }
+        struck
     }
 
     /// Tell each car's mesh how its car moved this tick ([`Moving`]), for a wheel on it to ride with
@@ -732,10 +836,18 @@ impl Traffic {
             return;
         };
         let mut k = first;
-        for (spec, car) in self.specs.iter().zip(&self.cars) {
-            if spec.mesh.is_some() {
+        for (n, (spec, car)) in self.specs.iter().zip(&self.cars).enumerate() {
+            if let Some(mesh) = &spec.mesh {
                 if let Some(prop) = props.props.get_mut(k) {
-                    prop.stand(&car.pose);
+                    let physical = self.physics.get(n).and_then(Option::as_ref).is_some_and(|p| p.physical);
+                    if physical {
+                        stand_down(prop);
+                    } else {
+                        if prop.mesh.triangles.is_empty() && !mesh.triangles.is_empty() {
+                            prop.mesh = mesh.clone();
+                        }
+                        prop.stand(&car.pose);
+                    }
                 }
                 k += 1;
             }
@@ -777,6 +889,26 @@ pub fn hide(world: &mut dyn World, span: [usize; 2]) -> Hidden {
         hidden.cars.push((mesh, std::mem::replace(&mut prop.radius, F::ZERO), prop.moving.take()));
     }
     hidden
+}
+
+/// **A physical car's path mesh stood down** (S251): the wake clears its collidable's two enable
+/// bits (`+0x428`'s `+0x31` bits 0 and 1, S208) and the settle's put-back sets them again, so no
+/// search meets the path mesh while the body is physical. The port leaves the prop where it is with
+/// no mesh and no reach, as [`hide`] does; [`Traffic::place`] puts the car's mesh back once the car
+/// is on its path again.
+fn stand_down(prop: &mut Prop) {
+    if !prop.mesh.triangles.is_empty() {
+        prop.mesh = Mesh {
+            version: prop.mesh.version,
+            surface: prop.mesh.surface,
+            transform: prop.mesh.transform,
+            vertices: crate::track::Points::Wide(Vec::new()),
+            normals: None,
+            nodes: Vec::new(),
+            triangles: Vec::new(),
+        };
+    }
+    prop.radius = F::ZERO;
 }
 
 /// Put back what [`hide`] took, as it was.

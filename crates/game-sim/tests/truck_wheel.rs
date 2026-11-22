@@ -4,7 +4,7 @@
 //! `a_physics_trucks_mesh_is_what_a_wheel_could_own`, `a_woken_trucks_mesh_is_in_the_wheels_reach`):
 //! the wake stands the car's path mesh down and its physics object's `f.col` up into the wheel's
 //! search, owned by the object's body with no chassis. No capture of a wheel on a woken truck was
-//! taken (the S207/S219 bikes are thrown off it, and part on the strike tick's push, S251), so these
+//! taken (S207 ctruck's rear wheel lands on it on tick 51 and parts there, S251, S505), so these
 //! drive the port: free06's company truck off the disc on a path over free06's terrain, its `f.col`
 //! standing in as its path mesh, and race125p's bike dropped onto its roof once it is woken.
 //!
@@ -14,7 +14,8 @@
 //!    otherwise than onto it still;
 //! 3. asleep (not struck), a wheel on the truck is on its path mesh: a vehicle and no owner, and the
 //!    mesh hears the wheel's search, so the truck wakes (S252);
-//! 4. the physics objects and the path mesh are back where they were after the bike's frame;
+//! 4. the physics objects are back in the traffic after the bike's frame, and the path mesh stays
+//!    stood down while the truck is physical (S251);
 //! 5. a wheel on the truck lying at rest turns its body back on (R19, the `f.col`'s struck listener).
 //!
 //! Skipped with a line where the disc is not there.
@@ -183,18 +184,20 @@ fn a_wheel_stands_on_a_woken_truck() {
     assert!(on.rider.ride.props.is_none(), "the trucks are back in the traffic");
     assert!(on.traffic.physics[0].as_ref().is_some_and(|p| p.physical), "the truck's physics object is back");
     let mesh = &world.props.props[on.traffic.span().expect("attached")[0]];
-    assert!(!mesh.mesh.triangles.is_empty() && mesh.radius > F::ZERO, "the path mesh is stood back up after the frame");
+    // While the truck is physical its path mesh stays stood down between frames too (S251), until
+    // the put-back stands it up again.
+    assert!(mesh.mesh.triangles.is_empty() && mesh.radius == F::ZERO, "the path mesh stays stood down while the truck is physical");
 
-    // What the wheel stands on is the body (S169's owner branch): the body lies off until the wheel's
-    // hit wakes it (R19), and the truck's world steps before the bike in the frame, so through the
-    // drop the step leaves it where it is whatever its velocity, and only what the wheel reads of it moves.
+    // What the wheel stands on is the body (S169's owner branch): the same drop onto the truck at rest
+    // and sliding leaves the bike going otherwise. Since S251 the truck's node update runs among the
+    // bikes ahead of their frames, and its rays' hit on the dropped bike's frame wakes the body (S239),
+    // so the truck moves under the bike too.
     assert!(!truck(&base).body().enabled, "the truck lies at rest, its body off");
     let mut read = |v: Vf| {
         let mut s = base.clone();
         s.traffic.physics[0].as_mut().unwrap().set.bones[0].body.velocity = v;
         let s = drop(&s, at, &mut world, &moved);
         assert!(words(&s.rider).iter().any(|&(o, _)| o == handle), "a wheel on the truck going {v:?}");
-        assert_eq!(truck(&s).pose(), truck(&base).pose(), "the truck did not move under the bike");
         s.rider.ride.chassis.vel
     };
     let (still, going) = (read(Vf::new(0.0, 0.0, 0.0, 0.0)), read(Vf::new(0.0, 0.0, 8.0, 0.0)));

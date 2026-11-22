@@ -12512,11 +12512,19 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 // - **beside**: the same, parked 6 ft off the line; it rolls back down the bank to 2453.7, 3971 before
 //   the train comes, which passes it untouched.
 // - **ctruck**: s89-along's state, the bike at 3702.8, 234.6, 3100.2 in the way of the company truck
-//   `.toy` `Car22` (a `HasPhysics` car, S127), which strikes it 36 ticks later. The original's truck
-//   wakes its body and stops dead on the strike. The port's (S186a) meets the bike on the same tick
-//   (the truck updates after the bike, `Traffic::frame_late`), is struck by its body rays and wakes:
-//   no wreck in either. The push on tick 36 parts (vel.x 9.53 against the original's 2.97): the
-//   original's bike meets the woken truck's f.col, a body, in the rest of that frame (S251).
+//   `.toy` `Car22` (a `HasPhysics` car, S127), which strikes it 44 ticks later (S251's recording; S207's
+//   is gone). The original's truck wakes its body and stops dead on the strike. The port's (S186a)
+//   meets the bike on the same tick (the truck updates after the bike, `Traffic::frame_late`), is
+//   struck by its body rays and wakes: no wreck in either. Since S251 the woken truck's path mesh
+//   stands down, its rays meet the bike's frame in its own step and push the bike on that frame and
+//   every one after (`Sim::cars_among`), and every lane agrees through tick 50. It parts on 51, when
+//   the rear wheel lands on the truck's f.col and a fourth mirror joins the list: the force before
+//   the resolve is not the original's (`research/oracle.txt` S251).
+//
+//   S251's recording (`research/s251`), then `context/capture/s251/ctruck.csv` copied to s207's:
+//
+//   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 01cc7630 26.20 3703.0 236 3098.5 2.5 2.7 35
+//   ./kit pcsx2 with -- research/s251/ride.sh PID 35 ctruck
 //
 //   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2447.8 136.5 3991.4 7 3 33
 //   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2452.8 136.5 3988.1 7 3 34
@@ -12536,7 +12544,7 @@ const S207_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Opti
     ("truck", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 106, Some((105, 2)), Some((105, 2))),
     ("rails", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 99, Some((98, 1)), Some((98, 1))),
     ("beside", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
-    ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 36, None, None),
+    ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 51, None, None),
 ];
 
 /// [`in_the_world_with_cars`] on any track: its props, the state's path cars attached after them, the
