@@ -1,0 +1,33 @@
+openmx-log 2026-11-22T01:08:41.114Z Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1 ?fps
+146ms info: page: raf gap 146 ms
+1422075ms worker log: gpu: adapter limits: 2D 16384, layers 2048, buffer 1073741824, sampled textures a stage 44, samplers a stage 22, bind groups 11, inter-stage variables 31
+1425200ms worker log: gpu: apple (BrowserWebGpu) into a Bgra8Unorm canvas (webgpu)
+1425200ms worker log: renderer: gpu, webgpu
+1425318ms worker log: music: playing disc:fromtheinside
+1496213ms info: page: raf gap 210 ms
+1535330ms worker log: pads: 1P: Touch controls (gamepad/16) — the menus and the first seat are its
+1535525ms info: page: raf gap 147 ms
+1562322ms worker log: pads: 1P: Touch controls (gamepad/16)
+1562370ms worker log: music: playing disc:naturallife
+1651477ms info: page: hidden
+8631476ms info: page: visible
+8631476ms info: page: raf gap 6980108 ms
+---- the page loaded again ----
+openmx-log 2026-11-22T03:32:32.970Z Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1 ?fps
+289ms info: page: raf gap 288 ms
+7856ms info: page: raf gap 171 ms
+75744ms worker log: gpu: adapter limits: 2D 16384, layers 2048, buffer 1073741824, sampled textures a stage 44, samplers a stage 22, bind groups 11, inter-stage variables 31
+75864ms worker log: gpu: apple (BrowserWebGpu) into a Bgra8Unorm canvas (webgpu)
+75864ms worker log: renderer: gpu, webgpu
+75871ms info: page: raf gap 122 ms
+75906ms worker log: music: playing disc:downfall
+99255ms worker log: pads: 1P: Touch controls (gamepad/16) — the menus and the first seat are its
+179601ms worker log: pads: 1P: Touch controls (gamepad/16)
+179644ms worker log: music: playing disc:lonelyday
+179896ms worker log: gpu: validation error in the views: number of bind groups set(2) is less than the pipeline uses(3)
+179896ms worker log: gpu: validation error in the views, frame 5959: number of bind groups set(2) is less than the pipeline uses(3)
+179899ms worker log: openmx: webgpu failed in a ride: gpu: number of bind groups set(2) is less than the pipeline uses(3) (in the views)
+179901ms error: openmx: webgpu failed in a ride: gpu: number of bind groups set(2) is less than the pipeline uses(3) (in the views)
+179901ms log: openmx: webgpu failed in a ride (webgpu failed in a ride: gpu: number of bind groups set(2) is less than the pipeline uses(3) (in the views)); starting again on webgl2
+---- the page loaded again ----
+openmx-log 2026-11-22T03:35:32.935Z Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1 ?fps&webgl2
