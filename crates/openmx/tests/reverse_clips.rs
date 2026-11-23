@@ -93,7 +93,7 @@ fn backing_up_the_rider_plays_the_reverse_pair() {
         body.ride(FRAME, &mut r, &c, rider::Gate::default());
     }
     assert_eq!(r.body.machine.mode, Mode::Riding, "the throttle did not open the gate");
-    let stood = body.palette(None).0[foot].0[3];
+    let stood = body.palette(None)[foot].0[3];
 
     let both = Controls { gas: F::ONE, brake: F::ONE, ..Controls::default() };
     let mut reversing = 0;
@@ -125,7 +125,7 @@ fn backing_up_the_rider_plays_the_reverse_pair() {
             other => panic!("tick {i}: backing up, the frame is {other:?}"),
         }
         assert!(body.posed, "tick {i}: nothing posed the body");
-        feet.push(body.palette(None).0[foot].0[3]);
+        feet.push(body.palette(None)[foot].0[3]);
     }
     assert!(slowest < -10.0, "gas and brake at a standstill backed the bike up to only {slowest} ft/s");
     assert!(reversing > 200, "the body played the pair on only {reversing} of 240 ticks");

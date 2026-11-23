@@ -1718,7 +1718,7 @@ impl Shown {
                         None => Default::default(),
                     },
                 };
-                Some(body.palette(Some(&grips)).0)
+                Some(body.palette(Some(&grips)))
             }
             _ => None,
         };
@@ -1936,8 +1936,8 @@ fn ride_holds_of(chassis: Option<&Chassis>) -> Option<game_sim::ragdoll_riding::
 
 /// Whether the riding rider is drawn from the riding ragdoll, as the original's is (S90): **on by
 /// default** since the user lifted the 10-24 ruling on 2026-11-02 ("make sure we match or close to
-/// match the original springyness"). `OPENMX_RIDING_RAGDOLL=0` draws the clip pose plus hand IK
-/// instead. It was off from 2026-10-23 ("our guy is super floppy") while the put-back entry was wrong;
+/// match the original springyness"). `OPENMX_RIDING_RAGDOLL=0` draws the clip pose as it was written
+/// instead (V63). It was off from 2026-10-23 ("our guy is super floppy") while the put-back entry was wrong;
 /// S201 matched the entry, and game-sim's `riding_spring` tests hold the body's give and settle to the
 /// original's over S74's and S201's put-backs, plain riding and landings.
 fn riding_ragdoll_on() -> bool {
@@ -8013,7 +8013,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if !biplane::seat(&mut body.rig.set, 0.5, 0.5) {
                 println!("biplane: the rider's archive has no {:?}, no pilot", biplane::PILOT_CLIPS);
             } else if let Some(loaded) = assets.models.get_mut(body.geometry()) {
-                let held = body.skin_into_at(loaded, 0, Some(&plane.anchors));
+                let (pose, held) = body.seated_palette(&plane.anchors);
+                loaded.tris = game_render::skin::skin(&loaded.model, &pose, 0);
                 println!("biplane: pilot's feet and hands off their places by {held:.2?} feet");
                 pilot = Some(body.geometry());
             }
@@ -14402,8 +14403,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     };
                     actor.push((part.model.as_str(), at));
                 }
-                // Where the chassis wants the body's hands and feet *this* frame: the four dummy anchors at
-                // its grips and its pegs, off the live pose. They were read once, at load, from the bind
+                // Where the chassis wants the body's hands *this* frame in a trick the bike has no clip for
+                // (MD41): the dummy anchors at its grips and its pegs, off the live pose. They were read once, at load, from the bind
                 // pose — but `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
                 // drive turns, so a rider aimed at the bind pose lets go of the bars the moment the bike is
                 // steered (V20). Falls back to the bind pose before the bike has a frame of its own.
@@ -14432,8 +14433,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     actor.push((model.as_str(), bike_at));
                 } else if let (Some(body), Some(model)) = (&rig.body, &rig.body_model) {
                     if body.posed {
-                        // The body's finest level of detail ([`RIDER_GROUP`]), and the hands and feet put
-                        // back where the chassis wants them.
+                        // The body's finest level of detail ([`RIDER_GROUP`]), as its clips pose it.
                         if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                             let group = RIDER_GROUP;
                             if skinned[p] != Some(group) {

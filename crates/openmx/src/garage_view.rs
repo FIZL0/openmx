@@ -467,7 +467,7 @@ fn dress_ride(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String>
                 let blend = Blend::One { phase: F(0.0), ramp: F(0.0), clip };
                 body.rig.set.apply_vehicle(blend, &game_sim::motion::Player::default());
                 body.posed = true;
-                let (pose, _) = body.palette(Some(&anchors));
+                let (pose, _) = body.seated_palette(&anchors);
                 if let Some(loaded) = assets.models.get_mut(&name) {
                     loaded.tris = game_render::skin::skin(&loaded.model, &pose, 0);
                 }

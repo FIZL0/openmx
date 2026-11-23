@@ -137,7 +137,7 @@ fn tick(garage: &mut Garage, sim: &mut Sim, body: &mut Body, world: &mut Flat, c
         return None;
     }
     let frame = body.ride(DT, &mut sim.rider, c, Gate::default());
-    let (palette, _) = body.palette(None);
+    let palette = body.palette(None);
     Some(Tick {
         mode: sim.rider.body.machine.mode,
         cut: sim.rider.body_request.cut,

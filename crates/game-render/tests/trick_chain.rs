@@ -215,7 +215,7 @@ fn a_trick_out_of_another_fades_into_it() {
             bike.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
             body.bare = bike.bare_under(&r.body.veh);
             let rot = body.rig.set.pose.rot.clone();
-            let mut drawn = body.palette(Some(&chassis::grips(&bike))).0;
+            let mut drawn = body.palette(Some(&chassis::grips(&bike)));
             drawn.extend(bike.world.iter().cloned());
             if let Some((rot0, drawn0)) = &last {
                 let turn = rot0.iter().zip(&rot).map(|(x, y)| degrees(*x, *y)).fold(0.0, f32::max);

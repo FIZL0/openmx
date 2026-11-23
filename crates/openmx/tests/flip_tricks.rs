@@ -129,7 +129,8 @@ fn kit() -> Option<Kit> {
 /// How far a drawn hand may be from its grip, in feet, on a tick the draw holds it there: the solve
 /// lands it exactly, so this is rounding.
 const ON_THE_GRIPS: f32 = 0.05;
-/// How far a drawn hand may be from its grip on a tick nothing holds it (V61, the original's rule:
+/// How far a drawn hand may be from its grip on a tick nothing holds it and the body is not riding
+/// (V61, the original's rule:
 /// its riding ragdoll is not placed while a pose off the clip table is in charge, so the rider is
 /// drawn as the clip wrote it): a backflip and the landing out of one, and the few ticks the body
 /// fades out of a trick the bike has a clip for. The disc's backflip leaves them 0.17 ft off in the
@@ -156,8 +157,11 @@ struct Seen {
     /// The hands where the clip put them, and where the draw did.
     clip: [V3; 2],
     drawn: [V3; 2],
-    /// The draw holds both hands on their grips: the riding hold, or a trick the bike has no clip for.
+    /// The draw holds both hands on their grips: a trick the bike has no clip for.
     held: bool,
+    /// The body is riding: the shell draws it from the riding ragdoll, whose pins hold the hands, so
+    /// the clip these rides pose is not what is seen (V63).
+    riding: bool,
     /// The bike's nodes, where the chassis draws them in its own space.
     nodes: Vec<V3>,
 }
@@ -211,7 +215,7 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
         kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
-        let (drawn, _) = kit.body.palette(Some(&g));
+        let drawn = kit.body.palette(Some(&g));
         let clip = kit.body.rig.world();
         let bike = kit.chassis.world[root];
         let grip = |i: usize| into(&bike, g[2 + i].expect("a grip"));
@@ -222,7 +226,8 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
             grips: [grip(0), grip(1)],
             clip: hands.map(|j| into(&bike, at(&clip[j]))),
             drawn: hands.map(|j| into(&bike, at(&drawn[j]))),
-            held: kit.body.hold == 1.0 || kit.body.bare,
+            held: kit.body.bare,
+            riding: r.body.machine.mode == game_sim::rider_anim::Mode::Riding,
             nodes: kit.chassis.world.iter().map(at).collect(),
         });
         assert!(r.state.wreck.is_none(), "tick {k}: the ride wrecked");
@@ -302,13 +307,13 @@ fn trick_in_a_flip(f: Flip, name: &str, slot: usize, trick: Controls, at: usize)
     let (first, last) = span(&seen, slot);
     let landed = (last..FRAMES).find(|&k| seen[k].on_ground).unwrap_or(FRAMES);
     let has_clip = kit.chassis.stance.lib.clip(slot as i32).is_some();
-    let worst_after = seen[last + 1..].iter().map(Seen::drawn_off).fold(0.0, f32::max);
+    let worst_after = seen[last + 1..].iter().filter(|s| s.held || !s.riding).map(Seen::drawn_off).fold(0.0, f32::max);
     let moved = (first..=last).map(|k| apart(&seen[k], &plain[k])).fold(0.0, f32::max);
     println!(
         "{name} in {f:?}: ticks {first}..={last}, landed {landed}, the bike {} (moved {moved:.2} ft off the plain flip's), \
          hands at most {worst_after:.2} ft off after, {} ticks unheld",
         if has_clip { "clipped" } else { "bare" },
-        seen[last + 1..].iter().filter(|s| !s.held).count(),
+        seen[last + 1..].iter().filter(|s| !s.held && !s.riding).count(),
     );
     for k in first..=last {
         let s = &seen[k];
@@ -328,12 +333,15 @@ fn trick_in_a_flip(f: Flip, name: &str, slot: usize, trick: Controls, at: usize)
     if has_clip {
         assert!(moved > POSE_APART, "{name} in {f:?}: the bike is drawn at most {moved:.3} ft off a plain flip's");
     }
-    let unheld = seen[last + 1..].iter().filter(|s| !s.held).count();
+    let unheld = seen[last + 1..].iter().filter(|s| !s.held && !s.riding).count();
     if f != Flip::Back {
         assert!(unheld <= UNHELD_TICKS, "{name} in {f:?}: {unheld} ticks after the trick hold nothing");
     }
     for k in last + 1..FRAMES {
         let s = &seen[k];
+        if s.riding && !s.held {
+            continue;
+        }
         let bound = if s.held { ON_THE_GRIPS } else { AS_WRITTEN };
         assert!(
             s.drawn_off() < bound,
@@ -345,12 +353,13 @@ fn trick_in_a_flip(f: Flip, name: &str, slot: usize, trick: Controls, at: usize)
             s.drawn_off()
         );
     }
-    assert!(seen[FRAMES - 1].on_ground && seen[FRAMES - 1].held, "{name} in {f:?}: not riding on at the end");
+    assert!(seen[FRAMES - 1].on_ground && seen[FRAMES - 1].riding, "{name} in {f:?}: not riding on at the end");
 }
 
-/// The report itself: a Tsunami off a front flip, and one alone, end with the hands on the grips.
+/// The report itself: a Tsunami off a front flip, and one alone, end with the hands on the grips, as
+/// near as the clip has them until the body is riding again.
 #[test]
-fn a_tsunami_ends_with_the_hands_on_the_grips() {
+fn a_tsunami_ends_riding_with_the_hands_as_the_clip_has_them() {
     if kit().is_none() {
         return;
     }
