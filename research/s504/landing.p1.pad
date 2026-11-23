@@ -1,0 +1,11 @@
+release
+release
+stick l 0.000 0.000
+sleep 130t
+release
+down cross 0.500
+stick l 0.000 0.000
+sleep 30t
+release
+stick l 0.000 0.000
+sleep 410t

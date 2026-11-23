@@ -313,6 +313,14 @@ pub fn gather(seats: &[Seat<'_>], dt: F) -> Vec<Vec<Contact>> {
     gather_near(seats, dt, &|_, at| at)
 }
 
+/// [`gather`] with the bikes searched in `order` (players) instead of player order: the original
+/// searches in its collision node's list order, which a machine's objects leave and join as riders
+/// wreck and change machines, so a later state may hold P2 first (S504, the 2p state). The entries are the
+/// same; a rider struck by a bike searched earlier has its mirrors ahead of its own rays.
+pub fn gather_in(seats: &[Seat<'_>], order: &[usize], dt: F) -> Vec<Vec<Contact>> {
+    gather_ordered(seats, order, &[], dt, &|_, at| at).0
+}
+
 /// The copy of a point `at` nearest another, `from` (MD44): [`crate::nearest_copy`] on a world that
 /// wraps, `at` itself on any other.
 pub type Near<'a> = &'a dyn Fn(Vf, Vf) -> Vf;
@@ -361,6 +369,18 @@ struct Posed<'a> {
 /// so their lists here hold only the mirrors, which the plane's frame puts after its own entries
 /// ([`crate::flight::Met`]), as the original's list order puts them.
 pub fn gather_met(seats: &[Seat<'_>], hulls: &[Hull<'_>], dt: F, near: Near<'_>) -> (Vec<Vec<Contact>>, Vec<Vec<Contact>>) {
+    let order: Vec<usize> = (0..seats.len()).collect();
+    gather_ordered(seats, &order, hulls, dt, near)
+}
+
+/// [`gather_met`], the bikes searched in `order` (see [`gather_in`]).
+fn gather_ordered(
+    seats: &[Seat<'_>],
+    order: &[usize],
+    hulls: &[Hull<'_>],
+    dt: F,
+    near: Near<'_>,
+) -> (Vec<Vec<Contact>>, Vec<Vec<Contact>>) {
     let n = seats.len();
     let mut records: Vec<Record> = seats
         .iter()
@@ -390,7 +410,7 @@ pub fn gather_met(seats: &[Seat<'_>], hulls: &[Hull<'_>], dt: F, near: Near<'_>)
         categories: world_search::Categories { mode: 1, list: Vec::new() },
         ..Collidable::default()
     }));
-    for me in 0..seats.len() {
+    for &me in order {
         if !seats[me].listed() {
             continue;
         }
