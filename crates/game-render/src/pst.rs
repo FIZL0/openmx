@@ -221,7 +221,7 @@ fn largest_mip(d: &[u8], count_at: usize, per_two: usize) -> Result<(usize, usiz
             return Err(format!("a .pst whose mip {i} would start past its end ({} bytes)", d.len()));
         }
         let (h, w, bytes) = (le32(d, at) as usize, le32(d, at + 4) as usize, le32(d, at + 8) as usize);
-        if w == 0 || h == 0 || bytes != (w * h * per_two).div_ceil(2) || w < last.0 || h < last.1 {
+        if w == 0 || h == 0 || w.max(h) > 8192 || bytes != (w * h * per_two).div_ceil(2) || w < last.0 || h < last.1 {
             return Err(format!("not a .pst: mip {i} of {mips} says {w}x{h} in {bytes} bytes"));
         }
         if at + 16 + bytes > d.len() {

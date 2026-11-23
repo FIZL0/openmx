@@ -499,12 +499,16 @@ pub fn package_telling(mods: &Path, l: &Local, author: &str, _: &dyn Fn(String))
 }
 
 /// A track's or world's picture as `preview.webp`: its own `previews/track.png`, else the shell's
-/// still of it (P230: a texture pack's [`pack_preview`]), made at most [`super::PREVIEW_W`] wide; None
+/// still of it (P230: a texture pack's [`pack_preview`]; F85: a
+/// machine pack's own `preview.png`), made at most [`super::PREVIEW_W`] wide; None
 /// for anything else, or past the cap.
 #[cfg(not(target_arch = "wasm32"))]
 fn preview_of(mods: &Path, l: &Local) -> Option<Vec<u8>> {
     if l.kind == Kind::Textures {
         return pack_preview(&l.dir);
+    }
+    if l.kind == Kind::Machine {
+        return webp_of(&std::fs::read(l.dir.join("preview.png")).ok()?);
     }
     if !matches!(l.kind, Kind::Track | Kind::World) {
         return None;

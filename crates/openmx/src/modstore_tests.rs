@@ -890,6 +890,155 @@ fn a_texture_pack_round_trips() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A machine pack's files: a flier with one skin. `more` goes into `mod.json`'s skin.
+fn machine(id: &str, more: &str) -> Vec<Put> {
+    let json = format!(
+        r#"{{"standard": 1, "kind": "machine", "id": "{id}", "name": "Test {id}", "version": "1.0.0", "author": "someone", "permission": "test", "source": {{"game": "MX vs. ATV Unleashed"}}, "todo": [], "machine": "flier", "phy": ["Biplane.phy"], "skins": [{{"machine": "biplane", "name": "Red", "psg": "Red.psg"{more}}}]}}"#
+    );
+    vec![put("mod.json", json.as_bytes()), put("Red.psg", &psg()), put("Biplane.phy", b"[Engine]\r\nMaxRPM=3000\r\n"), put("preview.png", b"a picture")]
+}
+
+/// The smallest `.psg`: a node, no mesh.
+fn psg() -> Vec<u8> {
+    let mut b = b"psg\0".to_vec();
+    b.extend(5u32.to_le_bytes());
+    b.extend(1u32.to_le_bytes());
+    b.extend([0; 220]);
+    b.extend((-1i32).to_le_bytes());
+    b.extend([0; 4 + 36]);
+    b
+}
+
+/// F85: a machine pack in the store: its kind word, a listing, installed into `mods/machines/<id>/`
+/// and found by the Garage's own reader, updated and removed; bad files, and anything damaged, refused
+/// and leaving nothing.
+#[test]
+fn a_machine_pack_round_trips() {
+    assert_eq!((Kind::Machine.word(), Kind::Machine.folder(), Kind::Machine.tab().map(|t| TABS[t])), ("machine", Some("machines"), Some("Machines")));
+    let fake = Fake::start();
+    let (dir, mods) = scratch("machines");
+    let pack = zip(&machine("my_fliers", ""));
+    let m = meta("my_fliers", Kind::Machine, &pack);
+    assert_eq!(meta_of(&serde_json::to_vec(&m).unwrap(), "my_fliers").map(|m| m.kind), Some(Kind::Machine));
+    fake.tree("main", &["my_fliers"]);
+    fake.publish("main", &m, &pack, None);
+    fake.pulls(&[]);
+    let s = Store::new(&fake.base, &dir, &mods);
+    let l = listing(&s, false);
+    assert_eq!(l.iter().map(|e| (e.meta.kind, e.meta.kind.tab())).collect::<Vec<_>>(), [(Kind::Machine, Some(4))]);
+    assert_eq!(install(&s, &l[0]), Ok("Test my_fliers".into()));
+    assert_eq!(s.stamps().iter().map(|st| (st.id.as_str(), st.kind)).collect::<Vec<_>>(), [("my_fliers", Kind::Machine)]);
+    assert_eq!(Store::have(&l[0], &s.stamps(), &s.own_ids()), Have::Installed);
+    assert!(mods.join("machines/my_fliers/store.json").is_file());
+    let skins = |mods: &Path| {
+        let (packs, why) = crate::machine_packs::find(mods);
+        assert!(why.is_empty(), "{why:?}");
+        packs.iter().flat_map(|p| p.skins.iter().map(|k| format!("{}/{}", p.id, k.name))).collect::<Vec<_>>()
+    };
+    assert_eq!(skins(&mods), ["my_fliers/Red"]);
+
+    // a changed pack is an update, and goes in over the first
+    let mut files = machine("my_fliers", "");
+    files[0] = put("mod.json", String::from_utf8(files[0].data.clone()).unwrap().replace("\"Red\"", "\"Blue\"").as_bytes());
+    let newer = zip(&files);
+    let m2 = meta("my_fliers", Kind::Machine, &newer);
+    fake.publish("main", &m2, &newer, None);
+    let e = entry(m2, "main", None);
+    assert_eq!(Store::have(&e, &s.stamps(), &s.own_ids()), Have::Update);
+    assert_eq!(install(&s, &e), Ok("Test my_fliers".into()));
+    assert_eq!(skins(&mods), ["my_fliers/Blue"]);
+
+    let without = |name: &str| {
+        let mut files = machine("bad_pack", "");
+        files.retain(|f| f.name != name);
+        zip(&files)
+    };
+    let swap = |name: &str, bytes: &[u8]| {
+        let mut files = machine("bad_pack", "");
+        files.retain(|f| f.name != name);
+        files.push(put(name, bytes));
+        zip(&files)
+    };
+    let huge = {
+        let mut b = psg();
+        b[8..12].copy_from_slice(&[0xff; 4]);
+        b
+    };
+    let bad = [
+        ("a skin with no model", without("Red.psg")),
+        ("a phy it names missing", without("Biplane.phy")),
+        ("not a model", swap("Red.psg", b"not a model at all")),
+        ("a cut model", swap("Red.psg", &psg()[..100])),
+        ("a model saying it has 4 billion nodes", swap("Red.psg", &huge)),
+        ("a texture no skin names that is not one", zip(&[machine("bad_pack", ""), vec![put("Red.pst", b"not a texture")]].concat())),
+        ("a texture no reader could hold", {
+            let mut t = vec![0; 1052];
+            t[1032..1036].copy_from_slice(&1u32.to_le_bytes());
+            t[1036..1044].copy_from_slice(&[0, 0, 0, 0x80, 0, 0, 0, 0x80]);
+            zip(&[machine("bad_pack", ""), vec![put("Red.pst", &t)]].concat())
+        }),
+        ("a hull that is not one", zip(&[machine("bad_pack", r#", "hull": "Red.col""#), vec![put("Red.col", b"not a hull")]].concat())),
+        ("a track's mod.json", swap("mod.json", &mod_json("bad_pack", "track"))),
+    ];
+    for (what, z) in bad {
+        let m = meta("bad_pack", Kind::Machine, &z);
+        fake.publish("main", &m, &z, None);
+        let got = install(&s, &entry(m, "main", None));
+        assert!(got.is_err(), "{what}: installed");
+        assert!(!mods.join("machines/bad_pack").exists() && !mods.join(".store-bad_pack").exists(), "{what}: left {:?}", tree_of(&mods));
+    }
+
+    // damaged files never panic the reader
+    let at = mods.join("machines/fuzz");
+    std::fs::create_dir_all(&at).unwrap();
+    for f in machine("fuzz", "") {
+        std::fs::write(at.join(&f.name), &f.data).unwrap();
+    }
+    assert_eq!(crate::machine_packs::check(&mods, "fuzz"), Ok(()));
+    let mut r = Rng(0xf85);
+    for _ in 0..500 {
+        std::fs::write(at.join("Red.psg"), mutate(&mut r, psg())).unwrap();
+        let _ = crate::machine_packs::check(&mods, "fuzz");
+    }
+    std::fs::remove_dir_all(&at).unwrap();
+
+    s.remove(&l[0].key(), Kind::Machine, "my_fliers");
+    let got = until(&s, |ev| matches!(ev, Event::Removed(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Removed(_, Ok(_)))), "{got:?}");
+    assert!(skins(&mods).is_empty() && !mods.join("machines/my_fliers").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F85: a handling mod as the physics editor saves one, in the store: installed into
+/// `mods/handling/<id>/`, listed for its bike, removed; one with no bike file refused.
+#[test]
+fn a_handling_mod_round_trips() {
+    assert_eq!((Kind::Handling.word(), Kind::Handling.folder(), Kind::Handling.tab().map(|t| TABS[t])), ("handling", Some("handling"), Some("Handling")));
+    let fake = Fake::start();
+    let (dir, mods) = scratch("handling");
+    let saved = crate::phy_editor::Editor::new("Bike\\Race125P.phy", b"[Engine]\r\n").save(&dir.join("made"), "Moon").unwrap();
+    let files: Vec<Put> = std::fs::read_dir(&saved).unwrap().map(|e| e.unwrap()).map(|e| put(&e.file_name().to_string_lossy(), &std::fs::read(e.path()).unwrap())).collect();
+    let z = zip(&files);
+    let m = meta("phy_moon", Kind::Handling, &z);
+    fake.publish("main", &m, &z, None);
+    let s = Store::new(&fake.base, &dir, &mods);
+    let e = entry(m, "main", None);
+    assert_eq!(install(&s, &e), Ok("Test phy_moon".into()));
+    assert_eq!(crate::phy_editor::listed(&mods, "race125p.phy").iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["phy_moon"]);
+
+    let z = zip(&files.into_iter().filter(|f| f.name == "mod.json").map(|f| put("mod.json", String::from_utf8(f.data).unwrap().replace("phy_moon", "phy_bad").as_bytes())).collect::<Vec<_>>());
+    let m = meta("phy_bad", Kind::Handling, &z);
+    fake.publish("main", &m, &z, None);
+    let why = install(&s, &entry(m, "main", None)).unwrap_err();
+    assert!(why.contains("race125p.phy"), "{why}");
+    assert!(!mods.join("handling/phy_bad").exists() && !mods.join(".store-phy_bad").exists());
+
+    s.remove(&e.key(), Kind::Handling, "phy_moon");
+    until(&s, |ev| matches!(ev, Event::Removed(..)));
+    assert!(crate::phy_editor::listed(&mods, "race125p.phy").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A world's `mod.json` padded with `n` joins (one per join piece, as openmx-mods writes them).
 fn world_json(id: &str, n: usize) -> Vec<u8> {
     let joins: Vec<String> = (0..n).map(|i| format!(r#"{{"piece": "terrain/t{i:05}.trn", "edge": [{i}, {}, 0.25, 0.75], "to": "terrain/t{:05}.trn"}}"#, i + 1, i + 1)).collect();

@@ -125,7 +125,7 @@ impl Model {
             return Err(format!(".psg version {version}, expected 5"));
         }
         let node_count = le32(d, 8)? as usize;
-        let mut nodes = Vec::with_capacity(node_count);
+        let mut nodes = Vec::with_capacity(node_count.min(d.len() / 224));
         for i in 0..node_count {
             let at = 12 + 224 * i;
             need(d, at, 224)?;
@@ -155,7 +155,7 @@ impl Model {
         let mut at = 12 + 224 * node_count;
         let material_count = le32(d, at)? as usize;
         at += 4;
-        let mut materials = Vec::with_capacity(material_count);
+        let mut materials = Vec::with_capacity(material_count.min(d.len() / 64));
         for _ in 0..material_count {
             need(d, at, 64)?;
             materials.push(cstr(&d[at..at + 64]));

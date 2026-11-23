@@ -16067,7 +16067,7 @@ fn flier_offers(packs: &[machine_packs::Pack]) -> Vec<roster::Flier> {
                 about: if k.about.is_empty() { roster::model_about(k.model).to_string() } else { k.about.clone() },
                 why,
                 // The garage's own `_ui` model where the pack has it (P315a), else the ride's.
-                preview: [&k.ui, &k.psg].into_iter().find(|f| !f.is_empty() && pack.folder.join(f).is_file()).map(|f| (pack.folder.clone(), f.clone())),
+                preview: [&k.ui, &k.psg].into_iter().find(|f| !f.is_empty() && files::is_file(pack.folder.join(f))).map(|f| (pack.folder.clone(), f.clone())),
             });
         }
     }
@@ -16092,7 +16092,7 @@ fn online_local_fliers(args: &Args, res: Option<&Res>, like: Option<&Flight>) ->
     for o in flier_offers(&machine).iter().filter(|o| o.pack != roster::ORIGINAL_PACK && o.machine == word && o.why.is_none()) {
         let Some(pack) = machine.iter().find(|p| p.id == o.pack) else { continue };
         let (Some(skin), Some(flier)) = (pack.skins.iter().find(|k| k.machine == word && k.skin == o.skin), pack.fliers.iter().find(|k| k.machine == word)) else { continue };
-        let Ok(files) = game_render::disc::Res::folder(&pack.folder) else { continue };
+        let Ok(files) = files::folder(&pack.folder) else { continue };
         let pf = vehicle::PackFlier {
             id: pack.id.clone(),
             files,
@@ -16984,7 +16984,7 @@ fn fliers_for(args: &Args, say: bool) -> Vec<vehicle::Fliers> {
             let (Some(skin), Some(flier)) = (pack.skins.iter().find(|k| k.machine == word && k.skin == f.skin), pack.fliers.iter().find(|k| k.machine == word)) else { continue };
             let second = pack.skins.iter().find(|k| k.machine == word && k.model == skin.model && k.skin != skin.skin).unwrap_or(skin);
             // Both kinds may be one pack's, and both seats: each opens its folder of its own.
-            let files = match game_render::disc::Res::folder(&pack.folder) {
+            let files = match files::folder(&pack.folder) {
                 Ok(files) => files,
                 Err(e) => {
                     say!("fliers: {}: {e}; MX Unleashed's {word}", pack.folder.display());
