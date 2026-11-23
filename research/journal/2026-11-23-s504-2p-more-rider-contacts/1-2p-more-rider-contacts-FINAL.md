@@ -56,7 +56,7 @@ rider_rider_capture`):
 
 ## Not verified / not 1:1
 
-- **The search order is a finding, not a fix.** The port still searches in player order. What moves the
+- **The search order is a finding, not a fix.** The head-on and the swipe pass only with the order given. The port still searches in player order. What moves the
   original's order is not known; S513 has it.
 - **Only the three contacts above were recorded.** Other contact kinds and other 2p rides are not covered.
 - **The Hyprland output was a workaround.** There is no monitor here, so a Hyprland headless output was

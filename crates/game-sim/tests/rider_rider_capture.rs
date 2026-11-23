@@ -8,8 +8,8 @@
 //! resolving its own list at the top of its substeps) lands on the contact row for both chassis. So:
 //!
 //! - [`the_original_tick_from_each_image_is_the_contact_row`]: the image, the tick and the wreck;
-//! - [`the_port_finds_the_originals_contacts`]: [`rider_contact::gather`] on the two frames against
-//!   the original's search, every field, and the captured entries;
+//! - [`the_port_finds_the_originals_contacts`]: [`rider_contact::gather_in`] on the frames, in the
+//!   original's list order, against the original's search, every field, and the captured entries;
 //! - [`the_port_resolves_every_rider_call_as_the_original`]: every resolve the original makes for a
 //!   rider in the tick, the port's [`Bump::resolve`] on the same RAM gives the same bits, for both
 //!   chassis;
@@ -581,9 +581,10 @@ fn against_row(got: [Quantities; 2], cap: &Split, row: usize) -> Vec<String> {
 /// must be the row's).
 fn against_contact(got: [Quantities; 2], named: &Named, cap: &Split) -> Vec<String> {
     let mut bad = against_row(got, cap, cap.row_at(named.frame) + named.state.row_lag);
-    let Some(ee) = named.after.and_then(image) else { return bad };
-    let pl = (named.state.players)(&ee);
+    let Some(after) = named.after else { return bad };
     bad.retain(|b| b.starts_with("p1 "));
+    let Some(ee) = image(after) else { return bad };
+    let pl = (named.state.players)(&ee);
     for p in 0..2 {
         if quantities(&ee, pl, p) != got[p] {
             bad.push(format!("p{}: {:?} vs the image after {:?}", p + 1, got[p], quantities(&ee, pl, p)));
@@ -671,7 +672,8 @@ fn the_port_finds_the_originals_contacts() {
             "{}: the riders' objects are not the node's last two",
             named.image
         );
-        // the search goes in list order: P1 first in S93's images, P2 first in the 2p state's
+        // the search goes in list order: P1 first in S93's images, P2 first in the 2p state's (S513: the
+        // port's sim always searches in player order, so it would part from the head-on and the swipe)
         let order: Vec<usize> = objects.iter().filter_map(|o| recs.iter().position(|r| r == o)).collect();
         let port = rider_contact::gather_in(&seats, &order, F(dt));
         for &o in &objects {
