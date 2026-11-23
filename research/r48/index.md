@@ -157,7 +157,7 @@ matched the capture through row 1568. The first difference is inside row 1569's 
 at 1572.
 
 - **Cause 1: the tire mounts.** Each tire's mount (tire +0x80; tires at car +0x548 + 4k) differed
-  before any force. The lever x was -6.19055 in the Sim and -6.1901364 in the original. The other
+  before any force. The tires' levers (mount and drop) showed it: x was -6.19055 in the Sim and -6.1901364 in the original. The other
   tire was +6.1905794 and +6.191113. The y differed by 1.7e-6 and z by up to 2e-4.
   - The original's mounts come off the placed model, so they carry the round trip's rounding.
   - The Sim's come off the unplaced model in `Machine::new`. Its doc already says so.

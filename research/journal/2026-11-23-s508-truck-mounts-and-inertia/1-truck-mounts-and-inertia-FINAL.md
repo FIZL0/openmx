@@ -29,7 +29,7 @@ Task S508. 2026-11-23.
 - Per substep, the Sim's truck against the original's RAM at its engine step, for rows 1569 and 1570.
   The Sim matched the capture through row 1568. The first difference is inside row 1569's first
   substep, not at 1572.
-  - Tire lever x: -6.19055 Sim, -6.1901364 original. The other tire: +6.1905794 and +6.191113.
+  - Tire lever (mount and drop) x: -6.19055 Sim, -6.1901364 original. The other tire: +6.1905794 and +6.191113.
     y differed by 1.7e-6, z by up to 2e-4.
   - Inverse inertia (the collision object's copy): (9.880182e-5, 9.034243e-5, 1.3870311e-4) Sim, (9.880171e-5, 9.034181e-5,
     1.3870181e-4) original.

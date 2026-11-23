@@ -2203,7 +2203,8 @@ fn r48_seat_truck(ee: &Ee, parked: &mut game_sim::car::Parked) {
 
 /// [`r48_seat_truck`] off the truck record `t` (R53's truck is at another address). The inertia, the
 /// collision object's copy of it and the tires' mounts too (S508): the original's come off the placed
-/// model, the Sim's off the unplaced one ([`game_sim::car::Machine::new`]), 0.0005 ft apart.
+/// model, the Sim's off the unplaced one ([`game_sim::car::Machine::new`]): the mounts are 0.0005 ft
+/// apart, the inertia's last digits off (taken to be the same rounding, not traced).
 fn seat_truck(ee: &Ee, t: u32, parked: &mut game_sim::car::Parked) {
     let word = |at: u32| F(ee.f32_at(at));
     let flag = |at: u32| ee.u32_at(at) != 0;
