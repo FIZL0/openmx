@@ -260,6 +260,8 @@ mod away;
 // The desktop updater (P191): a newer release found, downloaded, checked and swapped in.
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
+// F83: the phone's auto-lock off while anything downloads.
+mod keep_awake;
 mod saved_markers;
 // P349: a free ride's progression kept per track, which opens its start zones.
 mod track_progress;

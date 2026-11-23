@@ -778,6 +778,50 @@ fn installs_run_a_few_at_a_time() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// F83: the phone's screen is kept awake from the first Install, queued ones included, until the last
+/// ends, failed or installed, and is free by the time its end is told.
+#[test]
+fn installs_keep_the_screen_awake() {
+    static TOLD: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+    static AWAKE: Awake = Awake::new(|on| TOLD.lock().unwrap().push(on));
+    let told = || TOLD.lock().unwrap().clone();
+    let fake = Fake::start();
+    let (dir, mods) = scratch("awake");
+    let s = Store { awake: &AWAKE, ..Store::new(&fake.base, &dir, &mods) };
+    let all: Vec<Entry> = (0..PARALLEL + 2)
+        .map(|i| {
+            let id = format!("music_{i}");
+            let z = zip(&[put("mod.json", &mod_json(&id, "music"))]);
+            let m = meta(&id, Kind::Music, &z);
+            if i != 1 {
+                fake.publish("main", &m, &z, None); // the second is not in the store: it fails
+            }
+            entry(m, "main", None)
+        })
+        .collect();
+    assert!(told().is_empty());
+    fake.routes.lock().unwrap().held = true;
+    for e in &all {
+        s.install(e);
+    }
+    assert_eq!(told(), [true]);
+    fake.routes.lock().unwrap().held = false;
+    let mut left = all.len();
+    let end = Instant::now() + Duration::from_secs(30);
+    while left > 0 && Instant::now() < end {
+        // read first: only once every download has ended may it say false
+        let seen = told();
+        left -= s.take().iter().filter(|e| matches!(e, Event::Installed(..))).count();
+        assert!(seen == [true] || (seen == [true, false] && !s.busy()), "{seen:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!((left, told()), (0, vec![true, false]));
+    // one that fails, alone
+    assert!(install(&s, &all[1]).is_err());
+    assert_eq!(told(), [true, false, true, false]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A 2×2 PNG, its first pixel `r`.
 fn png_of(r: u8) -> Vec<u8> {
     let at = std::env::temp_dir().join(format!("openmx-modstore-png-{r}-{}.png", std::process::id()));

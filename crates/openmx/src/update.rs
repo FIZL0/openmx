@@ -389,6 +389,8 @@ async fn install(files: &[String; 3], exe: &Path, key: &str, shown: &dyn Fn(u64,
 /// `files[0]` downloaded to `to`, once the sums' signature is checked against `key` and the
 /// download's sha256 against them; any failure leaves no `to`.
 async fn verified(files: &[String; 3], to: &Path, key: &str, shown: &dyn Fn(u64, u64)) -> Result<(), String> {
+    // F83: a phone that locked itself would stop the download
+    let _awake = crate::keep_awake::AWAKE.keep();
     let name = files[0].rsplit('/').next().unwrap_or_default().to_string();
     let sums = fetch(&files[1], 1 << 16).await?;
     let sig = fetch(&files[2], 1 << 12).await?;
@@ -585,6 +587,34 @@ Hs5KaCqvNkJ1Vjp/bntiFqm0CkKzxeGJhK9L+76A3G/wL+xeLy8au+kcLCnYzhku/rp99xxUM9X1p8bb
         // no binary for this platform: offered (the page), nothing to install
         let f = rt.block_on(check(&api, "v0.1.0", Some("openmx-plan9"))).unwrap().unwrap();
         assert!(f.files.is_none() && f.page.ends_with("/page"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F83: the screen is kept awake while the update downloads, and not once it is in or has failed.
+    #[test]
+    fn an_update_keeps_the_screen_awake() {
+        use crate::keep_awake::AWAKE;
+        let rt = rt();
+        let dir = scratch("awake");
+        let files = [("/openmx-linux-x86_64", BIN), ("/SHA256SUMS", SUMS.as_bytes()), ("/SHA256SUMS.sig", SIG.as_bytes())];
+        let base = serve(files.into_iter().map(|(k, v)| (k.to_string(), v.to_vec())).collect());
+        let urls = files.map(|f| format!("{base}{}", f.0));
+        // the other tests' downloads hold it too, so off is waited for
+        let off = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while AWAKE.on() {
+                assert!(std::time::Instant::now() < end, "still held awake");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        let seen = std::cell::Cell::new(false);
+        let shown = |_: u64, _: u64| seen.set(AWAKE.on());
+        rt.block_on(verified(&urls, &dir.join("got"), KEY, &shown)).unwrap();
+        assert!(seen.get());
+        off();
+        let gone = [format!("{base}/no"), urls[1].clone(), urls[2].clone()];
+        assert!(rt.block_on(verified(&gone, &dir.join("no"), KEY, &shown)).is_err());
+        off();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

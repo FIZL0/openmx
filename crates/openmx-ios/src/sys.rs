@@ -119,7 +119,7 @@ pub fn documents() -> PathBuf {
 }
 
 /// The marker that rotation lock was held when the app last ran (opentennis 013ae90e): there while
-/// [`crate::Hold::Locked`] is held, so the next launch starts in landscape ([`crate::Holder::remembering`]).
+/// [`crate::Hold::Locked`] is held, so the next launch starts on that side ([`crate::Holder::remembering`]).
 pub fn rotation_lock_mark() -> PathBuf {
     documents().join("rotation-lock")
 }
@@ -600,7 +600,6 @@ pub fn hold(window: &winit::window::Window, hold: crate::Hold) {
     use winit::platform::ios::{ValidOrientations, WindowExtIOS};
     window.set_valid_orientations(match hold {
         crate::Hold::Landscape => ValidOrientations::Landscape,
-        crate::Hold::Portrait => ValidOrientations::Portrait,
         crate::Hold::Locked => ValidOrientations::LandscapeRight,
     });
     if let Some((_, Some(vc))) = view_of(window).filter(|_| main_thread()) {
@@ -1176,6 +1175,22 @@ extern "C" fn open_on_main(ctx: *mut c_void) {
         let app = get(class(c"UIApplication"), c"sharedApplication");
         let options = get(class(c"NSDictionary"), c"dictionary");
         open(app, sel(c"openURL:options:completionHandler:"), u, options, std::ptr::null_mut());
+    });
+}
+
+/// Auto-lock off while `on`, back to the player's setting after (F83,
+/// `UIApplication.isIdleTimerDisabled`, on the main queue in the order asked). Any thread.
+pub fn keep_awake(on: bool) {
+    let ctx = usize::from(on) as *mut c_void;
+    // SAFETY: the main queue lives for the process; `ctx` is the flag itself, never read through
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, ctx, keep_awake_on_main) };
+}
+
+extern "C" fn keep_awake_on_main(on: *mut c_void) {
+    // SAFETY: on the main thread; objc_msgSend cast to `setIdleTimerDisabled:`'s signature
+    pool(|| unsafe {
+        let set: extern "C" fn(Id, Id, bool) = std::mem::transmute(objc_msgSend as *const ());
+        set(get(class(c"UIApplication"), c"sharedApplication"), sel(c"setIdleTimerDisabled:"), !on.is_null());
     });
 }
 
