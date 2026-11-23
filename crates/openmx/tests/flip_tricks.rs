@@ -129,7 +129,8 @@ fn kit() -> Option<Kit> {
 /// How far a drawn hand may be from its grip, in feet, on a tick the draw holds it there: the solve
 /// lands it exactly, so this is rounding.
 const ON_THE_GRIPS: f32 = 0.05;
-/// How far a drawn hand may be from its grip on a tick nothing holds it and the body is not riding (V61, the original's rule:
+/// How far a drawn hand may be from its grip on a tick nothing holds it and the body is not riding
+/// (V61, the original's rule:
 /// its riding ragdoll is not placed while a pose off the clip table is in charge, so the rider is
 /// drawn as the clip wrote it): a backflip and the landing out of one, and the few ticks the body
 /// fades out of a trick the bike has a clip for. The disc's backflip leaves them 0.17 ft off in the
@@ -352,13 +353,13 @@ fn trick_in_a_flip(f: Flip, name: &str, slot: usize, trick: Controls, at: usize)
             s.drawn_off()
         );
     }
-    assert!(seen[FRAMES - 1].on_ground && seen[FRAMES - 1].riding,"{name} in {f:?}: not riding on at the end");
+    assert!(seen[FRAMES - 1].on_ground && seen[FRAMES - 1].riding, "{name} in {f:?}: not riding on at the end");
 }
 
 /// The report itself: a Tsunami off a front flip, and one alone, end with the hands on the grips, as
 /// near as the clip has them until the body is riding again.
 #[test]
-fn a_tsunami_ends_with_the_hands_on_the_grips() {
+fn a_tsunami_ends_riding_with_the_hands_as_the_clip_has_them() {
     if kit().is_none() {
         return;
     }

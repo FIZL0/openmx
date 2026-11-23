@@ -29,15 +29,19 @@ Task V63. 2026-11-23.
     already (K87).
   - `a_360_keeps_the_hands_on_the_bars` is renamed `a_360_fades_back_to_the_airborne_row`.
 - **Openmx.**
-  - `foot_down`, `flip_tricks`, `switch_back_anim` and `reverse_clips`: 73 pass.
+  - `foot_down`, `flip_tricks`, `switch_back_anim` and `reverse_clips`: 73 pass,
+    with the trick packs in the slot (`flip_tricks` skips without).
   - `poof_cut`, `tiled_world` and `netplay`: 97 pass.
 
 ## Assertions deleted
 
 - **Hands on grips.** The drawn-hands-on-grips assertions measured the stand-in. They were in the V20,
-  V69 and V100 tests, and in `foot_down` as pegs.
-- **Feet after a 360.** The "feet settled on pegs within 0.05 ft after a 360" assertion (V77-ish)
-  is gone.
+  V69 and V100 tests, in `flip_tricks` on riding ticks, and in `foot_down` (hands on the grips and feet
+  back on the pegs).
+- **Not replaced.** Only the full whip (V100) checks the riding ragdoll's hands; the 360 and moving off
+  have no such check.
+- **Feet after a 360.** The "feet settled on pegs within 0.05 ft after a 360" assertion
+  (`a_360_throws_the_rider_off_the_pegs`) is gone.
 
 ## Pictures
 
