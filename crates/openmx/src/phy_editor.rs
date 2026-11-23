@@ -245,7 +245,7 @@ impl Editor {
         crate::files::write(&path, self.ini().text()).map_err(|e| format!("{}: {e}", path.display()))?;
         let knobs: Vec<String> = knobs().zip(self.edits.0).filter(|(_, p)| *p != STOCK).map(|(k, p)| format!("{}: {p}", quote(k.label))).collect();
         let json = format!(
-            "{{\n  \"standard\": 1,\n  \"kind\": {},\n  \"id\": {},\n  \"name\": {},\n  \"version\": \"1.0\",\n  \"author\": \"openmx physics editor\",\n  \"bike\": {},\n  \"knobs\": {{{}}}\n}}\n",
+            "{{\n  \"standard\": 1,\n  \"kind\": {},\n  \"id\": {},\n  \"name\": {},\n  \"version\": \"1.0.0\",\n  \"author\": \"openmx physics editor\",\n  \"bike\": {},\n  \"knobs\": {{{}}}\n}}\n",
             quote(KIND),
             quote(&id),
             quote(name),
