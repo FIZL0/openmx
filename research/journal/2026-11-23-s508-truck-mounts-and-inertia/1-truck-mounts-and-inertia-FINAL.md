@@ -21,8 +21,8 @@ Task S508. 2026-11-23.
 
 - The tire mounts (tire +0x80, tires at car +0x548 + 4k) come off the placed model. The placed
   model's round trip rounds them.
-- The body's inverse inertia (+0x120) and the collision object's copy (car +0x170 object, +0x80) carry
-  the same rounding.
+- The body's inverse inertia (+0x120) and the collision object's copy (car +0x170 object, +0x80) differ
+  from the Sim's in the last digits too (taken to be the same rounding, not traced).
 
 ## How it was proved
 
@@ -31,10 +31,10 @@ Task S508. 2026-11-23.
   substep, not at 1572.
   - Tire lever x: -6.19055 Sim, -6.1901364 original. The other tire: +6.1905794 and +6.191113.
     y differed by 1.7e-6, z by up to 2e-4.
-  - Inverse inertia: (9.880182e-5, 9.034243e-5, 1.3870311e-4) Sim, (9.880171e-5, 9.034181e-5,
+  - Inverse inertia (the collision object's copy): (9.880182e-5, 9.034243e-5, 1.3870311e-4) Sim, (9.880171e-5, 9.034181e-5,
     1.3870181e-4) original.
-- With only the mounts and the inertia seated, the truck and plane stay within 0.0007 ft/s through
-  row 1610. The wing ray at 1587 is met.
+- With only the mounts and the body's inverse inertia seated, the truck and plane stay within 0.0007 ft/s through
+  row 1610. The wing ray at 1587 is met. With the collision object's copy too, they are bit-identical.
 - `cargo test --release -p game-sim --test c16_fly`: all 19 pass, including R53's with their results
   unchanged.
 

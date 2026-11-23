@@ -163,11 +163,11 @@ at 1572.
   - The Sim's come off the unplaced model in `Machine::new`. Its doc already says so.
   - The test's `seat_truck` did not take them off the image.
 - **Cause 2: the inertia.** The body's inverse inertia (+0x120) and the collision object's copy
-  (car +0x170 object, +0x80) differed in the last digits. Sim: (9.880182e-5, 9.034243e-5,
-  1.3870311e-4). Original: (9.880171e-5, 9.034181e-5, 1.3870181e-4). Same rounding. It changes the
+  (car +0x170 object, +0x80) differed in the last digits. The copy: Sim (9.880182e-5, 9.034243e-5,
+  1.3870311e-4). Original: (9.880171e-5, 9.034181e-5, 1.3870181e-4). Taken to be the same rounding (not traced). It changes the
   wake impulse's last digits.
-- **With only these two seated,** the truck and plane stay within 0.0007 ft/s through row 1610. The
-  1587 wing ray is met.
+- **With only the mounts and the body's inverse inertia seated,** the truck and plane stay within 0.0007 ft/s through row 1610. The
+  1587 wing ray is met. With the collision object's copy too, they are bit-identical.
 - **The fix is in the test.** `seat_truck` in `crates/game-sim/tests/c16_fly.rs` now takes the
   mounts and both inertias off the image. `tests/car_spawn.rs` already does this for mounts and body
   inertia. No shipped code changed.
