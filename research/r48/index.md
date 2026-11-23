@@ -147,7 +147,36 @@ Per substep, the oracle's truck (hooked after its tire step 0x397f40) beside the
   (about t 0.9998); the Sim's ray does not reach it (its box test drops the facet). The Sim's truck
   is 0.0015 ft ahead there, from the 0.002-0.008 ft/s left since row 1572. The lost contact gives
   the Sim's plane a sideways kick on 1587's second substep, and the two part from 1588.
-  - Not chased: what leaves the 0.005 ft/s at row 1572 (the truck's kick tick 1574 starts there).
+  - S508 settled it. See "The last difference (S508)" below.
+
+### The last difference (S508)
+
+Per substep, the Sim's truck beside the original's RAM at its engine step (hook on 0x399e40), in
+the node update 0x26f800, replayed off `states/r48/r48-1487.ram`. Every field was diffed. The Sim
+matched the capture through row 1568. The first difference is inside row 1569's first substep, not
+at 1572.
+
+- **Cause 1: the tire mounts.** Each tire's mount (tire +0x80; tires at car +0x548 + 4k) differed
+  before any force. The tires' levers (mount and drop) showed it: x was -6.19055 in the Sim and -6.1901364 in the original. The other
+  tire was +6.1905794 and +6.191113. The y differed by 1.7e-6 and z by up to 2e-4.
+  - The original's mounts come off the placed model, so they carry the round trip's rounding.
+  - The Sim's come off the unplaced model in `Machine::new`. Its doc already says so.
+  - The test's `seat_truck` did not take them off the image.
+- **Cause 2: the inertia.** The body's inverse inertia (+0x120) and the collision object's copy
+  (car +0x170 object, +0x80) differed in the last digits. The copy: Sim (9.880182e-5, 9.034243e-5,
+  1.3870311e-4). Original: (9.880171e-5, 9.034181e-5, 1.3870181e-4). Taken to be the same rounding (not traced). It changes the
+  wake impulse's last digits.
+- **With only the mounts and the body's inverse inertia seated,** the truck and plane stay within 0.0007 ft/s through row 1610. The
+  1587 wing ray is met. With the collision object's copy too, they are bit-identical.
+- **The fix is in the test.** `seat_truck` in `crates/game-sim/tests/c16_fly.rs` now takes the
+  mounts and both inertias off the image. `tests/car_spawn.rs` already does this for mounts and body
+  inertia. No shipped code changed.
+- **Result.** `r48_the_plane_keeps_pushing_the_truck` now asserts position and velocity, all axes,
+  of the plane and the truck. They are bit-identical to the capture rows 1570 to 1640, the tape's
+  last compared row. `R48_PUSH_THROUGH` is now 1640, was 1604. Before, z held only within 0.3 ft and
+  2.6 ft/s.
+- **Checks.** The truck steps the same on every substep as the original's RAM, for ticks 1569 and
+  1570. All 19 `c16_fly` tests pass. R53's tests pass with their results unchanged.
 
 ### In the riders' world (S491)
 
