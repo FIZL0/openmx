@@ -2201,7 +2201,9 @@ fn r48_seat_truck(ee: &Ee, parked: &mut game_sim::car::Parked) {
     seat_truck(ee, R48_TRUCK, parked);
 }
 
-/// [`r48_seat_truck`] off the truck record `t` (R53's truck is at another address).
+/// [`r48_seat_truck`] off the truck record `t` (R53's truck is at another address). The inertia, the
+/// collision object's copy of it and the tires' mounts too (S508): the original's come off the placed
+/// model, the Sim's off the unplaced one ([`game_sim::car::Machine::new`]), 0.0005 ft apart.
 fn seat_truck(ee: &Ee, t: u32, parked: &mut game_sim::car::Parked) {
     let word = |at: u32| F(ee.f32_at(at));
     let flag = |at: u32| ee.u32_at(at) != 0;
@@ -2209,6 +2211,8 @@ fn seat_truck(ee: &Ee, t: u32, parked: &mut game_sim::car::Parked) {
     let b = ee.u32_at(t + 0x160);
     let body = &mut m.body;
     body.enabled = flag(b);
+    body.inv_inertia = quad(ee, b + 0x120);
+    parked.collision.collider.inv_inertia = quad(ee, ee.u32_at(t + 0x170) + 0x80);
     for (v, o) in [
         (&mut body.last_position, 0x50),
         (&mut body.position, 0x60),
@@ -2232,6 +2236,7 @@ fn seat_truck(ee: &Ee, t: u32, parked: &mut game_sim::car::Parked) {
     }
     for (k, w) in m.wheels.iter_mut().enumerate() {
         let at = ee.u32_at(t + 0x548 + 4 * k as u32);
+        w.mount = quad(ee, at + 0x80);
         let s = &mut w.s;
         (s.grounded, s.low_speed_grip, s.slipping, s.sliding, s.locked) = (flag(at + 0xc0), flag(at + 0x1e0), flag(at + 0x1e4), flag(at + 0x1e8), flag(at + 0x1ec));
         s.handoff = flag(at + 0xc8).then(|| word(at + 0xcc));
@@ -2340,35 +2345,31 @@ fn r48_the_plane_taxied_into_the_truck_wakes_it_on_the_originals_tick() {
 
 /// The last row [`r48_the_plane_keeps_pushing_the_truck`] holds the plane and the truck to the
 /// capture's.
-const R48_PUSH_THROUGH: u32 = 1604;
+const R48_PUSH_THROUGH: u32 = 1640;
 
 /// **The plane taxied into the truck keeps pushing it** (S487, S489a): the woken truck searches and
 /// steps in the plane's dynamics world ([`game_sim::car::InPlane`]), and on a tick the plane strikes
-/// it its controls drive, brakes off ([`game_sim::car::InPlane::struck`]). Through `R48_PUSH_THROUGH`
-/// the plane and the truck follow the capture along `+z` (place within 0.3 ft, speed within 2.6 ft/s;
-/// rows 1570-1579 within 0.01 ft and 0.6 ft/s: the rows 1571-1573 with no plane contact, the truck's
-/// 18.9 ft/s kick at 1574, its climb to 25 by 1582), both awake to row 1640, and the truck driven past
-/// z 3870 by row 1628 (the original's 3877). Since S489 the truck's own strikes on the plane's hull
-/// keep its brakes off as well, and the truck follows the original's replay within 0.008 ft/s (each
-/// tick's first substep) through row 1587. Not held: at row 1587 the plane's wing ray (its tip at `x` 7.5) meets the truck 0.0015 ft short of its
-/// tip in the original and just misses it in the Sim; from there the push parts, the truck 1.7 ft/s
-/// slow by row 1605.
+/// it its controls drive, brakes off ([`game_sim::car::InPlane::struck`]), as on a tick the truck's
+/// own rays strike the plane's hull (S489). On every row after the meeting's (torn, see
+/// [`r48_the_originals_node_update_replays_the_push`]) through `R48_PUSH_THROUGH` the plane's and the
+/// truck's places and velocities are the capture's bit for bit (S508, with the tires' mounts and the
+/// truck's inertia off the image: [`seat_truck`]), both awake, the truck driven past z 3877 by 1628.
 #[test]
 fn r48_the_plane_keeps_pushing_the_truck() {
     let Some(cap) = r48_capture() else { return };
     let Some((ticks, _, _)) = r48_fly(1640) else { return };
     let at = |f: u32| &ticks[(f - R48_FROM - 1) as usize];
-    for f in R48_MEET..1640 {
+    for f in R48_MEET..=R48_PUSH_THROUGH {
         assert!(at(f).awake && cap.u(f, "truck_awake") == 1, "row {f}: the truck awake on both");
     }
     for f in R48_MEET + 1..=R48_PUSH_THROUGH {
         let t = at(f);
-        let (p, pv) = (cap.f(f, "body_pos.z"), cap.f(f, "body_vel.z"));
-        let (c, cv) = (cap.f(f, "truck_pos.z"), cap.f(f, "truck_vel.z"));
-        assert!((t.plane.z() - p).abs() < 0.3 && (t.plane_vel.z() - pv).abs() < 2.6, "row {f}: plane z {} at {} vs {p} at {pv}", t.plane.z(), t.plane_vel.z());
-        assert!((t.truck.z() - c).abs() < 0.3 && (t.truck_vel.z() - cv).abs() < 2.6, "row {f}: truck z {} at {} vs {c} at {cv}", t.truck.z(), t.truck_vel.z());
+        for (what, got) in [("body_pos", t.plane), ("body_vel", t.plane_vel), ("truck_pos", t.truck), ("truck_vel", t.truck_vel)] {
+            let want = r48_row(&cap, f, what);
+            assert_eq!(three(got), three(want), "row {f}: {what} {:?} vs {:?}", got.0, want.0);
+        }
     }
-    assert!(at(1628).truck.z() > 3870.0 && cap.f(1628, "truck_pos.z") > 3877.0, "the truck driven to {} by row 1628", at(1628).truck.z());
+    assert!(at(1628).truck.z() > 3877.0 && cap.f(1628, "truck_pos.z") > 3877.0, "the truck driven to {} by row 1628", at(1628).truck.z());
 }
 
 /// R48's world node in the tape's state: its count at `+0x30` and its objects' array at `+0x38`, the
