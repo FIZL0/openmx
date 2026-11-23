@@ -1,9 +1,10 @@
-"""Turn research/c10/at_ticks.py's saves from this slot's copy into RAM images (S158):
-context/states/s158/<ride>-<frame>.ram.
+"""Turn research/c10/at_ticks.py's saves from this slot's copy into RAM images (S158, S504):
+context/states/<task>/<ride>-<frame>.ram.
 
-    python3 -B research/s158/rams.py RIDE LOG     # LOG: the at_ticks.py output (`tick slot at counter`)
+    KIT_PCSX2=3 python3 -B research/s158/rams.py RIDE LOG [TASK]   # LOG: the at_ticks.py output (`tick slot at counter`)
 
-C10's rams.py (research/c10/rams.py) with kit copy 1's saves and the ride's name in front. Each image
+C10's rams.py (research/c10/rams.py) with the kit copy's saves (copy 1 unless KIT_PCSX2 says) and the
+ride's name in front; TASK is s158 unless given. Each image
 is named by the frame_counter it holds, which may not be the tick asked for (said so). Research, not
 product.
 """
@@ -15,9 +16,10 @@ import subprocess
 import sys
 
 FRAME_COUNTER = 0x00479d04
-SAVES = os.path.join('..', 'pcsx2', 's1', 'PCSX2', 'savestates')
+SAVES = os.path.join('..', 'pcsx2', 's' + os.environ.get('KIT_PCSX2', '1'), 'PCSX2', 'savestates')
 ride, log = sys.argv[1:3]
-out_dir = os.path.join('context', 'states', 's158')
+task = sys.argv[3] if len(sys.argv) > 3 else 's158'
+out_dir = os.path.join('context', 'states', task)
 os.makedirs(out_dir, exist_ok=True)
 for line in open(log):
     m = re.match(r'(\d+) (\d+) at (\d+)$', line.strip())

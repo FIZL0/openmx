@@ -31,6 +31,11 @@
 //! [`the_rear_strikes_images_are_one_ride`] ties the images to each other and to the capture, and
 //! [`the_original_tick_into_the_wreck_is_row_128380`] is P2 riding on into P1's wreck, the original's
 //! side only, as 3414.
+//!
+//! S504 adds three more in that state, tapes grown by `research/s504/pilot.py`: a head-on (128255), P2
+//! landing on P1 (128315) and a side swipe (129028), each a [`NAMED`] contact. The 2p state's node
+//! lists P2's bike before P1's, S93's the other way (they swap in the middle of the long ride), and the
+//! search goes in that order, so the port is given it ([`rider_contact::gather_in`]).
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};
@@ -148,6 +153,10 @@ impl Split {
 ///
 /// `before_torn`: what the row before caught mid-frame, so the image is not compared there (S158's
 /// rear strike: see [`TWO_P`]).
+///
+/// `after`: the image of the contact's frame, where the rows around it were read after P2's update and
+/// before P1's, so they hold P2 a frame on (S504's landing, however often it is recorded): before the
+/// contact P2 is compared a row earlier, and after it, which no row holds, with this image.
 struct Named {
     image: &'static str,
     capture: &'static str,
@@ -155,10 +164,11 @@ struct Named {
     wreck: [u32; 2],
     p1_torn: bool,
     before_torn: &'static [&'static str],
+    after: Option<&'static str>,
     state: &'static State,
 }
 
-const NAMED: [Named; 3] = [
+const NAMED: [Named; 6] = [
     Named {
         image: "s93-long-3402",
         capture: "split/splitscreen",
@@ -166,6 +176,7 @@ const NAMED: [Named; 3] = [
         wreck: [1, 0],
         p1_torn: false,
         before_torn: &[],
+        after: None,
         state: &SPLIT,
     },
     Named {
@@ -175,6 +186,7 @@ const NAMED: [Named; 3] = [
         wreck: [0, 1],
         p1_torn: true,
         before_torn: &[],
+        after: None,
         state: &SPLIT,
     },
     // S158's rear strike: P2 at 70 ft/s into P1 standing. One of P1's body rays finds P2's frame (the
@@ -186,6 +198,42 @@ const NAMED: [Named; 3] = [
         wreck: [4, 0],
         p1_torn: false,
         before_torn: &["p2 force", "p2 moment"],
+        after: None,
+        state: &TWO_P,
+    },
+    // S504's head-on: P1 at 39 ft/s and P2 at 44 into each other in the air. Each has two rays of its
+    // own and two mirrors of the other's on its list; P2 goes over the bars, P1 stays up.
+    Named {
+        image: "s504/head_on-128254",
+        capture: "2p/s504-head_on",
+        frame: 128255,
+        wreck: [0, 1],
+        p1_torn: false,
+        before_torn: &[],
+        after: None,
+        state: &TWO_P,
+    },
+    // S504's landing: P2 comes down off a jump on P1 standing. One of P1's rays finds P2; P1 is crushed
+    // (7) and P2 rides on.
+    Named {
+        image: "s504/landing-128314",
+        capture: "2p/s504-landing",
+        frame: 128315,
+        wreck: [7, 0],
+        p1_torn: false,
+        before_torn: &[],
+        after: Some("s504/landing-128315"),
+        state: &TWO_P,
+    },
+    // S504's side swipe: the two alongside at 47 and 50 ft/s, leaning together. One ray each; both stay up.
+    Named {
+        image: "s504/swipe-129027",
+        capture: "2p/s504-swipe",
+        frame: 129028,
+        wreck: [0, 0],
+        p1_torn: false,
+        before_torn: &[],
+        after: None,
         state: &TWO_P,
     },
 ];
@@ -289,12 +337,18 @@ fn the_original_tick_into_the_wreck_is_row_128380() {
 }
 
 /// Every image S93 saved in the split rides: the two above, the three biplane ones and the two the
-/// rides were recorded from; and S158's rear strike's, both riders up, before the contact.
-const IMAGES: [(&str, &State); 11] = [
+/// rides were recorded from; and S158's and S504's, both riders up, before the contact.
+const IMAGES: [(&str, &State); 17] = [
     ("s158/rear-128372", &TWO_P),
     ("s158/rear-128374", &TWO_P),
     ("s158/rear-128376", &TWO_P),
     ("s158/rear-128377", &TWO_P),
+    ("s504/head_on-128253", &TWO_P),
+    ("s504/head_on-128254", &TWO_P),
+    ("s504/landing-128313", &TWO_P),
+    ("s504/landing-128314", &TWO_P),
+    ("s504/swipe-129026", &TWO_P),
+    ("s504/swipe-129027", &TWO_P),
     ("s93-long-3402", &SPLIT),
     ("s93-long-4661", &SPLIT),
     ("s93-long-5074", &SPLIT),
@@ -523,6 +577,21 @@ fn against_row(got: [Quantities; 2], cap: &Split, row: usize) -> Vec<String> {
     bad
 }
 
+/// The contact's tick against its row, and P2 against [`Named::after`] where there is one (whose P1
+/// must be the row's).
+fn against_contact(got: [Quantities; 2], named: &Named, cap: &Split) -> Vec<String> {
+    let mut bad = against_row(got, cap, cap.row_at(named.frame) + named.state.row_lag);
+    let Some(ee) = named.after.and_then(image) else { return bad };
+    let pl = (named.state.players)(&ee);
+    bad.retain(|b| b.starts_with("p1 "));
+    for p in 0..2 {
+        if quantities(&ee, pl, p) != got[p] {
+            bad.push(format!("p{}: {:?} vs the image after {:?}", p + 1, got[p], quantities(&ee, pl, p)));
+        }
+    }
+    bad
+}
+
 fn dt(ee: &Ee) -> f32 {
     ee.f32_at(addr("frame_dt").unwrap())
 }
@@ -564,13 +633,18 @@ fn the_original_tick_from_each_image_is_the_contact_row() {
         let row = cap.row_at(named.frame) + named.state.row_lag;
         let pl = (named.state.players)(&ee);
         let before = [quantities(&ee, pl, 0), quantities(&ee, pl, 1)];
+        let mut off = against_row(before, &cap, row - 1);
+        if named.after.is_some() {
+            off.retain(|b| b.starts_with("p1 "));
+            off.extend(against_row(before, &cap, row - 2).into_iter().filter(|b| b.starts_with("p2 ")));
+        }
         let off: Vec<String> =
-            against_row(before, &cap, row - 1).into_iter().filter(|b| !named.before_torn.iter().any(|t| b.starts_with(t))).collect();
+            off.into_iter().filter(|b| !named.before_torn.iter().any(|t| b.starts_with(t))).collect();
         assert_eq!(off, Vec::<String>::new(), "{} is not the row before", named.image);
         assert_eq!(wrecks(&ee, pl), [0, 0], "{}: a rider is already down", named.image);
         let dt = step_dt(&ee, named, &cap);
         let (riders, wrecks) = tick(ee, named, dt, Box::new(run_original));
-        assert_eq!(against_row(riders, &cap, row), Vec::<String>::new(), "{} ticked is not {}", named.image, named.frame);
+        assert_eq!(against_contact(riders, named, &cap), Vec::<String>::new(), "{} ticked is not {}", named.image, named.frame);
         assert_eq!(wrecks, named.wreck, "{}: who wrecks", named.image);
     }
 }
@@ -588,7 +662,6 @@ fn the_port_finds_the_originals_contacts() {
             .iter()
             .map(|&r| Seat { col: Some(&col), at: mat_at(&ee, ee.u32_at(r + 0xf8)), ghost: false, riding: true })
             .collect();
-        let port = rider_contact::gather(&seats, F(dt));
 
         // the original's first half of the node's update: every object emptied, then every one searches
         let count = ee.u32_at(node + 0x30);
@@ -598,6 +671,9 @@ fn the_port_finds_the_originals_contacts() {
             "{}: the riders' objects are not the node's last two",
             named.image
         );
+        // the search goes in list order: P1 first in S93's images, P2 first in the 2p state's
+        let order: Vec<usize> = objects.iter().filter_map(|o| recs.iter().position(|r| r == o)).collect();
+        let port = rider_contact::gather_in(&seats, &order, F(dt));
         for &o in &objects {
             ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x74), &[u64::from(o)], &[], 50_000_000);
         }
@@ -733,8 +809,7 @@ fn the_tick_with_the_ports_resolve_is_the_contact_row() {
         });
         let (riders, wrecks) = tick(ee, named, dt, port);
         assert_eq!(*stood_in.borrow(), named.state.resolves.len(), "{}", named.image);
-        let row = cap.row_at(named.frame) + named.state.row_lag;
-        assert_eq!(against_row(riders, &cap, row), Vec::<String>::new(), "{} with the port's resolve", named.image);
+        assert_eq!(against_contact(riders, named, &cap), Vec::<String>::new(), "{} with the port's resolve", named.image);
         assert_eq!(wrecks, named.wreck, "{} with the port's resolve: who wrecks", named.image);
     }
 }

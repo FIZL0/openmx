@@ -1,0 +1,76 @@
+release
+release
+stick l 0.000 0.000
+sleep 10t
+release
+down cross 1.000
+stick l 1.000 0.000
+sleep 60t
+release
+down cross 0.350
+stick l 1.000 0.000
+sleep 20t
+release
+stick l 1.000 0.000
+sleep 20t
+release
+down cross 0.350
+stick l 1.000 0.000
+sleep 40t
+release
+stick l 1.000 0.000
+sleep 40t
+release
+down cross 0.350
+stick l 0.320 0.000
+sleep 20t
+release
+stick l -0.310 0.000
+sleep 20t
+release
+stick l -0.450 0.000
+sleep 20t
+release
+down cross 1.000
+stick l -0.480 0.000
+sleep 20t
+release
+down cross 0.350
+stick l -0.490 0.000
+sleep 20t
+release
+down square
+stick l -1.000 0.000
+sleep 14t
+release
+stick l -0.750 0.000
+sleep 7t
+release
+down cross 0.350
+stick l 0.570 0.000
+sleep 7t
+release
+down cross 0.350
+stick l 1.000 0.000
+sleep 7t
+release
+stick l 1.000 0.000
+sleep 14t
+release
+down cross 0.350
+stick l 0.530 0.000
+sleep 7t
+release
+down cross 0.350
+stick l -0.280 0.000
+sleep 7t
+release
+stick l -0.830 0.000
+sleep 7t
+release
+stick l -1.000 0.000
+sleep 7t
+release
+down cross 0.350
+stick l -1.000 0.000
+sleep 134t
