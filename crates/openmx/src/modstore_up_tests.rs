@@ -692,6 +692,21 @@ fn a_machine_pack_uploads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// F85: a handling mod as the physics editor saves it packages; without its bike file it does not.
+#[test]
+fn a_handling_mod_uploads() {
+    let (dir, mods) = scratch("handling_up");
+    let folder = crate::phy_editor::Editor::new("Bike\\Race125P.phy", b"[Engine]\r\n").save(&mods, "Moon").unwrap();
+    let l = locals(&mods).into_iter().find(|l| l.id == "phy_moon").expect("the mod is one of the player's mods");
+    let p = package(&mods, &l, "tester").unwrap();
+    assert_eq!((p.meta.kind, p.meta.id.as_str(), p.meta.version.as_str()), (Kind::Handling, "phy_moon", "1.0.0"));
+    drop(p);
+    std::fs::remove_file(folder.join("race125p.phy")).unwrap();
+    let why = package(&mods, &l, "tester").err().unwrap();
+    assert!(why.contains("race125p.phy"), "{why}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- P241: worlds ------------------------------------------------------------------------------
 
 /// P241: a small world of the player's own in `mods/tracks/<id>`, as openmx-mods' stitch lays one

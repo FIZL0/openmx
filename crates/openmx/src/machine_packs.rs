@@ -284,8 +284,9 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
 }
 
 /// The machine pack `id` in `mods/machines/` read whole (F85: the mod store's check of a download and
-/// of an upload), as hostile input: its `mod.json`, every file that names through the reader a ride
-/// takes it with, and every model and texture in the folder. The first thing that does not read is why.
+/// of an upload), as hostile input: its `mod.json`, every model, texture, collision and build it names
+/// through the reader a ride takes it with, and its `.phy` and table files decoded as the text they
+/// are (their readers take any text). The first thing that does not read is why.
 pub fn check(mods: &Path, id: &str) -> Result<(), String> {
     let pack = read(&mods.join(MACHINES_DIR).join(id))?.ok_or("not a machine pack")?;
     if pack.id != id {
