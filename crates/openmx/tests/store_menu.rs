@@ -143,9 +143,13 @@ fn the_store_screen_walks_and_asks() {
     assert_eq!(m.take_store_asks(), [], "nothing lit, nothing asked");
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!((m.store.tab, lit(&m).as_deref()), (2, Some("b/m0")));
-    // past Music, P230's Texture Packs and Pack Order, P199's Upload and My Mods pages, then round to Tracks
+    // past Music, P230's Texture Packs, F85's Machines and Handling, P230's Pack Order, P199's Upload and My Mods pages, then round to Tracks
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!((m.store.tab, STORE_TABS[m.store.tab], lit(&m)), (TEXTURES_TAB, "Texture Packs", None));
+    for (tab, name) in [(4, "Machines"), (5, "Handling")] {
+        tap(&mut m, &mut reader, Control::R1);
+        assert_eq!((m.store.tab, STORE_TABS[m.store.tab], lit(&m)), (tab, name, None));
+    }
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!(m.store.tab, PACKS_TAB);
     assert_eq!(m.take_store_asks(), [StoreAsk::Packs], "Pack Order reads the mods folder's packs");

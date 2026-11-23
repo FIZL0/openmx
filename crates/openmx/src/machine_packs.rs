@@ -172,10 +172,7 @@ pub struct Build {
 /// machine pack and could not be read.
 pub fn find(mods: &Path) -> (Vec<Pack>, Vec<String>) {
     let dir = mods.join(MACHINES_DIR);
-    let mut folders: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(d) => d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.join("mod.json").is_file()).collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut folders: Vec<PathBuf> = crate::files::list(&dir).unwrap_or_default().into_iter().map(|e| e.path).filter(|p| crate::files::is_file(p.join("mod.json"))).collect();
     folders.sort();
     let (mut packs, mut why) = (Vec::new(), Vec::new());
     for folder in folders {
@@ -190,7 +187,7 @@ pub fn find(mods: &Path) -> (Vec<Pack>, Vec<String>) {
 
 /// `Ok(None)` for a mod that is not a machine pack.
 pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
-    let text = std::fs::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
+    let text = crate::files::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
     let json = Json::parse(&text).map_err(|e| format!("mod.json: {e}"))?;
     if json.get("kind").and_then(Json::str) != Some("machine") {
         return Ok(None);
@@ -260,7 +257,7 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         game: json.get("source").and_then(|j| j.get("game")).and_then(Json::str).map_or_else(|| name.clone(), str::to_owned),
         name,
         machine: s(json.get("machine")),
-        files: Res::folder(folder)?,
+        files: crate::files::folder(folder)?,
         folder: folder.to_owned(),
         builds,
         phy: match json.get("phy") {
@@ -284,6 +281,63 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         step: s(json.get("step")),
         id,
     }))
+}
+
+/// The machine pack `id` in `mods/machines/` read whole (F85: the mod store's check of a download and
+/// of an upload), as hostile input: its `mod.json`, every file that names through the reader a ride
+/// takes it with, and every model and texture in the folder. The first thing that does not read is why.
+pub fn check(mods: &Path, id: &str) -> Result<(), String> {
+    let pack = read(&mods.join(MACHINES_DIR).join(id))?.ok_or("not a machine pack")?;
+    if pack.id != id {
+        return Err(format!("mod.json's id is {}, in the folder {id}", pack.id));
+    }
+    for e in pack.files.entries() {
+        let bytes = || pack.files.read(&e.name);
+        match e.name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+            Some("psg") => drop(bytes().and_then(|b| Model::parse(&b)).map_err(|w| format!("{}: {w}", e.name))?),
+            Some("pst") => drop(bytes().and_then(|b| Texture::parse(&b)).map_err(|w| format!("{}: {w}", e.name))?),
+            _ => {}
+        }
+    }
+    let named = |name: &str| if name.is_empty() { Ok(()) } else { pack.ini_bytes(name).map(|_| ()) };
+    for name in pack.phy.iter().chain([&pack.cameras, &pack.engine, &pack.particles, &pack.zones, &pack.helicopter_engine, &pack.machine_sounds, &pack.rider_motions, &pack.rider_stunts]) {
+        named(name)?;
+    }
+    if !pack.table.is_empty() {
+        pack.stunts()?;
+    }
+    for b in &pack.builds {
+        pack.model(&b.chassis)?;
+        for p in pack.vehicle(b)?.parts {
+            if pack.files.find_suffix(&format!("{}.psg", p.model)).is_none() {
+                return Err(format!("{}: no {}.psg", b.sub, p.model));
+            }
+        }
+    }
+    let model = |name: &str| pack.files.read(&member(name)).and_then(|b| Model::parse(&b)).map(|_| ()).map_err(|w| format!("{name}: {w}"));
+    let rays = |name: &str| pack.files.read(&member(name)).and_then(|b| Rays::parse(&b)).map(|_| ()).map_err(|w| format!("{name}: {w}"));
+    for k in &pack.skins {
+        for name in [&k.psg, &k.ui].into_iter().filter(|n| !n.is_empty()) {
+            model(name)?;
+        }
+        if !k.hull.is_empty() {
+            pack.files.read(&member(&k.hull)).and_then(|b| Mesh::parse(&b)).map_err(|w| format!("{}: {w}", k.hull))?;
+        }
+        if !k.rays.is_empty() {
+            rays(&k.rays)?;
+        }
+    }
+    for f in &pack.fliers {
+        for name in [&f.phy, &f.cameras, &f.replay_cameras, &f.particles] {
+            named(name)?;
+        }
+    }
+    for c in &pack.cars {
+        named(&c.phy)?;
+        model(&c.psg)?;
+        rays(&c.col)?;
+    }
+    Ok(())
 }
 
 /// A file's bytes as an INI reader takes them: a BPB written back as the text of its sections and pairs

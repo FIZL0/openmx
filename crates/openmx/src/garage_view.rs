@@ -322,7 +322,7 @@ fn dress_flier(tools: &mut Tools, flier: &roster::Flier) -> Result<Dressed, Stri
     let mut assets = Assets::default();
     match &flier.preview {
         Some((folder, file)) => {
-            let res = [game_render::disc::Res::folder(folder)?];
+            let res = [crate::files::folder(folder)?];
             let path = file.replace('/', "\\");
             let stem = path.strip_suffix(".psg").or_else(|| path.strip_suffix(".PSG")).unwrap_or(&path);
             if !assets.load_as(&res, stem, FLIER) {

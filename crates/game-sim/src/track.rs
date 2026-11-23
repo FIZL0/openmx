@@ -570,7 +570,7 @@ impl Node {
 }
 
 fn nodes(r: &mut Reader, count: u32) -> Result<Vec<Node>, String> {
-    let mut out = Vec::with_capacity(count as usize);
+    let mut out = Vec::with_capacity((count as usize).min(r.bytes.len()));
     for _ in 0..count {
         out.push(Node {
             volume: r.f()?,
@@ -659,7 +659,7 @@ fn mesh_body(r: &mut Reader, version: u32, surface: Option<u32>) -> Result<Mesh,
     let vertices = points(r, vertex_count, packed)?;
     let normals = if r.u32()? == 0 { None } else { Some(points(r, vertex_count, packed)?) };
     let nodes = nodes(r, node_count)?;
-    let mut triangles = Vec::with_capacity(triangle_count as usize);
+    let mut triangles = Vec::with_capacity((triangle_count as usize).min(r.bytes.len()));
     for _ in 0..triangle_count {
         triangles.push(Triangle {
             distance: r.f()?,
@@ -680,13 +680,13 @@ fn mesh_body(r: &mut Reader, version: u32, surface: Option<u32>) -> Result<Mesh,
 
 fn points(r: &mut Reader, count: u32, packed: u32) -> Result<Points, String> {
     if packed == 0 {
-        let mut out = Vec::with_capacity(count as usize);
+        let mut out = Vec::with_capacity((count as usize).min(r.bytes.len()));
         for _ in 0..count {
             out.push(r.v3()?);
         }
         Ok(Points::Wide(out))
     } else {
-        let mut out = Vec::with_capacity(count as usize);
+        let mut out = Vec::with_capacity((count as usize).min(r.bytes.len()));
         for _ in 0..count {
             out.push([r.u16()? as i16, r.u16()? as i16, r.u16()? as i16]);
         }
@@ -781,7 +781,7 @@ impl Rays {
             return Err(format!("segment count {segment_count} then {repeated}"));
         }
         let nodes = nodes(&mut r, node_count)?;
-        let mut segments = Vec::with_capacity(segment_count as usize);
+        let mut segments = Vec::with_capacity((segment_count as usize).min(r.bytes.len()));
         for _ in 0..segment_count {
             segments.push(Segment { from: r.v3()?, to: r.v3()? });
         }

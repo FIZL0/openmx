@@ -10,7 +10,8 @@
 //! checks: every entry a plain path inside the mod with a data extension ([`EXTENSIONS`]), no link,
 //! no duplicate, the counts and sizes measured while inflating ([`MAX_ENTRIES`], [`MAX_FILE`],
 //! [`MAX_TOTAL`]), its `mod.json` the store's id and kind, and the staged copy (P217: the browser's too) read by
-//! the shell's own parsers for its kind (`track_mods`, `worlds`, `trick_packs`, `textures`). Only then does it go
+//! the shell's own parsers for its kind (`track_mods`, `worlds`, `trick_packs`, `textures`,
+//! `machine_packs`, `phy_editor`). Only then does it go
 //! into `mods/<kind>/<id>/`, with `store.json` beside it ([`Stamp`]). A refused mod leaves nothing.
 //!
 //! Network work runs off the frame — a thread a job on the desktop, the page's event loop in the
@@ -53,11 +54,11 @@ pub const WEB_WORLDS: &str = "Worlds ride in the desktop and iPhone games; the b
 pub const PARALLEL: usize = if cfg!(target_arch = "wasm32") { 2 } else { 3 };
 
 /// The extensions a mod's files may have: the formats the shell reads out of a track, a world, a trick
-/// pack or a music pack (every one in the mods openmx-mods makes), and pictures and text. Nothing a
+/// pack, a music pack, a machine pack or a handling mod (every one in the mods openmx-mods makes), and pictures and text. Nothing a
 /// system would run.
 pub const EXTENSIONS: &[&str] = &[
     "aty", "atm", "aud", "blend", "bpb", "cmt", "col", "cub", "dat", "emt", "esb", "ess", "hit", "ini", "json", "mcf", "mlb", "mot", "mst", "ogg", "pb", "pco", "phy", "png", "prt", "psg", "psm", "pst", "scn",
-    "set", "sub", "tdf", "toy", "trn", "txt", "vig", "vub", "vue", "vut", "wav", "webp", "wpt",
+    "set", "sub", "tdf", "toy", "trn", "txt", "vag", "vig", "vub", "vue", "vut", "wav", "webp", "wpt",
 ];
 /// Caps on a zip's entries, one unpacked file and all of them together: measured while inflating, not
 /// taken from the zip's headers. The biggest mod openmx-mods makes is a 3.4 GB world of 34,409 files.
@@ -86,15 +87,19 @@ pub enum Kind {
     /// P230: a texture pack (`textures.rs`): key-named PNGs under its `textures/`, drawn over the
     /// disc's on this machine only.
     Textures,
+    /// F85: a machine pack (`machine_packs.rs`): another game's quads, cars, fliers or bikes.
+    Machine,
+    /// F85: a handling mod (`phy_editor.rs`), as the physics editor saves one.
+    Handling,
     /// One this build does not know: listed on no tab, never installed.
     #[serde(other)]
     Other,
 }
 
 /// Browse's tabs, by [`Kind::tab`].
-pub const TABS: [&str; 4] = ["Tracks", "Trick Packs", "Music", "Texture Packs"];
+pub const TABS: [&str; 6] = ["Tracks", "Trick Packs", "Music", "Texture Packs", "Machines", "Handling"];
 /// The kinds' folders under `mods/`, by [`Kind::folder`].
-pub const FOLDERS: [&str; 4] = ["tracks", "tricks", "music", "textures"];
+pub const FOLDERS: [&str; 6] = ["tracks", "tricks", "music", "textures", "machines", "handling"];
 
 impl Kind {
     /// Its folder under `mods/`.
@@ -104,6 +109,8 @@ impl Kind {
             Kind::Tricks => Some("tricks"),
             Kind::Music => Some("music"),
             Kind::Textures => Some("textures"),
+            Kind::Machine => Some("machines"),
+            Kind::Handling => Some("handling"),
             Kind::Other => None,
         }
     }
@@ -116,6 +123,8 @@ impl Kind {
             Kind::Tricks => "tricks",
             Kind::Music => "music",
             Kind::Textures => "textures",
+            Kind::Machine => "machine",
+            Kind::Handling => "handling",
             Kind::Other => "",
         }
     }
@@ -127,6 +136,8 @@ impl Kind {
             Kind::Tricks => Some(1),
             Kind::Music => Some(2),
             Kind::Textures => Some(3),
+            Kind::Machine => Some(4),
+            Kind::Handling => Some(5),
             Kind::Other => None,
         }
     }
@@ -619,7 +630,8 @@ pub fn check_mod_json(b: &[u8], meta: &Meta) -> Result<(), String> {
 
 /// The staged copy in `stage` (its `<kind folder>/<id>/`) read the way the shell reads its kind, as
 /// hostile input: a track's mod.json and its one scene, a world's pieces, a trick pack's tables, a
-/// music pack's listing, a texture pack's key-named PNGs. The browser's build (P217) reads its OPFS
+/// music pack's listing, a texture pack's key-named PNGs, a machine pack's models, collision and tables, a handling
+/// mod's knobs. The browser's build (P217) reads its OPFS
 /// stage through [`crate::files`] with the same readers, a texture pack's too since P261.
 pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
     match kind {
@@ -628,6 +640,12 @@ pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
         Kind::Tricks => crate::trick_packs::by_id(stage, id).map(|_| ()),
         Kind::Music => track_mods::music_packs(stage).iter().any(|p| p.0 == id).then_some(()).ok_or_else(|| "not a music pack the shell reads".into()),
         Kind::Textures => crate::textures::pack_at(&stage.join("textures").join(id), &format!("textures/{id}")).map(|_| ()),
+        Kind::Machine => crate::machine_packs::check(stage, id),
+        Kind::Handling => match crate::phy_editor::load(&stage.join("handling").join(id))? {
+            s if s.id != id => Err(format!("mod.json's id is {}, in the folder {id}", s.id)),
+            s if !crate::files::is_file(stage.join("handling").join(id).join(&s.bike)) => Err(format!("no {}, the bike file its mod.json names", s.bike)),
+            _ => Ok(()),
+        },
         Kind::Other => Err("a kind this build does not know".into()),
     }
 }

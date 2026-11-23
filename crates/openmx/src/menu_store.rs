@@ -14,7 +14,7 @@
 use super::*;
 
 /// The grid's tabs: `modstore::TABS`.
-pub const STORE_TABS: [&str; 4] = ["Tracks", "Trick Packs", "Music", "Texture Packs"];
+pub const STORE_TABS: [&str; 6] = ["Tracks", "Trick Packs", "Music", "Texture Packs", "Machines", "Handling"];
 /// P230: the Texture Packs tab.
 pub const TEXTURES_TAB: usize = 3;
 /// The grid's columns.

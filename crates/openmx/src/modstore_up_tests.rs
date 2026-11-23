@@ -663,6 +663,35 @@ fn a_texture_pack_uploads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// F85: a machine pack in `mods/machines/<id>/` packs with its own `preview.png` as its picture, and
+/// one whose model doesn't read is refused before anything is sent.
+#[test]
+fn a_machine_pack_uploads() {
+    let (dir, mods) = scratch("machines");
+    let pack = mods.join("machines/my_fliers");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("mod.json"), r#"{"standard": 1, "kind": "machine", "id": "my_fliers", "name": "My Fliers", "version": "1.0.0", "machine": "flier", "source": {"game": "MX vs. ATV Unleashed"}, "skins": [{"machine": "biplane", "name": "Red", "psg": "Red.psg"}]}"#).unwrap();
+    let mut psg = [b"psg\0".as_slice(), &5u32.to_le_bytes(), &[0; 4 + 4 + 36]].concat();
+    std::fs::write(pack.join("Red.psg"), &psg).unwrap();
+    let mut png = Vec::new();
+    let mut e = png::Encoder::new(&mut png, 64, 32);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&[90; 64 * 32 * 4]).unwrap();
+    std::fs::write(pack.join("preview.png"), png).unwrap();
+    let l = locals(&mods).into_iter().find(|l| l.id == "my_fliers").expect("the pack is one of the player's mods");
+    assert_eq!((l.kind, l.name.as_str()), (Kind::Machine, "My Fliers"));
+    let p = package(&mods, &l, "tester").unwrap();
+    assert_eq!((p.meta.kind, p.meta.id.as_str()), (Kind::Machine, "my_fliers"));
+    assert_eq!(p.preview.as_deref().and_then(decode_preview).map(|p| (p.width, p.height)), Some((64, 32)));
+    drop(p);
+    psg.truncate(30);
+    std::fs::write(pack.join("Red.psg"), &psg).unwrap();
+    let why = package(&mods, &l, "tester").err().unwrap();
+    assert!(why.contains("Red.psg"), "{why}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- P241: worlds ------------------------------------------------------------------------------
 
 /// P241: a small world of the player's own in `mods/tracks/<id>`, as openmx-mods' stitch lays one
