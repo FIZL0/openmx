@@ -46,6 +46,7 @@ pub use wgpu;
 
 mod scale;
 mod timer;
+pub use timer::Misses as GpuMisses;
 mod sprite;
 mod ground_mesh;
 pub use scale::{AutoScale, MIN_SCALE};
@@ -4735,18 +4736,12 @@ impl Renderer {
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
-        if timed.is_some() {
-            self.stage(&mut encoder, &mut scope, "the frame's timestamps read");
-        }
-        if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
-            t.end(&mut encoder, k);
-        }
         let submit_at = Instant::now();
         self.queue.submit([encoder.finish()]);
         drawn.submit_time = submit_at.elapsed();
         drop(scope);
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
-            t.submitted(k);
+            t.submitted(&self.queue, k);
         }
         drawn
     }
@@ -4799,9 +4794,15 @@ impl Renderer {
     /// adapter has no timestamps.
     pub fn gpu_times(&mut self) -> Vec<(std::time::Duration, f32)> {
         match self.timer.as_mut() {
-            Some(t) => t.take(&self.device),
+            Some(t) => t.take(&self.device, &self.queue),
             None => Vec::new(),
         }
+    }
+
+    /// The frames [`Renderer::gpu_times`] could not time since the last call, and why (P346: the
+    /// iPhone timed one frame in hundreds).
+    pub fn gpu_misses(&mut self) -> timer::Misses {
+        self.timer.as_mut().map(timer::Timer::misses).unwrap_or_default()
     }
 
     /// View `v`'s ground for this frame: what each piece's quadtree picks from this view's camera
@@ -7457,6 +7458,11 @@ mod tests {
             let view = texture.create_view(&Default::default());
             let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
             known_frame(&mut gpu, &target, &assets, &scene, &camera);
+            gpu.finish();
+            times.extend(gpu.gpu_times());
+        }
+        // A frame's times are resolved by the look after it is done (P346), so the last come in late.
+        for _ in 0..2 {
             gpu.finish();
             times.extend(gpu.gpu_times());
         }

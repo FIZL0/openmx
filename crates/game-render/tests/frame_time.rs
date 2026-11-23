@@ -1,7 +1,8 @@
 //! P346: the GPU's own time for a frame (V122) comes back for each way a frame is drawn — one pass,
 //! the views at a low render scale and then the frame, and over a picture already there — now that
 //! its timestamps ride on the frame's own passes. Before, they were written from empty passes, which
-//! Metal does not time, and every iPhone log read "gpu no frame timed".
+//! Metal does not time, and every iPhone log read "gpu no frame timed". They are resolved once the
+//! frame is done, in a later submit; the iPhone read the end before the GPU wrote it otherwise.
 
 use game_render::gpu::{Renderer, Scene3, Target, View};
 use game_render::mat::v3;
@@ -47,8 +48,9 @@ fn every_way_of_drawing_a_frame_is_timed() {
             gpu.read(&texture);
             times.extend(gpu.gpu_times());
         }
-        println!("{way}: {} frames timed, {:?}", times.len(), times.first());
-        assert!(!times.is_empty(), "no frame drawn {way} came back timed");
+        println!("{way}: {} frames timed, {:?}", times.len(), times.last());
+        // A frame's times come in a frame or two behind it, so the last of the way before can be here.
+        assert!(times.iter().any(|&(_, at)| at == scale), "no frame drawn {way} came back timed");
         assert!(times.iter().all(|(t, _)| t.as_nanos() > 0), "a frame drawn {way} timed as nothing");
     }
 }
