@@ -8,8 +8,9 @@
 //! them is the riding ragdoll's two foot holds: while a foot is held it is pinned to its peg whatever
 //! the clip says, and the original lets go of it here. That switch is the body actor's
 //! ([`crate::ragdoll_body::Actor::feet`], proved tick by tick against the original in S109's
-//! `tests/ragdoll_riding.rs`), and this is the same switch on its own, with no ragdoll under it, for
-//! the drawn clip that is held on by `game-render`'s stand-in rather than by the ragdoll's pins.
+//! `tests/ragdoll_riding.rs`), and this is the same switch on its own, with no ragdoll under it. It
+//! was stepped for `game-render`'s stand-in hold, which is gone (V63): nothing draws from it, and it
+//! stays part of the rider's state.
 //!
 //! - Under the stand speed (the clutch's idle speed, 7.3333 ft/s), rolling backwards, or tucked,
 //!   and not yawing at 1.5 rad/s or more nor looking round: **both feet let go**.

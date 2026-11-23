@@ -1,24 +1,24 @@
 //! V36: **a stopped bike's rider puts a foot down**, and takes it back up moving off.
 //!
 //! The shell's own two calls a frame — the ride's [`rider::Rider::frame`], then the body's
-//! [`Body::ride`] — and the pose the draw holds on to the bike ([`Body::palette`]): two seconds on
-//! the throttle, the brakes on until the bike stands, three seconds standing, and the throttle again.
+//! [`Body::ride`] — and the pose the clips leave ([`Body::palette`]): two seconds on the throttle,
+//! the brakes on until the bike stands, three seconds standing, and the throttle again.
 //!
 //! The clip is the pose grid's stopped row, `turn_stop_*`, which the body's machine already blends in
-//! under the grid's first band (7.3333 ft/s); its feet are a foot under the pegs. What kept them on
-//! the pegs was the draw's hold. The original's riding ragdoll lets go of both feet on the tick the
-//! request's speed drops under the same 7.3333 with the bike not yawing ([`Feet`], proved against the
-//! body actor's switch in `game-sim/tests/foot_down.rs`, and that against the original's update in
-//! S109's `ragdoll_riding.rs`), and takes them back on the tick it is over it again.
+//! under the grid's first band (7.3333 ft/s); its feet are a foot under the pegs. The original's
+//! riding ragdoll lets go of both feet on the tick the request's speed drops under the same 7.3333
+//! with the bike not yawing ([`Feet`], proved against the body actor's switch in
+//! `game-sim/tests/foot_down.rs`, and that against the original's update in S109's
+//! `ragdoll_riding.rs`), and takes them back on the tick it is over it again.
 //!
-//! V68: a body posed as an online seat's is (`posed_by`, then `held_by`, which is `Online::show`)
-//! holds on and is drawn the same, tick for tick.
+//! V68: a body posed as an online seat's is (`posed_by` alone, which is `Online::show`) is drawn the
+//! same, tick for tick.
 //!
 //! Needs the user's own disc; skips with the reason when it is not there.
 
 use game_render::disc::{Disc, Res};
 use game_render::psg::Model;
-use game_render::rider::{Body, FOOT_ANCHORS, HAND_ANCHORS, Sex, Skeleton, anchors_of};
+use game_render::rider::{Body, FOOT_ANCHORS, Sex, Skeleton, anchors_of};
 use game_sim::foot_down::Feet;
 use game_sim::ragdoll_riding::STAND_SPEED;
 use game_sim::ride::Controls;
@@ -31,8 +31,6 @@ use ps2_float::{F, Vf};
 
 /// The engine's own clamped step, the frame the shell rides at.
 const FRAME: F = F(1.0 / 60.0);
-/// An inch, in the disc's unit (a foot).
-const AN_INCH: f32 = 1.0 / 12.0;
 
 fn member(disc: &Disc, ends: &str) -> Option<String> {
     let want = ends.to_ascii_lowercase();
@@ -67,10 +65,8 @@ struct Tick {
     yaw: f32,
     mode: Mode,
     feet: Feet,
-    /// How far each foot's anchor is drawn under its peg, left then right, and how far each hand's
-    /// is drawn from its grip.
+    /// How far each foot's anchor is drawn under its peg, left then right.
     under: [f32; 2],
-    hands: [f32; 2],
 }
 
 #[test]
@@ -93,12 +89,11 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
     let mut body = Body::load(vec![res(&mut disc, "thq1.res")], "thq1", Sex::Male, "", &set.stunts, p.motion())
         .unwrap_or_else(|why| panic!("the body did not load: {why}"));
     // A second body posed the way an online seat is (V68, `Online::show`): the frame the rider's
-    // body machine already chose, sampled by `posed_by`, and the hold and feet off the rider.
+    // body machine already chose, sampled by `posed_by`.
     let mut shown = Body::load(vec![res(&mut disc, "thq1.res")], "thq1", Sex::Male, "", &set.stunts, p.motion())
         .unwrap_or_else(|why| panic!("the body did not load: {why}"));
     let skel = body.rig.set.skeleton.clone();
-    let joint = |name: &str| skel.find(name).unwrap_or_else(|| panic!("the rider has no {name}"));
-    let (feet, hands) = (FOOT_ANCHORS.map(joint), HAND_ANCHORS.map(joint));
+    let feet = FOOT_ANCHORS.map(|name| skel.find(name).unwrap_or_else(|| panic!("the rider has no {name}")));
 
     let mounts = game_sim::stock::mounts(&p);
     let mut r = rider::Rider::new(&p, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
@@ -114,7 +109,6 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
         r.frame(&p, &tables, &Controls::default(), FRAME, &mut floor);
         let frame = body.ride(FRAME, &mut r, &Controls::default(), rider::Gate::default());
         shown.posed_by(frame, &r.body.player, r.body_clocked);
-        shown.held_by(&r);
     }
     let legs: [(&str, Controls, usize); 4] = [("ride", gas, 120), ("brake", brake, 180), ("stand", Controls::default(), 180), ("off", gas, 120)];
     let mut ticks: Vec<(&str, Tick)> = Vec::new();
@@ -125,18 +119,11 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
             r.frame(&p, &tables, &c, FRAME, &mut floor);
             let frame = body.ride(FRAME, &mut r, &c, rider::Gate::default());
             shown.posed_by(frame, &r.body.player, r.body_clocked);
-            shown.held_by(&r);
-            let (world, _) = body.palette(Some(&grips));
-            assert_eq!((shown.feet, shown.holds()), (body.feet, body.holds()), "{leg}: an online seat holds on otherwise");
-            assert_eq!(shown.palette(Some(&grips)).0, world, "{leg}: an online seat is drawn otherwise");
-            let at = |j: usize| world[j].0[3];
-            let under = [0, 1].map(|k| grips[k].expect("a peg").y - at(feet[k])[1]);
-            let hands = [0, 1].map(|k| {
-                let (a, g) = (at(hands[k]), grips[2 + k].expect("a grip"));
-                ((a[0] - g.x).powi(2) + (a[1] - g.y).powi(2) + (a[2] - g.z).powi(2)).sqrt()
-            });
+            let world = body.palette(Some(&grips));
+            assert_eq!(shown.palette(Some(&grips)), world, "{leg}: an online seat is drawn otherwise");
+            let under = [0, 1].map(|k| grips[k].expect("a peg").y - world[feet[k]].0[3][1]);
             let c = &r.ride.chassis;
-            let tick = Tick { speed: c.local_vel.z(), yaw: c.ang_vel.y(), mode: r.body.machine.mode, feet: body.feet, under, hands };
+            let tick = Tick { speed: c.local_vel.z(), yaw: c.ang_vel.y(), mode: r.body.machine.mode, feet: r.feet, under };
             ticks.push((leg, tick));
         }
     }
@@ -150,15 +137,13 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
         assert_eq!(t.feet.held, [!slow(t); 2], "{leg} riding tick {i}: {:.3} ft/s, yaw {:.3}", t.speed, t.yaw);
     }
 
-    // Standing: the feet are off the pegs and on the floor the stopped clip stands them on, and the
-    // hands are still on the grips.
+    // Standing: the feet are off the pegs and on the floor the stopped clip stands them on.
     let stood: Vec<&Tick> = ticks.iter().filter(|(l, t)| *l == "stand" && t.mode == Mode::Riding).map(|(_, t)| t).collect();
     assert!(stood.len() > 60, "the stopped bike was riding on only {} ticks", stood.len());
     let last = stood.last().expect("a standing tick");
     assert!(last.speed.abs() < 0.1, "the bike never stopped: {} ft/s", last.speed);
     for t in &stood[stood.len() - 30..] {
         assert!(t.under.iter().all(|&u| u > 0.9), "a stopped rider's foot is only {:?} under its peg", t.under);
-        assert!(t.hands.iter().all(|&h| h < AN_INCH), "a stopped rider's hand is {:?} off its grip", t.hands);
     }
 
     // Braking to a stop: the feet come off on the tick the speed crosses the stand speed.
@@ -167,8 +152,7 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
     let crossed = ticks.iter().position(|(l, t)| *l == "brake" && slow(t)).expect("the brakes never slowed the bike");
     assert_eq!(first_down, crossed, "the feet came down on tick {first_down}, the speed crossed on {crossed}");
 
-    // Moving off: back on the tick the speed is over the stand speed, from three quarters, and on
-    // the pegs within an inch once the fade has run.
+    // Moving off: back on the tick the speed is over the stand speed, from three quarters.
     let off: Vec<&Tick> = ticks.iter().filter(|(l, _)| *l == "off").map(|(_, t)| t).collect();
     let up = off.iter().position(|t| !t.feet.down()).expect("moving off never lifted the feet");
     assert!(!slow(off[up]) && slow(off[up - 1]), "the feet went up on tick {up} of moving off, not where the speed crossed");
@@ -176,8 +160,6 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
     assert!((0.75..0.8).contains(&w), "the feet's hold came back at {w}, not from three quarters");
     let settled = off.iter().skip(up + 40).filter(|t| t.mode == Mode::Riding).collect::<Vec<_>>();
     assert!(!settled.is_empty() && settled.iter().all(|t| t.feet.weight == [F::ONE; 2]), "the hold never faded back to one");
-    let worst = settled.iter().flat_map(|t| t.under).fold(0.0f32, |m, u| m.max(u.abs()));
-    assert!(worst < AN_INCH, "moving off, a foot is still {worst} off its peg");
     println!(
         "stopped from {:.1} ft/s: feet down on tick {first_down}, {:.2}/{:.2} ft under the pegs standing; \
          up {up} ticks into moving off at {:.2} ft/s",

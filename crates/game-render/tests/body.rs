@@ -9,8 +9,7 @@ use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::psg::Model;
 use game_render::rider::{
-    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, LIMBS, Sex, Skeleton, anchors_of, hold_on, holds_in,
-    stunt_name,
+    AIR_POSES, Body, FOOT_ANCHORS, HAND_ANCHORS, LIMBS, Sex, Skeleton, anchors_of, solve_limbs, stunt_name,
 };
 use game_render::chassis::{grips, limb_names, measure};
 use game_render::ini;
@@ -601,17 +600,17 @@ fn the_level_of_detail_falls_back_as_the_camera_pulls_away() {
 /// wheelbase five and a quarter, this body five and a half tall — so an inch is a twelfth.
 const AN_INCH: f32 = 1.0 / 12.0;
 
-/// **V10, V61.** The stand-in solve: against the chassis's own anchors, every limb the anchor is in
+/// **V10, V61.** The limb solve: against the chassis's own anchors, every limb the anchor is in
 /// reach of lands on it to within an inch, a limb the clip has stretched past its target straightens
 /// at it, no limb changes length, and nothing above the limbs moves — over every gesture this rider
 /// has at nine phases, and nothing excluded. And at a strength of 0 nothing moves at all.
 ///
-/// This is the solve [`hold_on`] draws the clip with while the riding ragdoll is off, and not the
-/// original's (V61: the original holds through its riding ragdoll's pins, and draws a gesture as the
-/// clip wrote it — `a_gesture_is_drawn_as_the_clip_wrote_it`). So every gesture pose is solved here
-/// only as a hard set of starting points, not because the original holds a gesture on.
+/// This is the solve ([`solve_limbs`]) the seated bodies are drawn with ([`Body::seated_palette`]) and
+/// the hands of a trick the bike has no clip for (MD41). The riding rider's clip is drawn as it was
+/// written (V63, `the_riders_clip_is_drawn_as_it_was_written`), so every gesture pose is solved here
+/// only as a hard set of starting points, not because a gesture is held on.
 #[test]
-fn the_stand_in_solve_puts_a_limb_in_reach_on_its_anchor() {
+fn the_limb_solve_puts_a_limb_in_reach_on_its_anchor() {
     let Some(mut disc) = disc() else { return };
     let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
     let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
@@ -649,9 +648,9 @@ fn the_stand_in_solve_puts_a_limb_in_reach_on_its_anchor() {
             bound.clip.pose(phase * bound.clip.timing.duration.0, &bound.joints, &mut pose);
             let before = skel.world(&pose);
             let mut after = before.clone();
-            let ended = hold_on(&skel, &mut after, &targets, 1.0);
+            let ended = solve_limbs(&skel, &mut after, &targets, [1.0; 4]);
             let mut untouched = before.clone();
-            hold_on(&skel, &mut untouched, &targets, 0.0);
+            solve_limbs(&skel, &mut untouched, &targets, [0.0; 4]);
             assert!(untouched == before, "{name} at {phase}: a hold at strength 0 moved the pose");
 
             for (i, limb) in LIMBS.iter().enumerate() {
@@ -743,16 +742,15 @@ fn the_stand_in_solve_puts_a_limb_in_reach_on_its_anchor() {
 /// half feet from the pegs and `nohandedlander` both hands nearly three feet off the bars.
 const LET_GO: f32 = 2.0;
 
-/// **V61.** A gesture is drawn as the clip wrote it: from the frame the body's machine hands the
-/// pose to the clip table to the frame it takes it back, [`Body::hold`] is 0 and the drawn pose is
-/// the clip's to the bit, limbs off the bike and all. On every other frame of the ride the hold is
-/// whatever [`holds_in`] says of the machine's mode.
+/// **V61, V63.** The rider's clip is drawn as it was written on every frame of a ride, riding and in
+/// a gesture alike: the drawn pose is the clips' to the bit, limbs off the bike and all.
 ///
-/// The original's rule (journal 2026-10-23-v61-limb-hold): its riding ragdoll is not placed while a
-/// pose off the clip table is in charge, so nothing holds the gesture on. The shortest gesture this
-/// rider has, made in the air the way the shell's rider makes it.
+/// The original has no limb solve on the drawn skeleton (journal 2026-10-23-v61-limb-hold): while
+/// riding it draws its riding ragdoll, which this body is not, and that ragdoll is not placed while a
+/// pose off the clip table is in charge. The shortest gesture this rider has, made in the air the way
+/// the shell's rider makes it.
 #[test]
-fn a_gesture_is_drawn_as_the_clip_wrote_it() {
+fn the_riders_clip_is_drawn_as_it_was_written() {
     let Some(mut disc) = disc() else { return };
     let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
     let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
@@ -784,11 +782,9 @@ fn a_gesture_is_drawn_as_the_clip_wrote_it() {
         body.ride(FRAME, &mut r, &hands, rider::Gate::default());
         started |= said.started == Some(Trick(slot as u8));
         let mode = r.body.machine.mode;
-        assert_eq!(body.hold, if holds_in(mode) { 1.0 } else { 0.0 }, "frame {k}: the hold in {mode:?}");
+        assert!(body.palette(Some(&targets)) == body.rig.world(), "frame {k}: the clip was held on to the bike in {mode:?}");
         if mode == Mode::Posed {
             posed += 1;
-            let (drawn, _) = body.palette(Some(&targets));
-            assert!(drawn == body.rig.world(), "frame {k}: a posed gesture was held on to the bike");
         } else if mode == Mode::Riding {
             riding += 1;
         }
@@ -799,7 +795,7 @@ fn a_gesture_is_drawn_as_the_clip_wrote_it() {
     println!("{:?}: {posed} frames posed off the clip table, {riding} riding", stunt.name);
     assert!(started, "the gesture never started {:?}", stunt.name);
     assert!(posed > 5, "the gesture never handed the body to the clip table ({posed} frames)");
-    assert!(riding > 5, "the body was hardly ever riding, so nothing held ({riding} frames)");
+    assert!(riding > 5, "the body was hardly ever riding ({riding} frames)");
 }
 
 /// **V18.** A frame of the shell's own driving puts the body on the bike: three seconds of riding,
@@ -952,13 +948,13 @@ fn chassis_model(disc: &mut Disc) -> Model {
     Model::parse(&bytes).expect("the chassis parses")
 }
 
-/// **V20.** A frame of the shell's own ride draws the wheels on the ground the solver found and the
-/// rider's hands on the bars.
+/// **V20.** A frame of the shell's own ride draws the wheels on the ground the solver found, and the
+/// chassis' grips are read where it draws them.
 ///
 /// Three things the drawing side has to agree with the ground step about, and until this test none
 /// of the three was checked: the drawn chassis origin against `Ride::position`, each drawn wheel's
-/// lowest vertex against the contact the suspension's own ray found under it, and the posed body's
-/// four anchors against the chassis' own. Two of the three were wrong at once, which is why the bike
+/// lowest vertex against the contact the suspension's own ray found under it, and the four anchors
+/// a rider is held to against the chassis as this frame posed it. Two of the three were wrong at once, which is why the bike
 /// was buried to its seat with a rider standing above it while the solver's own numbers said it was
 /// sitting on its springs.
 ///
@@ -1021,13 +1017,12 @@ fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
     assert!(r.ride.air.on_ground, "the bike is still in the air four seconds in");
     assert!(body.posed, "four seconds of riding never posed the body");
 
-    let seat = measure(&chassis, &model, &r.ride, Some(&body));
+    let seat = measure(&chassis, &model, &r.ride);
     println!(
-        "four seconds in: origin {:.4} ft off, front {:?}, rear {:?}, held {:?}",
+        "four seconds in: origin {:.4} ft off, front {:?}, rear {:?}",
         seat.origin,
         seat.tyres[0].map(|t| t.clearance),
         seat.tyres[1].map(|t| t.clearance),
-        seat.held,
     );
 
     // 1 — the drawn chassis origin is the ride's. Not a tolerance: the two are the same number put
@@ -1046,18 +1041,10 @@ fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
         );
     }
 
-    // 3 — the body's hands are on the bars and its feet on the pegs, on this frame, against the
-    // chassis as this frame posed it.
-    for (name, held) in limb_names().iter().zip(seat.held) {
-        let held = held.unwrap_or_else(|| panic!("the limb at {name} was not solved"));
-        assert!(held < AN_INCH / 3.0, "{name} ended {held:.4} ft from the chassis' own anchor");
-    }
-
-    // 4 — and the targets have to be *this* frame's. The shell read the four anchors once, at load,
-    // off the bind pose. `Dummy_Hand_L` and `Dummy_Hand_R` hang off `Handlebars`, which the steering
-    // drive turns, so a turned bar moves both grips out from under a rider still aimed at the bind
-    // pose — and `hold_on` will happily put the hands exactly on the stale target, which is why the
-    // residual above cannot catch it and the gap itself has to be measured.
+    // 3 — and the anchors a rider is held to have to be *this* frame's. The shell read the four
+    // anchors once, at load, off the bind pose. `Dummy_Hand_L` and `Dummy_Hand_R` hang off
+    // `Handlebars`, which the steering drive turns, so a turned bar moves both grips out from under a
+    // rider still aimed at the bind pose.
     //
     // The bars are turned by hand here rather than by the ride. `Wheel::steer_angle` is only ever
     // written by the hinge integration, which runs on the frames the bike is being balanced on
@@ -1085,15 +1072,6 @@ fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
         "with the bars at the lock the chassis' anchors are still within {drift:.4} ft of their \
          bind places: this frame cannot tell a live read from the read-once the shell used to do"
     );
-    // The hands are on them all the same, which is the whole point of reading them live. Within an
-    // inch rather than the thousandth of a foot the straight-ahead frame gets: half a foot is far
-    // enough for an arm at full stretch to be straightened towards the grip rather than onto it.
-    let steered = measure(&chassis, &model, &r.ride, Some(&body));
-    for (name, held) in limb_names().iter().zip(steered.held) {
-        let held = held.unwrap_or_else(|| panic!("the limb at {name} was not solved"));
-        println!("  {name}: bars over, the limb ends {held:.4} ft from it");
-        assert!(held < AN_INCH, "with the bars over, {name} ended {held:.4} ft off its anchor");
-    }
 }
 
 /// How close a drawn wheel has to be to the contact the solver found under it.

@@ -12,7 +12,7 @@ use game_render::anim::Set;
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, v3};
 use game_render::raster::Frame;
-use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, anchors_of, bolt_onto, hold_on};
+use game_render::rider::{FOOT_ANCHORS, Rider, Sex, Skeleton, anchors_of, bolt_onto, solve_limbs};
 use game_render::scene::{Preset, Scene, Vehicle};
 use game_render::skin::{Pose, skin};
 use game_render::terrain::{Terrain, draw_terrain};
@@ -365,8 +365,8 @@ fn pose_body(
     let mut pose = Pose::new(set.skeleton.len());
     bound.clip.pose(time, &bound.joints, &mut pose);
     let mut world = set.skeleton.world(&pose);
-    // `--hold` solves the four limbs onto the chassis's own anchors, which is what the game does to
-    // keep a hand on the bar through a stunt the arm would otherwise swing off it.
+    // `--hold` solves the four limbs onto the chassis's own anchors, to see a clip against them. No
+    // game draws its riding rider so (V61).
     let held = match hold {
         true => {
             let chassis = assets
@@ -374,7 +374,7 @@ fn pose_body(
                 .get(chassis)
                 .ok_or("--hold: the chassis is not loaded")?;
             let targets = anchors_of(&Skeleton::of(&chassis.model), &[]);
-            hold_on(&set.skeleton, &mut world, &targets, 1.0)
+            solve_limbs(&set.skeleton, &mut world, &targets, [1.0; 4])
         }
         false => [None; 4],
     };

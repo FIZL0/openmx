@@ -13,5 +13,6 @@ proved on recording2 (1499 of 1499 riding ticks), and so were the weights (to th
 now wired into the shell's riding ragdoll and into the default clip draw's stand-in hold, which
 replaces the port's distance window (`holding`, `HOLD_WITHIN` and `LET_GO_AT` are deleted).
 
-`aim` stays as the stand-in until S111 turns the riding ragdoll on, and V63 then deletes it. The
-details are in `1-limb-hold-FINAL.md`.
+V63 (2026-11-23) deleted the riding bike rider's stand-in hold, since the riding ragdoll is on by
+default. `aim` stays for the bare hands and the seats with no ragdoll. The details are in
+`1-limb-hold-FINAL.md` and `2-v63-hold-deleted-FINAL.md`.

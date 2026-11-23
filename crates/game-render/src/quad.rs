@@ -208,7 +208,7 @@ pub fn seat(set: &mut Set, row: [&str; 3], phase: f32, fore_aft: f32) -> bool {
 
 /// The rider's node matrices on the quad: [`seat`]ed on `row`, held to the chassis' `anchors` (its
 /// own pegs and grips, in the chassis' space, which is the body's) at full strength with both feet
-/// on, and the body's own pose, hold and feet put back afterwards, as the plane's pilot
+/// on, and the body's own pose put back afterwards, as the plane's pilot
 /// ([`crate::biplane::pilot_palette`]). `None` if the row is not bound.
 pub fn rider_palette(body: &mut Body, anchors: &Anchors, row: [&str; 3], phase: f32, fore_aft: f32) -> Option<Vec<M4>> {
     rider_palette_stunt(body, anchors, row, phase, fore_aft, None)
@@ -217,9 +217,7 @@ pub fn rider_palette(body: &mut Body, anchors: &Anchors, row: [&str; 3], phase: 
 /// [`rider_palette`] with a stunt's clip (MD138a: bound by name, at a time into it, held on its
 /// last frame past its end) laid over the row on the joints it names.
 pub fn rider_palette_stunt(body: &mut Body, anchors: &Anchors, row: [&str; 3], phase: f32, fore_aft: f32, stunt: Option<(&str, f32)>) -> Option<Vec<M4>> {
-    let (pose, hold, feet) = (body.rig.set.pose.clone(), body.hold, body.feet);
-    body.hold = 1.0;
-    body.feet = Default::default();
+    let pose = body.rig.set.pose.clone();
     let seated = seat(&mut body.rig.set, row, phase, fore_aft);
     if let (true, Some((name, time))) = (seated, stunt) {
         let set = &mut body.rig.set;
@@ -228,10 +226,8 @@ pub fn rider_palette_stunt(body: &mut Body, anchors: &Anchors, row: [&str; 3], p
             b.clip.pose(time.min(b.clip.duration()), &b.joints, &mut set.pose);
         }
     }
-    let palette = seated.then(|| body.palette(Some(anchors)).0);
+    let palette = seated.then(|| body.seated_palette(anchors).0);
     body.rig.set.pose = pose;
-    body.hold = hold;
-    body.feet = feet;
     palette
 }
 
@@ -803,9 +799,7 @@ pub fn seat_motion(set: &mut Set, seat: Seat, fade: f32, under: &Pose) -> bool {
 /// (what the new state fades in from), then this frame's, with the stunt's clip laid over them as
 /// [`rider_palette_stunt`]; held to the chassis' `anchors`. `None` if neither seat is bound.
 pub fn rider_palette_motion(body: &mut Body, anchors: &Anchors, motion: &Motion, stunt: Option<(&str, f32)>) -> Option<Vec<M4>> {
-    let (pose, hold, feet) = (body.rig.set.pose.clone(), body.hold, body.feet);
-    body.hold = 1.0;
-    body.feet = Default::default();
+    let pose = body.rig.set.pose.clone();
     let set = &mut body.rig.set;
     let rest = set.pose.clone();
     let under_seated = seat_motion(set, motion.under, 0.0, &rest);
@@ -817,10 +811,8 @@ pub fn rider_palette_motion(body: &mut Body, anchors: &Anchors, motion: &Motion,
         let b = &set.clips[id.0 as usize];
         b.clip.pose(time.min(b.clip.duration()), &b.joints, &mut set.pose);
     }
-    let palette = seated.then(|| body.palette(Some(anchors)).0);
+    let palette = seated.then(|| body.seated_palette(anchors).0);
     body.rig.set.pose = pose;
-    body.hold = hold;
-    body.feet = feet;
     palette
 }
 

@@ -433,10 +433,9 @@ impl TrickView {
             let clip = body.pose_lib.clip(state).or_else(|| body.pose_lib.clip(AIR_MID));
             play(&mut body.rig.set, clip, progress);
             body.posed = true;
-            body.hold = 0.0;
             body.bare = bare;
             let held: Anchors = self.chassis.as_ref().map(grips).unwrap_or_default();
-            body.palette(Some(&held)).0
+            body.palette(Some(&held))
         });
         let chassis = self.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
         let at = M4::placement(self.centre.scale(-1.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0)).mul(motion(row.show, progress));

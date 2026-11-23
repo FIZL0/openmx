@@ -24,14 +24,15 @@
 //! **The rider's hands were aimed at the bind pose.** The shell read the chassis' four anchors once,
 //! when nothing animated the chassis; since V9 the steering drive turns `Handlebars`, and both hand
 //! anchors hang off it. [`grips`] reads them off the live pose, which is the same thing the
-//! original's rider does with the four nodes its vehicle cached.
+//! original's rider does with the four nodes its vehicle cached. The riding rider is not held to them
+//! by the draw any more (V63): its riding ragdoll's pins hold it, and [`grips`] serves what is left.
 //!
 //! Nothing here is on a drawing path: it is measurement, and [`grips`] and [`poses_the_chassis`], both
 //! of which are one read each.
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
-use crate::rider::{Anchors, Body, LIMBS, anchors_of, hold_limbs};
+use crate::rider::{Anchors, LIMBS, anchors_of};
 use crate::vehicle::Chassis;
 use game_sim::motion::Player;
 use game_sim::ride::Ride;
@@ -121,7 +122,7 @@ pub struct Tyre {
     pub clearance: f32,
 }
 
-/// The three things the drawing side has to agree with the ground step about, measured on one frame.
+/// The two things the drawing side has to agree with the ground step about, measured on one frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Seat {
     /// How far the drawn chassis origin is from [`game_sim::ride::Ride::position`], in feet.
@@ -129,18 +130,13 @@ pub struct Seat {
     /// The two wheels the solver says are in contact, front then rear. `None` for a wheel that is in
     /// the air — there is no contact to compare it with — or whose node the model has not got.
     pub tyres: [Option<Tyre>; 2],
-    /// How far each of the body's four anchors ended from the chassis' own after the limbs were
-    /// solved, in feet, in [`LIMBS`]' order: both feet, then both hands. `None` for a limb that was
-    /// not solved, and for every one of them when there is no body.
-    pub held: [Option<f32>; 4],
 }
 
 /// Measure one drawn frame against the ground step that produced it.
 ///
-/// `model` is the chassis' own `.psg`, which is where the wheels' vertices are; `body` the rider as
-/// the frame posed it, or `None` for a bike with nobody on it. Everything is in world space and in
-/// the disc's unit, which is a foot.
-pub fn measure(chassis: &Chassis, model: &Model, ride: &Ride, body: Option<&Body>) -> Seat {
+/// `model` is the chassis' own `.psg`, which is where the wheels' vertices are. Everything is in
+/// world space and in the disc's unit, which is a foot.
+pub fn measure(chassis: &Chassis, model: &Model, ride: &Ride) -> Seat {
     let at = placed(ride);
     let origin = match chassis.nodes.root.and_then(|j| chassis.world.get(j)) {
         Some(root) => at.point(root.point(v3(0.0, 0.0, 0.0))),
@@ -154,10 +150,6 @@ pub fn measure(chassis: &Chassis, model: &Model, ride: &Ride, body: Option<&Body
             tyre(chassis, model, &ride.front, chassis.nodes.front, at),
             tyre(chassis, model, &ride.rear, chassis.nodes.rear, at),
         ],
-        held: match body {
-            Some(body) => held(body, &grips(chassis)),
-            None => [None; 4],
-        },
     }
 }
 
@@ -237,18 +229,6 @@ fn subtree(model: &Model, node: usize) -> Vec<bool> {
         }
     }
     mine
-}
-
-/// How far the body's four anchors end from the chassis' own, with the limbs solved onto them: what
-/// the drawn rider's hands and feet actually do, rather than what the clip asked for.
-///
-/// The same call the drawing makes ([`Body::skin_into_at`]), without the skinning — the solve is on a
-/// copy of the joint array either way, so this measures the frame that is drawn and does not change
-/// it.
-fn held(body: &Body, targets: &Anchors) -> [Option<f32>; 4] {
-    let mut world = body.rig.world();
-    let strength = body.holds_on(&world, targets);
-    hold_limbs(&body.rig.set.skeleton, &mut world, targets, strength)
 }
 
 /// The names of the four limbs, for a failure message that says which one let go.

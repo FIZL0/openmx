@@ -175,7 +175,7 @@ pub fn steer_clip(model_name: &str) -> &'static str {
 /// The driver's node matrices (S265), as [`crate::biplane::pilot_palette`] the pilot's: the body
 /// posed by the car's one steer clip (`clip`, [`steer_clip`]) sampled at `phase` of its length — the
 /// selection's single-clip arm, the mix axis unread — held on to the seat's `anchors` at full
-/// strength with both feet on, and the body's own pose, hold and feet put back. `phase` is the
+/// strength with both feet on, and the body's own pose put back. `phase` is the
 /// body's phase axis, which the car's driver request eases towards `0.5 * (1 + steer)`, so a
 /// centred wheel sits half-way through the clip. `None` if the rider's archive lacks the clip.
 ///
@@ -186,18 +186,14 @@ pub fn driver_palette(body: &mut crate::rider::Body, anchors: &crate::rider::Anc
     let set = &mut body.rig.set;
     set.load(clip);
     let id = set.id(clip)?;
-    let (pose, hold, feet) = (set.pose.clone(), body.hold, body.feet);
+    let pose = set.pose.clone();
     {
         let set = &mut body.rig.set;
         let b = &set.clips[id.0 as usize];
         b.clip.pose(phase.clamp(0.0, 1.0) * b.clip.duration(), &b.joints, &mut set.pose);
     }
-    body.hold = 1.0;
-    body.feet = Default::default();
-    let palette = body.palette(Some(anchors)).0;
+    let palette = body.seated_palette(anchors).0;
     body.rig.set.pose = pose;
-    body.hold = hold;
-    body.feet = feet;
     Some(palette)
 }
 

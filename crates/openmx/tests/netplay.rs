@@ -2413,9 +2413,7 @@ impl Machine for Footed {
 /// ([`game_sim::rider::Rider::feet`]), stepped by the body's frame in the tick, so a rollback takes
 /// it back with the rest of the seat: on every settled tick the host's copy of the guest's seat has
 /// the guest's own feet, the feet come down on the same tick on both, and that is the tick the
-/// guest's speed first drops under the stand speed (V36's rule). The shell draws them through
-/// `Online::show`, whose `Body::held_by` is the same copy `Body::ride` ends in
-/// (`tests/foot_down.rs`).
+/// guest's speed first drops under the stand speed (V36's rule).
 #[test]
 fn a_stopped_remote_riders_feet_come_down_on_the_local_ones_tick() {
     let link = Link { loss: 0.2, lag: 3, outage: 0..0, oneway: false };

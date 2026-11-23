@@ -362,18 +362,14 @@ pub fn seat(set: &mut Set, phase: f32, mix: f32) -> bool {
 
 /// The pilot's node matrices for a body that also rides a bike (V39): [`seat`]ed at the lean's
 /// `(phase, mix)` (V78), held on to the plane's `anchors` at full strength with both feet on, and the
-/// body's own pose, hold and feet put back afterwards, so the bike's rider takes up where they left
+/// body's own pose put back afterwards, so the bike's rider takes up where they left
 /// off when the player switches back. In the body's own space, which [`Biplane::pilot`] places in the
 /// world; the GPU draws them as they are, the software path skins them ([`crate::skin::skin`]).
 /// `None` if the rider's archive has no [`PILOT_CLIPS`].
 pub fn pilot_palette(body: &mut crate::rider::Body, anchors: &Anchors, (phase, mix): (f32, f32)) -> Option<Vec<M4>> {
-    let (pose, hold, feet) = (body.rig.set.pose.clone(), body.hold, body.feet);
-    body.hold = 1.0;
-    body.feet = Default::default();
-    let palette = seat(&mut body.rig.set, phase, mix).then(|| body.palette(Some(anchors)).0);
+    let pose = body.rig.set.pose.clone();
+    let palette = seat(&mut body.rig.set, phase, mix).then(|| body.seated_palette(anchors).0);
     body.rig.set.pose = pose;
-    body.hold = hold;
-    body.feet = feet;
     palette
 }
 

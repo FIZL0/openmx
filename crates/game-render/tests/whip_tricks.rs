@@ -6,11 +6,13 @@
 //! gesture slot, a trick pack's extra, a 360 — with the body and the chassis stepped the way the
 //! shell steps them, and measure the rider against the bike every frame.
 //!
-//! **V69:** a 360's fade back to the airborne row keeps the drawn hands on the bars.
+//! **V69:** a 360 fades back to the airborne row over the original's half second.
 //!
 //! **V98:** a No Footer started with the whip still on, and every other trick the same way.
 //!
-//! **V100:** a full whip alone keeps the drawn hands on the bars: the body leans in to them.
+//! **V100:** a full whip alone keeps the riding ragdoll's hands on the bars, and it leans in to them
+//! the original's way. What the shell draws of a riding body is that ragdoll (V63); the clips these
+//! rides pose are drawn only as they were written, but for a trick the bike has no clip for (MD41).
 
 use game_render::anim::PackClips;
 use game_render::chassis::grips;
@@ -143,11 +145,9 @@ struct Seen {
     /// The rider's two hand anchors as the clips posed them, and the chassis' two grips.
     hands: [V3; 2],
     grips: [V3; 2],
-    /// The two hand anchors as the shell draws them: the clip pose held on to the grips
-    /// ([`Body::palette`], which both renderers draw with) at the body's own hold.
+    /// The two hand anchors as [`Body::palette`] draws the clip: as it was written, or on the grips
+    /// in a trick the bike has no clip for.
     drawn: [V3; 2],
-    /// How hard the drawn rider holds on ([`Body::holds`]' hands): 1 while riding.
-    hold: f32,
     /// The rider's pelvis.
     pelvis: V3,
     /// The body is in a trick the bike has no clip for, or fading out of one ([`Body::bare`]).
@@ -230,7 +230,7 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let world = kit.body.rig.world();
         let g = grips(&kit.chassis);
-        let (drawn, _) = kit.body.palette(Some(&g));
+        let drawn = kit.body.palette(Some(&g));
         let bike = kit.chassis.world[root];
         let grip = |i: usize| into(&bike, g[2 + i].expect("a grip"));
         out.push(Seen {
@@ -240,7 +240,6 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
             hands: hands.map(|j| into(&bike, at(&world[j]))),
             grips: [grip(0), grip(1)],
             drawn: hands.map(|j| into(&bike, at(&drawn[j]))),
-            hold: kit.body.holds()[2].min(kit.body.holds()[3]),
             pelvis: into(&bike, at(&world[pelvis])),
             bare: kit.body.bare,
             axes: [(r.body.veh.phase.value.0, r.body.veh.mix.value.0), {
@@ -290,12 +289,9 @@ const FADE: usize = 21;
 /// in one frame, seven frames in (0.548 to 0.559): hence 0.015.
 const STEP: f32 = 0.015;
 
-/// How far a drawn hand may be off its grip through a 360 and its exit, any frame: a hundredth of
-/// a foot, which is the hold's own rounding. Measured (V69): 0.000 ft on every frame, where the
-/// clips alone take a hand up to 0.82 ft off on the exit's fade. The original's rider keeps both
-/// hands on the bar ends through the same exit while its body swings back onto the seat (PCSX2,
-/// MX vs. ATV Unleashed, M21's state and gesture, by eye).
-const SPIN_HELD: f32 = 0.01;
+/// How far off its grip a hand may be and still count as drawn on it: a hundredth of a foot, which is
+/// the limb solve's own rounding.
+const ON_THE_GRIP: f32 = 0.01;
 
 fn hands(trick: [bool; 3], extra: [bool; 2], stick: (f32, f32)) -> Controls {
     Controls { trick, stunt: trick.iter().any(|&b| b), extra, stick: (F(stick.0), F(stick.1)), ..Controls::default() }
@@ -305,7 +301,7 @@ fn hands(trick: [bool; 3], extra: [bool; 2], stick: (f32, f32)) -> Controls {
 /// its own clip for, one it has not, and a 360. Through every one of them the bike runs the state
 /// the body runs, and the rider sits on the bike where the same trick started square puts it, every
 /// frame, within [`APART`] — the pelvis over the seat and the hands where that trick has them,
-/// which for a clip that keeps them on is the grips. The 360 is [`a_360_keeps_the_hands_on_the_bars`].
+/// which for a clip that keeps them on is the grips. The 360 is [`a_360_fades_back_to_the_airborne_row`].
 #[test]
 fn a_whipped_trick_keeps_the_rider_on_the_bike() {
     let Some(first) = kit() else { return };
@@ -354,15 +350,15 @@ fn a_whipped_trick_keeps_the_rider_on_the_bike() {
 }
 
 /// **V69:** a 360 and its fade back to the airborne row, with MX vs. ATV's gesture (MD30: R1 held
-/// into the lip, the stick left then right on it, centred). The clips alone part the hands from the
+/// into the lip, the stick left then right on it, centred). The clips part the hands from the
 /// grips — 0.3 to 0.4 ft while the 360's clips play and about 0.44 on the exit's fade (MD248: the
 /// original's half second, linear; 0.82 on MD78's quarter-second smooth step), because each
 /// skeleton blends its own two poses and a blend of two poses with the hands on the bars is not a
-/// pose with the hands on the bars — and the drawn rider is held on: the body is riding through
-/// all of it ([`game_sim::rider_anim::Mode::Riding`], the 360 is no pose off the clip table), so
-/// the hold is full and the hands are drawn on the grips every frame, within [`SPIN_HELD`].
+/// pose with the hands on the bars. The body is riding through all of it
+/// ([`game_sim::rider_anim::Mode::Riding`], the 360 is no pose off the clip table), so what holds the
+/// drawn hands on is the riding ragdoll's pins.
 #[test]
-fn a_360_keeps_the_hands_on_the_bars() {
+fn a_360_fades_back_to_the_airborne_row() {
     let Some(mut kit) = kit() else { return };
     let r1 = hands([false, false, true], [false; 2], (0.0, 0.0));
     let left = hands([false, false, true], [false; 2], (-1.0, 0.0));
@@ -377,24 +373,19 @@ fn a_360_keeps_the_hands_on_the_bars() {
         .filter(|&k| spin[k].body == game_sim::vehicle_anim::AIR && spin[k - 1].body != game_sim::vehicle_anim::AIR)
         .collect();
     assert!(!exit.is_empty(), "the 360's clip never faded back to the airborne row before the landing at {down}");
-    let (mut clips, mut drawn) = ((0.0f32, 0usize), (0.0f32, 0usize));
+    let mut clips = (0.0f32, 0usize);
     for (k, s) in spin.iter().enumerate().take(down).skip(from) {
         assert_eq!(s.bike, s.body, "the 360 at {k}: the bike runs {} under a body in {}", s.bike, s.body);
-        assert_eq!(s.hold, 1.0, "the 360 at {k}: the drawn rider lets go of the bars (state {})", s.body);
         if s.off() > clips.0 {
             clips = (s.off(), k);
         }
-        if s.drawn_off() > drawn.0 {
-            drawn = (s.drawn_off(), k);
-        }
     }
-    println!("the 360: {} frames of threesixtyR from {from}, the exit's fade from {:?}, landing at {down}; the clips take a hand {:.2} ft off its grip at {}, the drawn rider {:.3} at {}",
-             turning.len(), exit, clips.0, clips.1, drawn.0, drawn.1);
-    // What the hold is holding against: the exit's blend parts the clips' hands from the bars.
+    println!("the 360: {} frames of threesixtyR from {from}, the exit's fade from {:?}, landing at {down}; the clips take a hand {:.2} ft off its grip at {}",
+             turning.len(), exit, clips.0, clips.1);
+    // The exit's blend parts the clips' hands from the bars.
     // MD248: the exit's fade is the original's half second, 30 frames here.
     assert!(clips.0 > 0.4 && exit.iter().any(|&e| (e..e + 30).contains(&clips.1)),
             "the clips' worst is no longer the exit's fade: {:.2} ft at {}", clips.0, clips.1);
-    assert!(drawn.0 <= SPIN_HELD, "the 360 drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
 }
 
 /// The stick for each of [`game_sim::trick::slot_of`]'s directions: up, down, left, right.
@@ -563,7 +554,7 @@ fn whipped_trick(t: usize) -> Whipped {
             worse(&mut w.past, apart, k);
         }
         // Where the square ride draws the hands on the grips: a no-hander's are off them on purpose.
-        if a.bare && b.drawn_off() <= SPIN_HELD {
+        if a.bare && b.drawn_off() <= ON_THE_GRIP {
             worse(&mut w.drawn, a.drawn_off() - b.drawn_off(), k);
         }
     }
@@ -633,13 +624,11 @@ fn a_360_taking_off_under_two_pi_plays_its_clip_twice() {
     assert!(turns[0] < 35.0 && (360.0..395.0).contains(&turns[1]));
 }
 
-/// One frame of [`whip_with_doll`]: the hands and pelvis as the clips pose them and as they are
-/// drawn, and the riding ragdoll's, all in the chassis root's frame.
+/// One frame of [`whip_with_doll`]: the hands and pelvis as the clips pose them, and the riding
+/// ragdoll's, all in the chassis root's frame.
 #[derive(Debug, Clone, Copy)]
 struct Doll {
     seen: Seen,
-    /// The drawn rider's pelvis ([`Body::palette`]), against the clips' [`Seen::pelvis`].
-    drawn_pelvis: V3,
     /// The riding ragdoll's pelvis held to this frame's grips and pose, and how far each of its hands
     /// ends off the grip it is held to.
     doll_pelvis: V3,
@@ -699,7 +688,7 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
         kit.chassis.ride(TICK, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
-        let (drawn, _) = kit.body.palette(Some(&g));
+        let drawn = kit.body.palette(Some(&g));
         let clip = kit.body.rig.world();
         let bike = kit.chassis.world[root];
         let grip = |i: usize| into(&bike, g[2 + i].expect("a grip"));
@@ -719,7 +708,6 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
                 hands: hand.map(|j| into(&bike, at(&clip[j]))),
                 grips: [grip(0), grip(1)],
                 drawn: hand.map(|j| into(&bike, at(&drawn[j]))),
-                hold: kit.body.holds()[2].min(kit.body.holds()[3]),
                 pelvis: into(&bike, at(&clip[pelvis])),
                 bare: kit.body.bare,
                 axes: [(r.body.veh.phase.value.0, r.body.veh.mix.value.0), (d.phase.value.0, d.mix.value.0)],
@@ -728,7 +716,6 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
                 spin_yaw: 0.0,
                 spin_start: 0.0,
             },
-            drawn_pelvis: into(&bike, at(&drawn[pelvis])),
             doll_pelvis: v3(f32::NAN, f32::NAN, f32::NAN),
             doll_off: [f32::NAN; 2],
         });
@@ -755,19 +742,14 @@ const DOLL_HELD: f32 = 0.18;
 /// 0.361 against 0.345. Stepped at 1/60 it rose 0.48 (C20's probe): the step, not the body.
 const RISE: f32 = 0.05;
 
-/// **V100:** a full whip alone keeps the drawn hands on the bars. The stick held hard right off the
+/// **V100:** a full whip alone keeps the hands on the bars. The stick held hard right off the
 /// flip ramp takes the airborne row's crossup to the sweep's end (phase 0) on the body and the bike
 /// alike, and there the two clips pose the rider's right shoulder past its arm's reach of the grip:
-/// the clips leave that hand 0.33 ft off, and the limb solve alone straightened the arm at it and drew
-/// it 0.32 ft off. The original does not stretch the arm, and its grips are the bike's: it draws the
-/// riding ragdoll, whose hand pins drag the body after the hands. Stepped beside the same ride (the
-/// port's ragdoll, proved tick for tick against the original, S110), its pelvis moves 0.9 ft off
-/// the clip's, across to the bike box's side, and its hands stay within 0.2 ft of the grips.
-/// The drawn rider leans in too ([`game_render::rider::lean_in`]): on every held tick of the flight
-/// the drawn hands are on the grips within [`SPIN_HELD`], and the body moves no further than the
-/// clips' shortfall. Which way it moves is not checked: C20 found it goes sideways where the
-/// original rises (B21). The ragdoll's own lean, averaged over the full whip, goes the original's
-/// way ([`C20_LEAN`], T4).
+/// the clips leave that hand 0.33 ft off. The original does not stretch the arm, and its grips are the
+/// bike's: it draws the riding ragdoll, whose hand pins drag the body after the hands, and so does the
+/// shell. Stepped beside the same ride (the port's ragdoll, proved tick for tick against the original,
+/// S110), its hands stay within [`DOLL_HELD`] of the grips, and its lean, averaged over the full
+/// whip, goes the original's way ([`C20_LEAN`], T4).
 #[test]
 fn a_full_whip_keeps_the_hands_on_the_bars() {
     let Some(mut kit) = kit() else { return };
@@ -778,40 +760,25 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
     let flight = WHIP_TICK..down - LANDING;
     let full: Vec<usize> = flight.clone().filter(|&k| ride[k].seen.axes[0].0 < FULL && ride[k].seen.axes[1].0 < FULL).collect();
     assert!(full.len() > 10, "the whip was all the way out {} ticks before the landing at {down}", full.len());
-    let (mut clips, mut drawn, mut moved) = ((0.0f32, 0usize), (0.0f32, 0usize), (0.0f32, 0usize));
-    let worse = |m: &mut (f32, usize), v: f32, k: usize| {
-        if v > m.0 {
-            *m = (v, k);
+    let mut clips = (0.0f32, 0usize);
+    for k in flight {
+        if ride[k].seen.off() > clips.0 {
+            clips = (ride[k].seen.off(), k);
         }
-    };
-    for k in flight.clone() {
-        let s = &ride[k].seen;
-        assert_eq!(s.hold, 1.0, "the whip at {k}: the drawn rider lets go of the bars");
-        worse(&mut clips, s.off(), k);
-        worse(&mut drawn, s.drawn_off(), k);
-        let shift = ride[k].drawn_pelvis.sub(s.pelvis).len();
-        assert!(shift <= s.off() + 1e-3, "the whip at {k}: the body moved {shift:.3} ft for a hand {:.3} off", s.off());
-        worse(&mut moved, shift, k);
     }
     let last = *full.last().unwrap();
     let d = &ride[last];
-    let (ours, doll) = (d.drawn_pelvis.sub(d.seen.pelvis), d.doll_pelvis.sub(d.seen.pelvis));
-    let cos = ours.dot(doll) / (ours.len() * doll.len());
-    println!("the full whip {}..={last}, landing at {down}: the clips take a hand {:.3} ft off its grip at {}, drawn {:.4} at {}, the body moved {:.3} at {}; \
-              at {last} the ragdoll's pelvis is {:.3} ft off the clips' (ours {:.3}, cosine {cos:.3}), its hands {:.3} {:.3} off the grips",
-             full[0], clips.0, clips.1, drawn.0, drawn.1, moved.0, moved.1, doll.len(), ours.len(), d.doll_off[0], d.doll_off[1]);
+    println!("the full whip {}..={last}, landing at {down}: the clips take a hand {:.3} ft off its grip at {}; \
+              at {last} the ragdoll's pelvis is {:.3} ft off the clips', its hands {:.3} {:.3} off the grips",
+             full[0], clips.0, clips.1, d.doll_pelvis.sub(d.seen.pelvis).len(), d.doll_off[0], d.doll_off[1]);
     // Since S253a the bike's crossup is the motion driver's, which has no lag, while the body's machine
     // lags it. So the clips part most while the whip comes in (0.658 ft at tick 112), before the full whip.
     assert!(clips.0 > 0.3, "the clips no longer take a hand off its grip in the whip: {:.3} ft at {}", clips.0, clips.1);
-    assert!(drawn.0 <= SPIN_HELD, "the full whip drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
-    // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips and its pelvis
-    // moves further than the stand-in's. Since S253 its target skeleton hangs under the bike's
-    // transform and not the root node (the body's root joint carries the crossup itself, -35° of roll
-    // here against the root node's -56°), so the hands are held against a target that no longer leans
-    // the crossup twice: 0.09 and 0.14 ft off, and the pelvis' move is no longer the stand-in's way
-    // (cosine -0.2, was over 0.75). C20 captured which way the original's goes (T4, below).
+    // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips. Since S253
+    // its target skeleton hangs under the bike's transform and not the root node (the body's root joint
+    // carries the crossup itself, -35° of roll here against the root node's -56°), so the hands are
+    // held against a target that no longer leans the crossup twice: 0.09 and 0.14 ft off.
     assert!(d.doll_off.iter().all(|&o| o < DOLL_HELD), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
-    assert!(doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?} (cosine {cos:.3})");
     // T4: the ragdoll's lean, averaged over the full whip as C20's is, goes the original's way.
     let held: Vec<V3> = full.iter().map(|&k| ride[k].doll_pelvis.sub(ride[k].seen.pelvis)).filter(|v| v.x.is_finite()).collect();
     assert_eq!(held.len(), full.len(), "the ragdoll was not placed on every full-whip tick");
@@ -826,9 +793,9 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
 /// **MD78:** MX vs. ATV's 360 throws the rider off the bike and back. `MX_ThreeSixtyR` swings the
 /// pelvis 1.2 ft out to the side and a foot down, the legs off the pegs, while `Bike_ThreeSixtyR`
 /// turns the bars; the original's film (V69) shows exactly that. The cross into the clip is a quarter
-/// second, so the swing is drawn at full weight: rider and bike play their 360 together, the body
-/// leaves the seat and the pegs mid-clip, the hands stay held, and the feet are back on the pegs once
-/// the airborne row has them again.
+/// second, so the swing is drawn at full weight: rider and bike play their 360 together and the body
+/// leaves the seat and the pegs mid-clip. Measured on the clip, which is what the riding ragdoll is
+/// pulled towards; what the clip leaves off the pegs after it is the pins' to hold (V63).
 #[test]
 fn a_360_throws_the_rider_off_the_pegs() {
     use game_render::rider::FOOT_ANCHORS;
@@ -850,8 +817,7 @@ fn a_360_throws_the_rider_off_the_pegs() {
     let feet = FOOT_ANCHORS.map(|n| skel.find(n).unwrap());
     let pelvis = skel.find("Pelvis").unwrap();
     let root = kit.chassis.nodes.root.unwrap();
-    // Per frame: the body's state, the bike's, the drawn pelvis and feet against the bike, the hands'
-    // hold.
+    // Per frame: the body's state, the bike's, the clip's pelvis and feet against the bike.
     let mut seen = Vec::new();
     for k in 0..FRAMES {
         if let Some((_, c)) = script.iter().find(|(at, _)| *at == k) {
@@ -865,11 +831,10 @@ fn a_360_throws_the_rider_off_the_pegs() {
         kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
-        let (drawn, _) = kit.body.palette(Some(&g));
+        let drawn = kit.body.palette(Some(&g));
         let bike = kit.chassis.world[root];
         let off = |i: usize| into(&bike, at(&drawn[feet[i]])).sub(into(&bike, g[i].unwrap())).len();
-        let holds = kit.body.holds();
-        seen.push((r.body.veh.state, kit.chassis.stance.driver.state, into(&bike, at(&drawn[pelvis])), off(0).max(off(1)), [holds[2], holds[3]]));
+        seen.push((r.body.veh.state, kit.chassis.stance.driver.state, into(&bike, at(&drawn[pelvis])), off(0).max(off(1))));
     }
     let spin: Vec<usize> = (0..FRAMES).filter(|&k| seen[k].0 == SPIN_RIGHT).collect();
     let (first, _) = (spin[0], spin[spin.len() - 1]);
@@ -880,8 +845,5 @@ fn a_360_throws_the_rider_off_the_pegs() {
     let lifted = spin.iter().map(|&k| seen[k].3).fold(0.0, f32::max);
     assert!(out.x.abs() > 0.8 && out.y < -0.5, "the pelvis swings {out:?} ft off the seat");
     assert!(lifted > 1.5, "the feet come {lifted} ft off the pegs");
-    assert!(spin.iter().all(|&k| seen[k].4 == [1.0, 1.0]), "the hands hold the bars all through it");
-    let back = (first..FRAMES).find(|&k| seen[k].0 == AIR).expect("the 360 hands back to the airborne row");
-    let settled = (back..FRAMES).take(30).map(|k| seen[k].3).last().unwrap();
-    assert!(settled < 0.05, "the feet {settled} ft off the pegs half a second after the 360");
+    assert!((first..FRAMES).any(|k| seen[k].0 == AIR), "the 360 hands back to the airborne row");
 }
