@@ -284,6 +284,15 @@ pub fn open_url(url: &str) -> Result<(), String> {
     .ok_or_else(|| format!("no browser opened {url}"))
 }
 
+/// The screen kept on while `on`, its timeout back to normal after (F83, `FLAG_KEEP_SCREEN_ON` on the
+/// activity's window, set on its own thread in the order asked). Any thread.
+pub fn keep_awake(on: bool) {
+    use winit::platform::android::activity::WindowManagerFlags as Flags;
+    let Some(app) = APP.get() else { return };
+    let (add, remove) = if on { (Flags::KEEP_SCREEN_ON, Flags::empty()) } else { (Flags::empty(), Flags::KEEP_SCREEN_ON) };
+    app.set_window_flags(add, remove);
+}
+
 /// Whether the activity is finishing (closed, swiped away) rather than destroyed to be made again.
 pub fn finishing() -> bool {
     call(jni_str!("isFinishing"), jni_sig!("()Z")).and_then(|v| v.z().ok()).unwrap_or(false)

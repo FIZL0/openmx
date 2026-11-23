@@ -17,8 +17,8 @@
 //! fades out while the game is played, and a swipe from an edge takes a second to reach the system.
 //! The touch pad ([`crate::ios::TOUCH`]) is drawn over the whole window, laid out from the same edges.
 //!
-//! The view controller is held the way [`openmx_ios::Holder`] says (M144, B694): either way up with
-//! the device, and landscape with the camera on the left while rotation lock is on, from the first
+//! The view controller is held the way [`openmx_ios::Holder`] says (M144, B694, F83): landscape, either
+//! side with the device, and with the camera on the left while rotation lock is on, from the first
 //! frame of a launch after one that ended with the lock held (the `rotation-lock` marker).
 
 use crate::aspect::{kept_insets, phone_frame, stretched};
@@ -157,7 +157,7 @@ impl Host {
         }
         let (device, gravity) = openmx_ios::device_turn();
         let now = self.started.elapsed().as_secs_f32();
-        if let Some(hold) = self.holder.step(now, device, gravity, size.0 > size.1) {
+        if let Some(hold) = self.holder.step(now, device, gravity) {
             println!("ios: holding {hold:?}");
             // The next launch starts as this one ends (opentennis 013ae90e).
             let mark = openmx_ios::rotation_lock_mark();

@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::keep_awake::{AWAKE, Awake, Keep};
 use crate::track_mods::{self, Json};
 
 /// The store: one public dataset repo (the user's, 2026-10-28).
@@ -721,7 +722,7 @@ struct Shared {
 #[derive(Default)]
 struct Jobs {
     running: usize,
-    queue: VecDeque<Entry>,
+    queue: VecDeque<(Entry, Keep)>,
     /// Every install queued or running, by [`Entry::key`].
     busy: Vec<String>,
     /// The browser's downloads under way: the key, the download's name, and its size.
@@ -737,6 +738,8 @@ pub struct Store {
     dir: PathBuf,
     mods: PathBuf,
     shared: Arc<Shared>,
+    /// F83: the phone's screen, kept awake by every install queued or running.
+    awake: &'static Awake,
     client: reqwest::Client,
 }
 
@@ -756,7 +759,7 @@ impl Store {
         let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).build().expect("the HTTP client");
         #[cfg(target_arch = "wasm32")]
         let client = reqwest::Client::new();
-        Store { base: base.trim_end_matches('/').to_string(), dir: dir.to_path_buf(), mods: mods.to_path_buf(), shared: Arc::default(), client }
+        Store { base: base.trim_end_matches('/').to_string(), dir: dir.to_path_buf(), mods: mods.to_path_buf(), shared: Arc::default(), awake: &AWAKE, client }
     }
 
     pub fn mods(&self) -> &Path {
@@ -1036,7 +1039,7 @@ impl Store {
             return;
         }
         j.busy.push(e.key());
-        j.queue.push_back(e.clone());
+        j.queue.push_back((e.clone(), self.awake.keep()));
         drop(j);
         self.send(Event::Progress(e.key(), 0.0, format!("Waiting to download {}", e.meta.name)));
         self.pump();
@@ -1054,7 +1057,7 @@ impl Store {
             if j.running >= PARALLEL {
                 return;
             }
-            let Some(e) = j.queue.pop_front() else { return };
+            let Some((e, keep)) = j.queue.pop_front() else { return };
             j.running += 1;
             drop(j);
             let s = self.clone();
@@ -1067,6 +1070,7 @@ impl Store {
                 j.running -= 1;
                 j.busy.retain(|k| *k != e.key());
                 drop(j);
+                drop(keep);
                 s.send(Event::Installed(e.key(), got));
             });
         }

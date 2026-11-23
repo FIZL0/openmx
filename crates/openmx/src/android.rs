@@ -223,6 +223,8 @@ const CD001: &[u8] = b"CD001";
 /// [`find_iso`] does not take until it is whole. A file that is not a disc image is refused.
 fn copy_in(mut file: std::fs::File, dir: &Path, done: &std::sync::atomic::AtomicU64) -> Result<(), String> {
     use std::io::Write;
+    // F83: a phone that locked itself would stop the copy
+    let _awake = crate::keep_awake::AWAKE.keep();
     let part = dir.join(format!("{PICKED}.part"));
     let mut out = std::fs::File::create(&part).map_err(|e| format!("Couldn't write the copy: {e}"))?;
     let mut buf = vec![0u8; 1 << 20];

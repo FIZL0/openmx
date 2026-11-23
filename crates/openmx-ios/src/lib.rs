@@ -2,7 +2,7 @@
 //! the app's Documents folder and the log in it, the crash reports a phone with no Mac attached has
 //! no other way to show, the memory iOS counts, the safe area, the sound out through an AudioQueue and its audio session (P296),
 //! the GameController framework's pads, their rumble and the phone's (P183, CoreHaptics), and the
-//! rotation lock's landscape hold.
+//! landscape hold, and auto-lock off while something downloads (F83).
 //!
 //! Every Objective-C and C call is here, behind safe functions, so `crates/openmx` goes on forbidding
 //! unsafe code. Only [`Hold`]'s decision, the deferred edges' log line ([`Gestures`]), the loop's [`Rest`] and the log's keeping ([`keep_previous_log`]) are built
